@@ -1,0 +1,18 @@
+[package]
+name = "nila-fx-pool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "USDC reserve, nIN mint/redeem, cash escrow skeleton (NilaFxPool port, Tranche 0)."
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+nila-common = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

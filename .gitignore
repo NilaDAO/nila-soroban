@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+.DS_Store
+.env
+.env.*
+!.env.example
+test_snapshots/
+.stellar
+/keys
+*.wasm
+!contracts/**/src/**
+Cargo.lock.bak
+*.zip

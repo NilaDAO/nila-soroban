@@ -1,0 +1,17 @@
+[package]
+name = "nila-math"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "U256-safe share-index, interest, and haircut math for the Nila facility (GenericFundMathLib port)."
+
+[lib]
+crate-type = ["rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

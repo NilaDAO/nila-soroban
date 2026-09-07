@@ -1,0 +1,22 @@
+[package]
+name = "nila-fund-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "nIN-only lending facility: deposits, tranches, loans, waterfall (GenericFundCore port)."
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+nila-math = { workspace = true }
+nila-common = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+nila-roles = { path = "../roles" }
+nila-membership = { path = "../membership" }
+nila-fund-viewer = { path = "../fund-viewer" }

@@ -1,0 +1,20 @@
+[package]
+name = "nila-fund-viewer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Union registry, borrower index, and read helpers (GenericFundViewer port)."
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+nila-math = { workspace = true }
+nila-common = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+nila-roles = { path = "../roles" }

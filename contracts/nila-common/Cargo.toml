@@ -1,0 +1,17 @@
+[package]
+name = "nila-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Shared types, TTL policy, and cross-contract client traits for Nila Soroban contracts."
+
+[lib]
+crate-type = ["rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
