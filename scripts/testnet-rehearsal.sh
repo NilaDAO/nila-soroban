@@ -80,7 +80,7 @@ log "NIN_SAC=$NIN"
 log "USDC_SAC=$USDC"
 
 ROLES=$(deploy_wasm nila_roles nila_roles --admin nila-admin)
-MEMBERSHIP=$(deploy_wasm nila_membership nila_membership --admin nila-admin --attester nila-admin)
+MEMBERSHIP=$(deploy_wasm nila_membership nila_membership --admin nila-admin --roles "$ROLES")
 VIEWER=$(deploy_wasm nila_fund_viewer nila_viewer --admin nila-admin)
 CORE=$(deploy_wasm nila_fund_core nila_core \
   --admin nila-admin \
@@ -97,8 +97,6 @@ FX=$(deploy_wasm nila_fx_pool nila_fx \
 log "wire contracts"
 stellar contract invoke --id "$VIEWER" --source nila-admin --network "$NETWORK" -- \
   set_core --core "$CORE"
-stellar contract invoke --id "$MEMBERSHIP" --source nila-admin --network "$NETWORK" -- \
-  set_roles --roles "$ROLES"
 stellar contract invoke --id "$FX" --source nila-admin --network "$NETWORK" -- \
   set_fund_core --fund_core "$CORE"
 stellar contract invoke --id "$CORE" --source nila-admin --network "$NETWORK" -- \
@@ -106,8 +104,11 @@ stellar contract invoke --id "$CORE" --source nila-admin --network "$NETWORK" --
 
 log "roles + reserve"
 stellar contract invoke --id "$ROLES" --source nila-admin --network "$NETWORK" -- \
-  set_oracle --account nila-oracle --enabled true
+  set_role --account nila-oracle --role 0 --enabled true
 stellar contract invoke --id "$ROLES" --source nila-admin --network "$NETWORK" -- \
+  set_role --account nila-admin --role 1 --enabled true
+# The union account appoints its leaders (D12). Single-key here; see c1-testnet.sh for 3 of 5.
+stellar contract invoke --id "$ROLES" --source nila-union --network "$NETWORK" -- \
   set_leader --union nila-union --account nila-leader --enabled true
 stellar contract invoke --id "$CORE" --source nila-admin --network "$NETWORK" -- \
   set_reserve_config \
@@ -127,6 +128,7 @@ stellar contract invoke --id "$MEMBERSHIP" --source nila-admin --network "$NETWO
     --union nila-union \
     --member nila-borrower \
     --leader nila-leader \
+    --attester nila-admin \
     --polygon_address "$POLY" \
     --plot_ids "$PLOTS" \
     --cycle 1
@@ -136,6 +138,7 @@ stellar contract invoke --id "$MEMBERSHIP" --source nila-admin --network "$NETWO
     --union nila-union \
     --member nila-junior \
     --leader nila-leader \
+    --attester nila-admin \
     --polygon_address "$POLY" \
     --plot_ids "$PLOTS" \
     --cycle 1

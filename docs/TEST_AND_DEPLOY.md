@@ -22,8 +22,8 @@ What the suite covers:
 | Crate | Assertions |
 | --- | --- |
 | `nila-math` | Share round-trip, index growth, haircut, 12%/yr interest, U256 large book, kinked rate curve |
-| `nila-roles` | Oracle/leader flags; unauthenticated setter fails |
-| `nila-membership` | Leader+attester confirm, revoke, plot cap |
+| `nila-roles` | Roles and leaders round trip; admin-only `set_role`; `set_leader` needs the union, not the admin |
+| `nila-membership` | Both signatures, roles-based attester, one union per member, set_plots, reattest, set_record, leader-only revoke |
 | `nila-fund-viewer` | Union registry, swap-remove fund types, borrower index |
 | `nila-fx-pool` | Escrow resolve by Core, remaining decrements |
 | `nila-fund-core` | Membership gates, junior-first funding, fast-draw + repay, fee split when below min rate, junior first-loss, 14-day unbond, pause, ₹10k cap, remove undrawn loan, cash conservation |

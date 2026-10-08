@@ -39,8 +39,8 @@ deploy() {
 ROLES=$(deploy nila_roles --admin "$SOURCE")
 echo "roles=$ROLES"
 
-ATTESTER="${ATTESTER:-$SOURCE}"
-MEMBERSHIP=$(deploy nila_membership --admin "$SOURCE" --attester "$ATTESTER")
+# The attester is a role in roles (set_role --role 1), not a membership constructor arg.
+MEMBERSHIP=$(deploy nila_membership --admin "$SOURCE" --roles "$ROLES")
 echo "membership=$MEMBERSHIP"
 
 VIEWER=$(deploy nila_fund_viewer --admin "$SOURCE")
@@ -67,8 +67,6 @@ echo "fx_pool=$FX"
 
 stellar contract invoke --id "$VIEWER" --source-account "$SOURCE" --network "$NETWORK" -- \
   set_core --core "$CORE"
-stellar contract invoke --id "$MEMBERSHIP" --source-account "$SOURCE" --network "$NETWORK" -- \
-  set_roles --roles "$ROLES"
 stellar contract invoke --id "$FX" --source-account "$SOURCE" --network "$NETWORK" -- \
   set_fund_core --fund_core "$CORE"
 stellar contract invoke --id "$CORE" --source-account "$SOURCE" --network "$NETWORK" -- \

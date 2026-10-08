@@ -10,8 +10,8 @@ MIT. Protocol 27 / `soroban-sdk` 27.0.2.
 | --- | --- |
 | `nila-math` | RAY index, U256 `mul_div`, haircut, simple interest (was `GenericFundMathLib`) |
 | `nila-common` | Shared types, TTL policy, cross-contract clients |
-| `nila-roles` | Oracle + per-union leader registry |
-| `nila-membership` | Leader + attester membership; replaces ERC-721 `balanceOf` |
+| `nila-roles` | One role list: oracle / attester / core (admin), leaders and treasurer / secretary per union (signed by the union account, D12) |
+| `nila-membership` | Leader + attester membership, plots, per-cycle reattest, title record hashes; replaces ERC-721 `balanceOf` |
 | `nila-fund-core` | Deposits, 14-day unbond, junior-first loans, waterfall, first-loss |
 | `nila-fund-viewer` | Union registry, borrower index |
 | `nila-fx-pool` | Tranche 0 skeleton: escrow + flattened `resolve_escrow_cash` |

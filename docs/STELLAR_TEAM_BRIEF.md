@@ -30,7 +30,7 @@ TAD §4.3 specifies six on-chain pieces: `fund_core`, `fund_viewer`, `fx_pool`, 
 | --- | --- | --- | --- |
 | `fund_core` | `nila-fund-core` → `nila_fund_core.wasm` | Ported. Deposits, 14-day unbond, junior-first loans, waterfall, first-loss, pause, cap, upgrade. | Core table: Direct / Adapt / Redesign as mapped. `drawLoanWithVoucher` is Redesign. `burnEscrowNin` is Drop. |
 | `fund_viewer` | `nila-fund-viewer` → `nila_fund_viewer.wasm` | Ported. Union registry, fund-type list (swap-remove), borrower index (cap 128). | Direct for registry + `on_loan_*`. `recoverVoucherSigner` Redesign. `recoverQuote1155Signer` Drop. |
-| `roles` | `nila-roles` → `nila_roles.wasm` | Ported. Oracle flag + per-union leader. | Direct (stored admin + `require_auth`). |
+| `roles` | `nila-roles` → `nila_roles.wasm` | Role list (oracle, attester, core) + per-union leaders and officers. | Admin for trust-wide roles; `union.require_auth()` (3 of 5 account signers, D12) for leaders and officers. |
 | `membership` | `nila-membership` → `nila_membership.wasm` | Ported. Leader + attester confirm; `is_member` / `plots_of`. Replaces ERC-721 `balanceOf`. | TAD §4.2 / §7 table “Land-title balanceOf gates → membership”. |
 | nIN | Classic asset `nIN:ADMIN` + SAC | Issued on testnet. 7 decimals, `AUTH_REQUIRED`. Not a custom contract. | Direct substitution of `NilaNIN` ERC-20. |
 | `fx_pool` | `nila-fx-pool` → `nila_fx_pool.wasm` | **Tranche 0 skeleton only.** Constructor, daily-cap storage, temporary escrow, `open_escrow`, flattened `resolve_escrow_cash`. | Full §7.1 FX table (mint/redeem, Reflector, cash-scan, order books) is **not** implemented. |
@@ -151,7 +151,7 @@ Repay submitted the 10 nIN principal. Accrued interest over ~10s at 12%/yr on 10
 ### On-chain (this rehearsal)
 
 - Deploy + wire of all five Wasm contracts and both SACs.
-- `roles.set_oracle` / `set_leader`; `membership.confirm_member` for borrower and junior LP.
+- `roles.set_role` (oracle, attester) / `set_leader` (signed by the union); `membership.confirm_member` for borrower and junior LP.
 - Classic-asset trustlines + SAC `mint` of nIN.
 - `deposit_junior` (25 nIN) and `deposit_senior` (75 nIN).
 - `draw_loan` with oracle + borrower auth, `fast_draw = true`, junior-first funding (10 nIN ≤ junior cash, so senior cash untouched).
@@ -165,8 +165,8 @@ Repay submitted the 10 nIN principal. Accrued interest over ~10s at 12%/yr on 10
 | Crate | Count | Assertions |
 | --- | --- | --- |
 | `nila-math` | 7 | Share round-trip, index growth, haircut, 12%/yr interest, U256 large book (₹8.2M × RAY), kinked rate curve, negative `mul_div` reject |
-| `nila-roles` | 2 | Oracle/leader flags; unauthenticated setter fails |
-| `nila-membership` | 2 | Leader+attester confirm, revoke, plot cap (max 32) |
+| `nila-roles` | 5 | Roles and leaders round trip; admin-only `set_role`; `set_leader` needs the union, not the admin |
+| `nila-membership` | 9 | Both signatures, roles-based attester, one union per member, set_plots, reattest, set_record, leader-only revoke, plot cap (max 32) |
 | `nila-fund-viewer` | 2 | Union registry, swap-remove fund types, borrower index |
 | `nila-fx-pool` | 1 | Escrow resolve by Core, remaining decrements |
 | `nila-fund-core` | 10 | Membership gates, junior-first funding, fast-draw + repay, fee split when below min rate, junior first-loss, 14-day unbond, pause, ₹10k cap, remove undrawn loan, cash conservation |
