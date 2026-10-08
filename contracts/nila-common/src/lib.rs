@@ -93,6 +93,8 @@ pub struct MemberRecord {
     pub plot_ids: Vec<u64>,
     pub cycle: u32,
     pub confirmed_ts: u64,
+    /// Last attestation: the confirm itself, a `set_plots` or a `reattest`.
+    pub attested_ts: u64,
     pub active: bool,
 }
 
@@ -103,10 +105,30 @@ pub trait MembershipTrait {
     fn plots_of(union: Address, account: Address) -> Vec<u64>;
 }
 
+/// Trust-wide roles in the roles contract, set by the admin (the trust's multisig, R75).
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum Role {
+    Oracle = 0,
+    Attester = 1,
+    Core = 2,
+}
+
+/// Officer roles inside one union, set by the union account (3 of 5, D12).
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum UnionRole {
+    Treasurer = 0,
+    Secretary = 1,
+}
+
 #[contractclient(name = "RolesClient")]
 pub trait RolesTrait {
     fn is_oracle(account: Address) -> bool;
     fn is_leader(union: Address, account: Address) -> bool;
+    fn has_role(account: Address, role: Role) -> bool;
 }
 
 #[contractclient(name = "ViewerClient")]

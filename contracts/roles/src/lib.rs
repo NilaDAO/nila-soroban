@@ -1,5 +1,7 @@
 #![no_std]
 
+pub use nila_common::{Role, UnionRole};
+
 use nila_common::bump_instance;
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contractmeta, contracttype, Address,
@@ -7,7 +9,10 @@ use soroban_sdk::{
 };
 
 contractmeta!(key = "binver", val = "0.1.0");
-contractmeta!(key = "desc", val = "Nila oracle/leader registry");
+contractmeta!(
+    key = "desc",
+    val = "Nila role registry: leaders, oracle, attester, core, union officers"
+);
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -22,8 +27,9 @@ pub enum Error {
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
-    Oracle(Address),
-    Leader(Address, Address), // (union, account)
+    Role(Address, Role),                    // (account, role) — trust-wide
+    Leader(Address, Address),               // (union, account)
+    UnionRole(Address, Address, UnionRole), // (union, account, role)
     PendingUpgrade,
     UpgradeDelay,
     UpgradeEta,
@@ -37,9 +43,21 @@ pub struct PendingUpgrade {
 }
 
 #[contractevent]
-pub struct OracleUpdated {
+pub struct RoleUpdated {
     #[topic]
     pub account: Address,
+    #[topic]
+    pub role: Role,
+    pub enabled: bool,
+}
+
+#[contractevent]
+pub struct UnionRoleUpdated {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub account: Address,
+    pub role: UnionRole,
     pub enabled: bool,
 }
 
@@ -76,6 +94,21 @@ fn require_admin(env: &Env) -> Result<Address, Error> {
     Ok(admin)
 }
 
+/// A revoked flag is removed rather than stored as false, so it costs no rent.
+fn store_flag(env: &Env, key: &DataKey, enabled: bool) {
+    let store = env.storage().persistent();
+    if enabled {
+        store.set(key, &true);
+        store.extend_ttl(key, nila_common::TTL_THRESHOLD, nila_common::TTL_BUMP);
+    } else {
+        store.remove(key);
+    }
+}
+
+fn read_flag(env: &Env, key: &DataKey) -> bool {
+    env.storage().persistent().get(key).unwrap_or(false)
+}
+
 #[contractimpl]
 impl RolesContract {
     pub fn __constructor(env: Env, admin: Address) {
@@ -91,34 +124,33 @@ impl RolesContract {
         Ok(())
     }
 
-    pub fn set_oracle(env: Env, account: Address, enabled: bool) -> Result<(), Error> {
+    /// Trust-wide role (oracle, attester, core). Admin only (R4, R75).
+    pub fn set_role(env: Env, account: Address, role: Role, enabled: bool) -> Result<(), Error> {
         require_admin(&env)?;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Oracle(account.clone()), &enabled);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Oracle(account.clone()),
-            nila_common::TTL_THRESHOLD,
-            nila_common::TTL_BUMP,
-        );
-        OracleUpdated { account, enabled }.publish(&env);
+        store_flag(&env, &DataKey::Role(account.clone(), role), enabled);
+        RoleUpdated {
+            account,
+            role,
+            enabled,
+        }
+        .publish(&env);
         bump_instance(&env);
         Ok(())
     }
 
+    /// Leaders of a union, all equal. Signed by the union account itself, whose
+    /// 5 signers / threshold 3 make `require_auth` the 3 of 5 (D12, R4, R5).
     pub fn set_leader(
         env: Env,
         union: Address,
         account: Address,
         enabled: bool,
     ) -> Result<(), Error> {
-        require_admin(&env)?;
-        let key = DataKey::Leader(union.clone(), account.clone());
-        env.storage().persistent().set(&key, &enabled);
-        env.storage().persistent().extend_ttl(
-            &key,
-            nila_common::TTL_THRESHOLD,
-            nila_common::TTL_BUMP,
+        union.require_auth();
+        store_flag(
+            &env,
+            &DataKey::Leader(union.clone(), account.clone()),
+            enabled,
         );
         LeaderUpdated {
             union,
@@ -130,18 +162,46 @@ impl RolesContract {
         Ok(())
     }
 
+    /// Union officers (treasurer, secretary). Signed by the union account (D12, R4).
+    pub fn set_union_role(
+        env: Env,
+        union: Address,
+        account: Address,
+        role: UnionRole,
+        enabled: bool,
+    ) -> Result<(), Error> {
+        union.require_auth();
+        store_flag(
+            &env,
+            &DataKey::UnionRole(union.clone(), account.clone(), role),
+            enabled,
+        );
+        UnionRoleUpdated {
+            union,
+            account,
+            role,
+            enabled,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    pub fn has_role(env: Env, account: Address, role: Role) -> bool {
+        read_flag(&env, &DataKey::Role(account, role))
+    }
+
+    pub fn has_union_role(env: Env, union: Address, account: Address, role: UnionRole) -> bool {
+        read_flag(&env, &DataKey::UnionRole(union, account, role))
+    }
+
+    /// Kept for fund_core's `RolesClient`; same as `has_role(account, Oracle)`.
     pub fn is_oracle(env: Env, account: Address) -> bool {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Oracle(account))
-            .unwrap_or(false)
+        read_flag(&env, &DataKey::Role(account, Role::Oracle))
     }
 
     pub fn is_leader(env: Env, union: Address, account: Address) -> bool {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Leader(union, account))
-            .unwrap_or(false)
+        read_flag(&env, &DataKey::Leader(union, account))
     }
 
     pub fn admin(env: Env) -> Address {

@@ -1,6 +1,9 @@
 #![no_std]
+// `confirm_member` carries both signers plus the entry (R1). The contract macros
+// generate client and spec items outside the impl, so the allow is crate-wide.
+#![allow(clippy::too_many_arguments)]
 
-use nila_common::{bump_instance, MemberRecord, RolesClient};
+use nila_common::{bump_instance, MemberRecord, Role, RolesClient};
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contractmeta, contracttype, vec, Address,
     BytesN, Env, Vec,
@@ -25,15 +28,27 @@ pub enum Error {
     TooManyPlots = 5,
     Inactive = 6,
     RolesNotSet = 7,
+    StaleCycle = 8,
 }
 
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
-    Attester,
     Roles,
     Member(Address, Address), // (union, account)
+    MemberUnion(Address),     // account -> union of her active entry
+    Record(u64),              // land title id -> record
+}
+
+/// Public record of one land title (X23): the record hash moves here from
+/// `NilaLandTitle.setRecordHash` (R71); the metadata hash drives the member list sync (R70).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TitleRecord {
+    pub record_hash: BytesN<32>,
+    pub metadata_hash: BytesN<32>,
+    pub updated_ts: u64,
 }
 
 #[contractevent]
@@ -54,6 +69,32 @@ pub struct MemberRevoked {
     pub member: Address,
 }
 
+#[contractevent]
+pub struct PlotsSet {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub member: Address,
+    pub plot_count: u32,
+}
+
+#[contractevent]
+pub struct MemberReattested {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub member: Address,
+    pub cycle: u32,
+}
+
+#[contractevent]
+pub struct RecordSet {
+    #[topic]
+    pub title_id: u64,
+    pub record_hash: BytesN<32>,
+    pub metadata_hash: BytesN<32>,
+}
+
 #[contract]
 pub struct MembershipContract;
 
@@ -67,11 +108,71 @@ fn require_admin(env: &Env) -> Result<Address, Error> {
     Ok(admin)
 }
 
+fn roles(env: &Env) -> Result<RolesClient<'_>, Error> {
+    let addr: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::Roles)
+        .ok_or(Error::RolesNotSet)?;
+    Ok(RolesClient::new(env, &addr))
+}
+
+fn require_leader(env: &Env, union: &Address, leader: &Address) -> Result<(), Error> {
+    leader.require_auth();
+    if !roles(env)?.is_leader(union, leader) {
+        return Err(Error::NotAuthorized);
+    }
+    Ok(())
+}
+
+/// The attester comes from the one role list in `roles` (R4), not a local slot.
+fn require_attester(env: &Env, attester: &Address) -> Result<(), Error> {
+    attester.require_auth();
+    if !roles(env)?.has_role(attester, &Role::Attester) {
+        return Err(Error::NotAuthorized);
+    }
+    Ok(())
+}
+
+fn check_plots(plot_ids: &Vec<u64>) -> Result<(), Error> {
+    if plot_ids.len() > MAX_PLOTS {
+        return Err(Error::TooManyPlots);
+    }
+    Ok(())
+}
+
+fn active_record(env: &Env, union: &Address, member: &Address) -> Result<MemberRecord, Error> {
+    let rec: MemberRecord = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Member(union.clone(), member.clone()))
+        .ok_or(Error::NotMember)?;
+    if !rec.active {
+        return Err(Error::Inactive);
+    }
+    Ok(rec)
+}
+
+fn save<V: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &DataKey, value: &V) {
+    env.storage().persistent().set(key, value);
+    env.storage()
+        .persistent()
+        .extend_ttl(key, nila_common::TTL_THRESHOLD, nila_common::TTL_BUMP);
+}
+
+fn save_record(env: &Env, rec: &MemberRecord) {
+    save(
+        env,
+        &DataKey::Member(rec.union.clone(), rec.member.clone()),
+        rec,
+    );
+}
+
 #[contractimpl]
 impl MembershipContract {
-    pub fn __constructor(env: Env, admin: Address, attester: Address) {
+    pub fn __constructor(env: Env, admin: Address, roles: Address) {
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::Attester, &attester);
+        env.storage().instance().set(&DataKey::Roles, &roles);
         bump_instance(&env);
     }
 
@@ -82,58 +183,41 @@ impl MembershipContract {
         Ok(())
     }
 
-    pub fn set_attester(env: Env, attester: Address) -> Result<(), Error> {
-        require_admin(&env)?;
-        env.storage().instance().set(&DataKey::Attester, &attester);
-        bump_instance(&env);
-        Ok(())
-    }
-
-    /// Two-signature confirmation: union leader + Nila attester.
+    /// Two-signature confirmation: a leader of the union + an attester (R1).
     /// The Polygon title enters as an attested fact, not a proof (TAD §4.2).
+    /// A member holds one active entry at a time; a revoked entry can be confirmed again.
     pub fn confirm_member(
         env: Env,
         union: Address,
         member: Address,
         leader: Address,
+        attester: Address,
         polygon_address: BytesN<20>,
         plot_ids: Vec<u64>,
         cycle: u32,
     ) -> Result<(), Error> {
-        if plot_ids.len() > MAX_PLOTS {
-            return Err(Error::TooManyPlots);
+        check_plots(&plot_ids)?;
+        require_leader(&env, &union, &leader)?;
+        require_attester(&env, &attester)?;
+
+        let union_key = DataKey::MemberUnion(member.clone());
+        if env.storage().persistent().has(&union_key) {
+            return Err(Error::AlreadyMember);
         }
 
-        leader.require_auth();
-        let attester: Address = env.storage().instance().get(&DataKey::Attester).unwrap();
-        attester.require_auth();
-
-        let roles_addr: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Roles)
-            .ok_or(Error::RolesNotSet)?;
-        let roles = RolesClient::new(&env, &roles_addr);
-        if !roles.is_leader(&union, &leader) {
-            return Err(Error::NotAuthorized);
-        }
-
+        let now = env.ledger().timestamp();
         let rec = MemberRecord {
             union: union.clone(),
             member: member.clone(),
             polygon_address,
             plot_ids: plot_ids.clone(),
             cycle,
-            confirmed_ts: env.ledger().timestamp(),
+            confirmed_ts: now,
+            attested_ts: now,
             active: true,
         };
-        let key = DataKey::Member(union.clone(), member.clone());
-        env.storage().persistent().set(&key, &rec);
-        env.storage().persistent().extend_ttl(
-            &key,
-            nila_common::TTL_THRESHOLD,
-            nila_common::TTL_BUMP,
-        );
+        save_record(&env, &rec);
+        save(&env, &union_key, &union);
 
         MemberConfirmed {
             union,
@@ -146,34 +230,100 @@ impl MembershipContract {
         Ok(())
     }
 
+    /// Plot list after a title burn (A5) or a union transfer. Attester only (R3).
+    pub fn set_plots(
+        env: Env,
+        union: Address,
+        member: Address,
+        attester: Address,
+        plot_ids: Vec<u64>,
+    ) -> Result<(), Error> {
+        check_plots(&plot_ids)?;
+        require_attester(&env, &attester)?;
+        let mut rec = active_record(&env, &union, &member)?;
+        rec.plot_ids = plot_ids.clone();
+        rec.attested_ts = env.ledger().timestamp();
+        save_record(&env, &rec);
+
+        PlotsSet {
+            union,
+            member,
+            plot_count: plot_ids.len(),
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// Per-cycle re-attestation (R1). The cycle only moves forward.
+    pub fn reattest(
+        env: Env,
+        union: Address,
+        member: Address,
+        attester: Address,
+        cycle: u32,
+    ) -> Result<(), Error> {
+        require_attester(&env, &attester)?;
+        let mut rec = active_record(&env, &union, &member)?;
+        if cycle <= rec.cycle {
+            return Err(Error::StaleCycle);
+        }
+        rec.cycle = cycle;
+        rec.attested_ts = env.ledger().timestamp();
+        save_record(&env, &rec);
+
+        MemberReattested {
+            union,
+            member,
+            cycle,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// Revoke by a leader of the union (R3). No admin override (R5).
     pub fn revoke_member(
         env: Env,
         union: Address,
         member: Address,
         leader: Address,
     ) -> Result<(), Error> {
-        leader.require_auth();
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        let roles_addr: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Roles)
-            .ok_or(Error::RolesNotSet)?;
-        let roles = RolesClient::new(&env, &roles_addr);
-        if leader != admin && !roles.is_leader(&union, &leader) {
-            return Err(Error::NotAuthorized);
-        }
-
-        let key = DataKey::Member(union.clone(), member.clone());
-        let mut rec: MemberRecord = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .ok_or(Error::NotMember)?;
+        require_leader(&env, &union, &leader)?;
+        let mut rec = active_record(&env, &union, &member)?;
         rec.active = false;
-        env.storage().persistent().set(&key, &rec);
+        save_record(&env, &rec);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::MemberUnion(member.clone()));
 
         MemberRevoked { union, member }.publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// Record and metadata hash of a land title (R70, R71). Attester only; readable by all (X23).
+    pub fn set_record(
+        env: Env,
+        title_id: u64,
+        attester: Address,
+        record_hash: BytesN<32>,
+        metadata_hash: BytesN<32>,
+    ) -> Result<(), Error> {
+        require_attester(&env, &attester)?;
+        let rec = TitleRecord {
+            record_hash: record_hash.clone(),
+            metadata_hash: metadata_hash.clone(),
+            updated_ts: env.ledger().timestamp(),
+        };
+        save(&env, &DataKey::Record(title_id), &rec);
+
+        RecordSet {
+            title_id,
+            record_hash,
+            metadata_hash,
+        }
+        .publish(&env);
         bump_instance(&env);
         Ok(())
     }
@@ -208,8 +358,19 @@ impl MembershipContract {
             .get(&DataKey::Member(union, account))
     }
 
-    pub fn attester(env: Env) -> Address {
-        env.storage().instance().get(&DataKey::Attester).unwrap()
+    /// Union of the account's active entry (R2).
+    pub fn union_of(env: Env, account: Address) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MemberUnion(account))
+    }
+
+    pub fn record_of(env: Env, title_id: u64) -> Option<TitleRecord> {
+        env.storage().persistent().get(&DataKey::Record(title_id))
+    }
+
+    pub fn roles(env: Env) -> Address {
+        env.storage().instance().get(&DataKey::Roles).unwrap()
     }
 }
 

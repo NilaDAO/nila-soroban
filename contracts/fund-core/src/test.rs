@@ -26,6 +26,7 @@ struct Fx {
     core_id: Address,
     nin: Address,
     membership_id: Address,
+    attester: Address,
 }
 
 impl Fx {
@@ -47,6 +48,7 @@ impl Fx {
             &self.union,
             member,
             &self.leader,
+            &self.attester,
             &BytesN::from_array(&self.env, &[0xAB; 20]),
             &vec![&self.env, 1u64],
             &1,
@@ -74,12 +76,11 @@ fn setup() -> Fx {
 
     let roles_id = env.register(RolesContract, (admin.clone(),));
     let roles = nila_roles::RolesContractClient::new(&env, &roles_id);
-    roles.set_oracle(&oracle, &true);
+    roles.set_role(&oracle, &nila_roles::Role::Oracle, &true);
+    roles.set_role(&attester, &nila_roles::Role::Attester, &true);
     roles.set_leader(&union, &leader, &true);
 
-    let membership_id = env.register(MembershipContract, (admin.clone(), attester.clone()));
-    let membership = nila_membership::MembershipContractClient::new(&env, &membership_id);
-    membership.set_roles(&roles_id);
+    let membership_id = env.register(MembershipContract, (admin.clone(), roles_id.clone()));
 
     let viewer_id = env.register(FundViewerContract, (admin.clone(),));
     let viewer = nila_fund_viewer::FundViewerContractClient::new(&env, &viewer_id);
@@ -109,6 +110,7 @@ fn setup() -> Fx {
         core_id,
         nin,
         membership_id,
+        attester,
     };
     fx.core()
         .set_reserve_config(&fx.admin, &fx.union, &0, &0, &false, &0);
