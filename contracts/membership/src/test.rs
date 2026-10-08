@@ -408,3 +408,43 @@ fn set_record_is_attester_only_and_public() {
     c.set_record(&9, &fx.attester, &record, &meta2);
     assert_eq!(c.record_of(&9).unwrap().metadata_hash, meta2);
 }
+
+#[test]
+fn leader_and_attester_must_be_two_keys() {
+    let fx = setup();
+    let member = Address::generate(&fx.env);
+    // The union appoints Nila's attester as a leader: still not two signatures.
+    fx.roles().set_leader(&fx.union, &fx.attester, &true);
+    let err = fx
+        .client()
+        .try_confirm_member(
+            &fx.union,
+            &member,
+            &fx.attester,
+            &fx.attester,
+            &fx.poly(),
+            &vec![&fx.env, 1u64],
+            &1,
+        )
+        .unwrap_err();
+    assert_eq!(err, Ok(Error::NotAuthorized));
+}
+
+#[test]
+fn union_index_lives_as_long_as_the_entry() {
+    use soroban_sdk::testutils::storage::Persistent as _;
+    let fx = setup();
+    let member = Address::generate(&fx.env);
+    fx.confirm(&member, &vec![&fx.env, 1u64]);
+    fx.env
+        .ledger()
+        .with_mut(|l| l.sequence_number += 100 * nila_common::DAY_IN_LEDGERS);
+    fx.client()
+        .set_plots(&fx.union, &member, &fx.attester, &vec![&fx.env, 2u64]);
+    fx.env.as_contract(&fx.id, || {
+        let s = fx.env.storage().persistent();
+        let rec_ttl = s.get_ttl(&DataKey::Member(fx.union.clone(), member.clone()));
+        let idx_ttl = s.get_ttl(&DataKey::MemberUnion(member.clone()));
+        assert_eq!(rec_ttl, idx_ttl);
+    });
+}

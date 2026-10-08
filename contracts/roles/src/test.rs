@@ -140,3 +140,26 @@ fn leaders_of_one_union_are_not_leaders_of_another() {
     assert!(client.is_leader(&union_a, &leader));
     assert!(!client.is_leader(&union_b, &leader));
 }
+
+#[test]
+fn reads_keep_a_leader_alive() {
+    use soroban_sdk::testutils::{storage::Persistent as _, Ledger};
+    let (env, _admin, client) = setup();
+    let union = Address::generate(&env);
+    let leader = Address::generate(&env);
+    client.set_leader(&union, &leader, &true);
+    // 100 days of reads only, then past the original 120-day TTL.
+    env.ledger()
+        .with_mut(|l| l.sequence_number += 100 * nila_common::DAY_IN_LEDGERS);
+    assert!(client.is_leader(&union, &leader));
+    env.ledger()
+        .with_mut(|l| l.sequence_number += 50 * nila_common::DAY_IN_LEDGERS);
+    assert!(client.is_leader(&union, &leader));
+    env.as_contract(&client.address, || {
+        let ttl = env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::Leader(union.clone(), leader.clone()));
+        assert!(ttl > 30 * nila_common::DAY_IN_LEDGERS);
+    });
+}

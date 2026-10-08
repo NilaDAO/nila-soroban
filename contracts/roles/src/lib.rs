@@ -105,8 +105,16 @@ fn store_flag(env: &Env, key: &DataKey, enabled: bool) {
     }
 }
 
+/// A set flag is extended on every read: a leader appointed once and only checked
+/// afterwards must not be archived after 120 days.
 fn read_flag(env: &Env, key: &DataKey) -> bool {
-    env.storage().persistent().get(key).unwrap_or(false)
+    let store = env.storage().persistent();
+    if store.has(key) {
+        store.extend_ttl(key, nila_common::TTL_THRESHOLD, nila_common::TTL_BUMP);
+        true
+    } else {
+        false
+    }
 }
 
 #[contractimpl]

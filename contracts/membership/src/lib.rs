@@ -98,16 +98,6 @@ pub struct RecordSet {
 #[contract]
 pub struct MembershipContract;
 
-fn require_admin(env: &Env) -> Result<Address, Error> {
-    let admin: Address = env
-        .storage()
-        .instance()
-        .get(&DataKey::Admin)
-        .ok_or(Error::NotAdmin)?;
-    admin.require_auth();
-    Ok(admin)
-}
-
 fn roles(env: &Env) -> Result<RolesClient<'_>, Error> {
     let addr: Address = env
         .storage()
@@ -160,12 +150,28 @@ fn save<V: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &DataKey
         .extend_ttl(key, nila_common::TTL_THRESHOLD, nila_common::TTL_BUMP);
 }
 
+/// Writes the entry and, while it is active, keeps the `MemberUnion` index alive with it.
 fn save_record(env: &Env, rec: &MemberRecord) {
     save(
         env,
         &DataKey::Member(rec.union.clone(), rec.member.clone()),
         rec,
     );
+    if rec.active {
+        save(env, &DataKey::MemberUnion(rec.member.clone()), &rec.union);
+    }
+}
+
+/// Reads keep live entries alive: a member who is only read (gated by fund_core) is
+/// never written again, and an archived entry would read as "not a member".
+fn bump(env: &Env, key: &DataKey) {
+    if env.storage().persistent().has(key) {
+        env.storage().persistent().extend_ttl(
+            key,
+            nila_common::TTL_THRESHOLD,
+            nila_common::TTL_BUMP,
+        );
+    }
 }
 
 #[contractimpl]
@@ -174,13 +180,6 @@ impl MembershipContract {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Roles, &roles);
         bump_instance(&env);
-    }
-
-    pub fn set_roles(env: Env, roles: Address) -> Result<(), Error> {
-        require_admin(&env)?;
-        env.storage().instance().set(&DataKey::Roles, &roles);
-        bump_instance(&env);
-        Ok(())
     }
 
     /// Two-signature confirmation: a leader of the union + an attester (R1).
@@ -197,6 +196,10 @@ impl MembershipContract {
         cycle: u32,
     ) -> Result<(), Error> {
         check_plots(&plot_ids)?;
+        // Two signatures means two keys: a leader who is also the attester is one.
+        if leader == attester {
+            return Err(Error::NotAuthorized);
+        }
         require_leader(&env, &union, &leader)?;
         require_attester(&env, &attester)?;
 
@@ -217,7 +220,6 @@ impl MembershipContract {
             active: true,
         };
         save_record(&env, &rec);
-        save(&env, &union_key, &union);
 
         MemberConfirmed {
             union,
@@ -255,7 +257,8 @@ impl MembershipContract {
         Ok(())
     }
 
-    /// Per-cycle re-attestation (R1). The cycle only moves forward.
+    /// Per-cycle re-attestation (R1). The cycle only moves forward; gaps are allowed
+    /// (a missed season), so a mistyped high cycle needs a revoke and re-confirm.
     pub fn reattest(
         env: Env,
         union: Address,
@@ -329,10 +332,9 @@ impl MembershipContract {
     }
 
     pub fn is_member(env: Env, union: Address, account: Address) -> bool {
-        let rec: Option<MemberRecord> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Member(union, account));
+        let key = DataKey::Member(union, account);
+        bump(&env, &key);
+        let rec: Option<MemberRecord> = env.storage().persistent().get(&key);
         rec.map(|r| r.active).unwrap_or(false)
     }
 
@@ -360,9 +362,9 @@ impl MembershipContract {
 
     /// Union of the account's active entry (R2).
     pub fn union_of(env: Env, account: Address) -> Option<Address> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::MemberUnion(account))
+        let key = DataKey::MemberUnion(account);
+        bump(&env, &key);
+        env.storage().persistent().get(&key)
     }
 
     pub fn record_of(env: Env, title_id: u64) -> Option<TitleRecord> {
