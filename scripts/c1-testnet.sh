@@ -2,6 +2,9 @@
 # Step C1 on Stellar testnet: nIN asset, roles with a 3-of-5 union account (D12), membership.
 # Usage: bash scripts/c1-testnet.sh        (testnet only; refuses any other network)
 #
+# Kept as the C1 record. It no longer runs on this branch: C2 replaced the membership list
+# with the land_title mirror (executive decision, 9 Oct). The C2 flow is scripts/c2-testnet.sh.
+#
 # Identities live in the stellar CLI config (~/.config/stellar), never in this repo, and are
 # never printed — only public addresses are. The nIN issuer is a throwaway testnet key; the
 # trust binds as issuer only at mainnet (D7, X14).

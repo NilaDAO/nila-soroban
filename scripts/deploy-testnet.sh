@@ -39,9 +39,9 @@ deploy() {
 ROLES=$(deploy nila_roles --admin "$SOURCE")
 echo "roles=$ROLES"
 
-# The attester is a role in roles (set_role --role 1), not a membership constructor arg.
-MEMBERSHIP=$(deploy nila_membership --admin "$SOURCE" --roles "$ROLES")
-echo "membership=$MEMBERSHIP"
+# Land titles mirrored from Polygon; holding one is membership. The attester is a role in roles.
+LAND_TITLE=$(deploy nila_land_title --admin "$SOURCE" --roles "$ROLES")
+echo "land_title=$LAND_TITLE"
 
 VIEWER=$(deploy nila_fund_viewer --admin "$SOURCE")
 echo "viewer=$VIEWER"
@@ -51,8 +51,7 @@ NIN="${NIN_SAC:?set NIN_SAC to the nIN Stellar Asset Contract address}"
 CORE=$(deploy nila_fund_core \
   --admin "$SOURCE" \
   --roles "$ROLES" \
-  --membership "$MEMBERSHIP" \
-  --viewer "$VIEWER" \
+  --land_title "$LAND_TITLE" \
   --nin_token "$NIN")
 echo "fund_core=$CORE"
 
@@ -65,17 +64,15 @@ FX=$(deploy nila_fx_pool \
   --daily_cap "$DAILY_CAP")
 echo "fx_pool=$FX"
 
-stellar contract invoke --id "$VIEWER" --source-account "$SOURCE" --network "$NETWORK" -- \
-  set_core --core "$CORE"
 stellar contract invoke --id "$FX" --source-account "$SOURCE" --network "$NETWORK" -- \
   set_fund_core --fund_core "$CORE"
 stellar contract invoke --id "$CORE" --source-account "$SOURCE" --network "$NETWORK" -- \
-  set_fx_pool --v "$FX"
+  set_fx_pool --fx_pool "$FX"
 
 mkdir -p "$ROOT/.stellar"
 cat > "$ROOT/.stellar/${NETWORK}-addresses.env" <<EOF
 ROLES=$ROLES
-MEMBERSHIP=$MEMBERSHIP
+LAND_TITLE=$LAND_TITLE
 VIEWER=$VIEWER
 FUND_CORE=$CORE
 FX_POOL=$FX

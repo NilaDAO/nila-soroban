@@ -3,30 +3,31 @@
 extern crate std;
 
 use super::*;
-use nila_fund_viewer::FundViewerContract;
-use nila_math::{NIN, RAY, YEAR};
-use nila_membership::MembershipContract;
+use nila_fx_pool::{FxPoolContract, FxPoolContractClient};
+use nila_land_title::{LandTitleContract, LandTitleContractClient};
+use nila_math::{NIN, YEAR};
 use nila_roles::RolesContract;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{StellarAssetClient, TokenClient},
-    vec, Address, BytesN, Env,
+    Address, BytesN, Env,
 };
+
+const T0: u64 = 1_700_000_000;
 
 struct Fx {
     env: Env,
-    admin: Address,
     oracle: Address,
     leader: Address,
     union: Address,
     borrower: Address,
-    junior_lp: Address,
-    senior_lp: Address,
-    loan_type: BytesN<32>,
+    neighbour: Address,
     core_id: Address,
+    fx_id: Address,
     nin: Address,
-    membership_id: Address,
+    titles_id: Address,
     attester: Address,
+    next_title: core::cell::Cell<u64>,
 }
 
 impl Fx {
@@ -38,28 +39,78 @@ impl Fx {
         TokenClient::new(&self.env, &self.nin)
     }
 
-    fn mint(&self, to: &Address, amount: i128) {
-        StellarAssetClient::new(&self.env, &self.nin).mint(to, &amount);
+    fn fx(&self) -> FxPoolContractClient<'_> {
+        FxPoolContractClient::new(&self.env, &self.fx_id)
     }
 
-    fn confirm(&self, member: &Address) {
-        let m = nila_membership::MembershipContractClient::new(&self.env, &self.membership_id);
-        m.confirm_member(
-            &self.union,
-            member,
-            &self.leader,
+    fn give_title(&self, who: &Address) {
+        let id = self.next_title.get();
+        self.next_title.set(id + 1);
+        LandTitleContractClient::new(&self.env, &self.titles_id).set_title(
+            &id,
             &self.attester,
+            who,
+            &self.union,
             &BytesN::from_array(&self.env, &[0xAB; 20]),
-            &vec![&self.env, 1u64],
-            &1,
+            &BytesN::from_array(&self.env, &[1; 32]),
+            &BytesN::from_array(&self.env, &[2; 32]),
         );
+    }
+
+    /// Cash-scan INVEST: fx_pool mints the nIN for her rupees and deposits it.
+    fn invest(&self, member: &Address, amount: i128) {
+        StellarAssetClient::new(&self.env, &self.nin).mint(&self.fx_id, &amount);
+        self.core().deposit_junior(&self.union, member, &amount);
+    }
+
+    /// Cash-scan REPAY: fx_pool mints the nIN for the rupees she brings and repays.
+    fn repay(&self, id: &BytesN<32>, amount: i128) -> bool {
+        StellarAssetClient::new(&self.env, &self.nin).mint(&self.fx_id, &amount);
+        self.core().repay_loan(&self.union, id, &amount)
+    }
+
+    fn draw(&self, id: &BytesN<32>, cash: i128) {
+        self.core()
+            .draw_loan(&self.union, &self.borrower, id, &cash, &0);
+    }
+
+    fn at(&self, ts: u64) {
+        self.env.ledger().set_timestamp(ts);
+    }
+
+    /// fund_core's nIN equals the pools plus the union's treasury and rainy day.
+    fn assert_conserved(&self) {
+        let c = self.core();
+        let books = c.get_junior_market(&self.union).cash
+            + c.get_senior_market(&self.union).cash
+            + c.union_treasury(&self.union)
+            + c.union_rainy_day(&self.union);
+        assert_eq!(self.token().balance(&self.core_id), books);
+    }
+}
+
+fn loan_id(env: &Env, b: u8) -> BytesN<32> {
+    BytesN::from_array(env, &[b; 32])
+}
+
+fn union_cfg() -> UnionConfig {
+    UnionConfig {
+        max_loan: 10_000 * NIN,
+        gate: 600 * NIN,
+        rate_bp: 1250,
+        treasury_fee_bp: 100,
+        rainy_fee_bp: 77,
+        safety_bp: 0,
+        safety_floor: 0,
+        hard_stop: false,
+        escrow_duration: 7 * 86_400,
     }
 }
 
 fn setup() -> Fx {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_700_000_000);
+    env.ledger().set_timestamp(T0);
 
     let admin = Address::generate(&env);
     let attester = Address::generate(&env);
@@ -67,9 +118,7 @@ fn setup() -> Fx {
     let leader = Address::generate(&env);
     let union = Address::generate(&env);
     let borrower = Address::generate(&env);
-    let junior_lp = Address::generate(&env);
-    let senior_lp = Address::generate(&env);
-    let loan_type = BytesN::from_array(&env, &[0x11; 32]);
+    let neighbour = Address::generate(&env);
 
     let sac = env.register_stellar_asset_contract_v2(admin.clone());
     let nin = sac.address();
@@ -80,338 +129,506 @@ fn setup() -> Fx {
     roles.set_role(&attester, &nila_roles::Role::Attester, &true);
     roles.set_leader(&union, &leader, &true);
 
-    let membership_id = env.register(MembershipContract, (admin.clone(), roles_id.clone()));
-
-    let viewer_id = env.register(FundViewerContract, (admin.clone(),));
-    let viewer = nila_fund_viewer::FundViewerContractClient::new(&env, &viewer_id);
-
+    let titles_id = env.register(LandTitleContract, (admin.clone(), roles_id.clone()));
     let core_id = env.register(
         FundCore,
-        (
-            admin.clone(),
-            roles_id.clone(),
-            membership_id.clone(),
-            viewer_id.clone(),
-            nin.clone(),
-        ),
+        (admin.clone(), roles_id, titles_id.clone(), nin.clone()),
     );
-    viewer.set_core(&core_id);
+    let usdc = Address::generate(&env);
+    let fx_id = env.register(
+        FxPoolContract,
+        (admin.clone(), usdc, nin.clone(), 25_000 * NIN),
+    );
+    FxPoolContractClient::new(&env, &fx_id).set_fund_core(&core_id);
 
     let fx = Fx {
         env,
-        admin,
         oracle,
         leader,
         union,
         borrower,
-        junior_lp,
-        senior_lp,
-        loan_type,
+        neighbour,
         core_id,
+        fx_id,
         nin,
-        membership_id,
+        titles_id,
         attester,
+        next_title: core::cell::Cell::new(1),
     };
-    fx.core()
-        .set_reserve_config(&fx.admin, &fx.union, &0, &0, &false, &0);
-    fx.confirm(&fx.borrower);
-    fx.confirm(&fx.junior_lp);
+    fx.core().set_fx_pool(&fx.fx_id);
+    fx.core().set_union_config(&fx.union, &union_cfg());
+    fx.give_title(&fx.borrower);
+    fx.give_title(&fx.neighbour);
     fx
 }
 
-fn draw(
-    fx: &Fx,
-    loan_id: &BytesN<32>,
-    amount: i128,
-    rate_bp: u32,
-    min_rate_bp: u32,
-    fast_draw: bool,
-    maturity_ts: u64,
-) {
-    fx.core().draw_loan(
-        &fx.borrower,
-        &fx.oracle,
-        &fx.union,
-        &DrawParams {
-            loan_id: loan_id.clone(),
-            loan_type: fx.loan_type.clone(),
-            amount,
-            rate_bp,
-            maturity_ts,
-            max_amount: amount,
-            min_rate_bp,
-            fast_draw,
-            escrow_id: 0,
-            sos_date: if fast_draw {
-                fx.env.ledger().timestamp()
-            } else {
-                0
-            },
-        },
-    );
-}
+#[test]
+fn draw_then_repay_with_interest_and_fees() {
+    let fx = setup();
+    let c = fx.core();
+    let id = loan_id(&fx.env, 1);
+    fx.invest(&fx.borrower, 1_000 * NIN);
+    fx.invest(&fx.neighbour, 1_000 * NIN);
 
-fn seed_liquidity(fx: &Fx, junior: i128, senior: i128) {
-    if junior > 0 {
-        fx.mint(&fx.junior_lp, junior);
-        fx.core()
-            .deposit_junior(&fx.junior_lp, &fx.union, &fx.loan_type, &junior);
-    }
-    if senior > 0 {
-        fx.mint(&fx.senior_lp, senior);
-        fx.core().deposit_senior(&fx.senior_lp, &fx.union, &senior);
-    }
+    fx.draw(&id, 500 * NIN);
+    // D9: the leader hands her rupees; the loan's nIN is burned, none reaches her wallet.
+    assert_eq!(fx.token().balance(&fx.borrower), 0);
+    assert_eq!(fx.token().balance(&fx.core_id), 1_500 * NIN);
+    assert_eq!(c.get_junior_market(&fx.union).cash, 1_500 * NIN);
+    assert_eq!(c.union_borrows(&fx.union), 500 * NIN);
+    assert_eq!(c.loans_of(&fx.union, &fx.borrower).len(), 1);
+    fx.assert_conserved();
+
+    fx.at(T0 + YEAR / 2);
+    let interest = 500 * NIN * 1250 / 10_000 / 2;
+    // Overpaying takes only what is owed.
+    assert!(fx.repay(&id, 600 * NIN));
+    assert_eq!(
+        fx.token().balance(&fx.fx_id),
+        600 * NIN - 500 * NIN - interest
+    );
+    let ln = c.get_loan(&fx.union, &id).unwrap();
+    assert!(ln.closed && !ln.defaulted);
+    assert_eq!(ln.interest_paid, interest);
+    assert_eq!(c.union_treasury(&fx.union), interest / 100);
+    assert_eq!(c.union_rainy_day(&fx.union), interest * 77 / 10_000);
+    assert_eq!(c.union_borrows(&fx.union), 0);
+    fx.assert_conserved();
+
+    // The net interest is shared by both investors through the share value.
+    let p = c.position(&fx.union, &fx.neighbour);
+    let net = interest - interest / 100 - interest * 77 / 10_000;
+    assert!((p.earned - net / 2).abs() <= 1);
+    assert_eq!(p.locked, 0);
 }
 
 #[test]
-fn deposit_gates() {
+fn draw_needs_only_the_member_no_oracle() {
     let fx = setup();
-    fx.mint(&fx.senior_lp, 10 * NIN);
-    fx.core()
-        .deposit_senior(&fx.senior_lp, &fx.union, &(10 * NIN));
-    assert_eq!(fx.core().get_senior_market(&fx.union).cash, 10 * NIN);
+    fx.invest(&fx.borrower, 1_000 * NIN);
+    fx.draw(&loan_id(&fx.env, 1), 100 * NIN);
+    let auths = fx.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, fx.borrower);
+}
 
-    // member cannot be senior
-    fx.mint(&fx.junior_lp, 5 * NIN);
-    let err = fx
-        .core()
-        .try_deposit_senior(&fx.junior_lp, &fx.union, &(5 * NIN))
-        .unwrap_err();
-    assert_eq!(err, Ok(Error::NftForbidden));
+#[test]
+fn draw_checks_title_gate_cap_and_cash() {
+    let fx = setup();
+    let c = fx.core();
+    let stranger = Address::generate(&fx.env);
+    fx.invest(&fx.borrower, 599 * NIN);
+    let id = loan_id(&fx.env, 1);
 
-    // non-member cannot be junior
-    let err = fx
-        .core()
-        .try_deposit_junior(&fx.senior_lp, &fx.union, &fx.loan_type, &NIN)
+    let err = c
+        .try_draw_loan(&fx.union, &stranger, &id, &(10 * NIN), &0)
         .unwrap_err();
     assert_eq!(err, Ok(Error::NftRequired));
-}
-
-#[test]
-fn full_loan_lifecycle_fast_draw_and_repay() {
-    let fx = setup();
-    let junior = 250 * NIN;
-    let senior = 750 * NIN;
-    seed_liquidity(&fx, junior, senior);
-
-    let amount = 100 * NIN;
-    let loan_id = BytesN::from_array(&fx.env, &[0x42; 32]);
-    draw(
-        &fx,
-        &loan_id,
-        amount,
-        1_200,
-        1_000,
-        true,
-        fx.env.ledger().timestamp() + YEAR,
-    );
-
-    assert_eq!(fx.token().balance(&fx.borrower), amount);
-    let jm = fx.core().get_junior_market(&fx.union, &fx.loan_type);
-    let sm = fx.core().get_senior_market(&fx.union);
-    assert_eq!(jm.cash, junior - amount); // junior-first
-    assert_eq!(sm.cash, senior);
-    assert_eq!(fx.core().union_borrows(&fx.union), amount);
-
-    // accrue 30 days at 12%
-    fx.env
-        .ledger()
-        .set_timestamp(fx.env.ledger().timestamp() + 30 * 24 * 60 * 60);
-    let interest = nila_math::accrued_interest(&fx.env, amount, 1_200, 30 * 24 * 60 * 60).unwrap();
-    let repay = amount + interest;
-    fx.mint(&fx.borrower, interest);
-    let fully = fx
-        .core()
-        .repay_loan(&fx.borrower, &fx.union, &loan_id, &repay);
-    assert!(fully);
-    assert_eq!(fx.core().union_borrows(&fx.union), 0);
-
-    let ln = fx.core().get_loan(&fx.union, &loan_id).unwrap();
-    assert!(ln.liquidated);
-    assert_eq!(ln.principal_paid, amount);
-
-    // fees: lower_rate true because rate 1200 >= min 1000 → skip fees
-    assert_eq!(fx.core().union_treasury(&fx.union), 0);
-
-    // cash returned to junior (funded 100% junior)
-    let jm2 = fx.core().get_junior_market(&fx.union, &fx.loan_type);
-    assert_eq!(jm2.cash, junior + interest);
-}
-
-#[test]
-fn interest_fees_when_below_min_rate() {
-    let fx = setup();
-    seed_liquidity(&fx, 200 * NIN, 200 * NIN);
-    let amount = 50 * NIN;
-    let loan_id = BytesN::from_array(&fx.env, &[0x43; 32]);
-    // rate 800 < min 1000 → fees apply; fast_draw requires rate >= min, so manual accept
-    draw(&fx, &loan_id, amount, 800, 1_000, false, 0);
-    assert_eq!(fx.token().balance(&fx.borrower), 0);
-    fx.core()
-        .accept_loan(&fx.leader, &fx.union, &loan_id, &0u64);
-    assert_eq!(fx.token().balance(&fx.borrower), amount);
-
-    fx.env
-        .ledger()
-        .set_timestamp(fx.env.ledger().timestamp() + YEAR);
-    let interest = nila_math::accrued_interest(&fx.env, amount, 800, YEAR).unwrap();
-    fx.mint(&fx.borrower, interest);
-    fx.core()
-        .repay_loan(&fx.borrower, &fx.union, &loan_id, &(amount + interest));
-
-    let expected_treasury = interest * 100 / 10_000;
-    let expected_rainy = interest * 200 / 10_000;
-    assert_eq!(fx.core().union_treasury(&fx.union), expected_treasury);
-    assert_eq!(fx.core().union_rainy_day(&fx.union), expected_rainy);
-}
-
-#[test]
-fn junior_first_loss_on_default() {
-    let fx = setup();
-    seed_liquidity(&fx, 100 * NIN, 400 * NIN);
-    let amount = 80 * NIN;
-    let loan_id = BytesN::from_array(&fx.env, &[0x44; 32]);
-    draw(&fx, &loan_id, amount, 1_200, 1_000, true, 0);
-    fx.core().mark_default(&fx.oracle, &fx.union, &loan_id);
-
-    let jm = fx.core().get_junior_market(&fx.union, &fx.loan_type);
-    // junior underlying haircut by 80; junior had 100
-    let under = nila_math::to_underlying(&fx.env, jm.total_shares, jm.index).unwrap();
-    assert_eq!(under, 20 * NIN);
-
-    let sm = fx.core().get_senior_market(&fx.union);
-    assert_eq!(sm.index, RAY); // senior untouched
-}
-
-#[test]
-fn senior_unbond_14_day_gate() {
-    let fx = setup();
-    seed_liquidity(&fx, 0, 50 * NIN);
-    let shares = fx
-        .core()
-        .get_investor_senior(&fx.union, &fx.senior_lp)
-        .shares;
-    fx.core()
-        .request_unbond_senior(&fx.senior_lp, &fx.union, &shares);
-
-    let err = fx
-        .core()
-        .try_claim_senior(&fx.senior_lp, &fx.union, &0)
+    // R26: 600 nIN invested before any crop share cash.
+    let err = c
+        .try_draw_loan(&fx.union, &fx.borrower, &id, &(10 * NIN), &0)
         .unwrap_err();
-    assert_eq!(err, Ok(Error::NothingToClaim));
+    assert_eq!(err, Ok(Error::BelowGate));
 
-    fx.env
-        .ledger()
-        .set_timestamp(fx.env.ledger().timestamp() + 14 * 24 * 60 * 60);
-    fx.core().claim_senior(&fx.senior_lp, &fx.union, &0);
-    assert_eq!(fx.token().balance(&fx.senior_lp), 50 * NIN);
-    assert_eq!(fx.core().get_senior_market(&fx.union).total_shares, 0);
-}
-
-#[test]
-fn junior_unbond_needs_idle_or_maturity() {
-    let fx = setup();
-    seed_liquidity(&fx, 40 * NIN, 0);
-    let shares = fx
-        .core()
-        .get_investor_junior(&fx.union, &fx.loan_type, &fx.junior_lp)
-        .shares;
-    fx.core()
-        .request_unbond_junior(&fx.junior_lp, &fx.union, &fx.loan_type, &shares);
-
-    fx.env
-        .ledger()
-        .set_timestamp(fx.env.ledger().timestamp() + 14 * 24 * 60 * 60);
-    // idle cash covers the snap and reserve (floor 0)
-    fx.core()
-        .claim_junior(&fx.junior_lp, &fx.union, &fx.loan_type, &0);
-    assert_eq!(fx.token().balance(&fx.junior_lp), 40 * NIN);
-}
-
-#[test]
-fn zero_and_pause() {
-    let fx = setup();
-    let err = fx
-        .core()
-        .try_deposit_senior(&fx.senior_lp, &fx.union, &0)
-        .unwrap_err();
-    assert_eq!(err, Ok(Error::AmountZero));
-
-    fx.core().pause(&fx.admin);
-    fx.mint(&fx.senior_lp, NIN);
-    let err = fx
-        .core()
-        .try_deposit_senior(&fx.senior_lp, &fx.union, &NIN)
-        .unwrap_err();
-    assert_eq!(err, Ok(Error::Paused));
-    fx.core().unpause(&fx.admin);
-    fx.core().deposit_senior(&fx.senior_lp, &fx.union, &NIN);
-}
-
-#[test]
-fn per_loan_cap() {
-    let fx = setup();
-    seed_liquidity(&fx, 20_000 * NIN, 0);
-    fx.core().set_per_loan_cap(&(10_000 * NIN));
-    let loan_id = BytesN::from_array(&fx.env, &[0x45; 32]);
-    let amount = 10_001 * NIN;
-    let err = fx
-        .core()
-        .try_draw_loan(
-            &fx.borrower,
-            &fx.oracle,
-            &fx.union,
-            &DrawParams {
-                loan_id: loan_id.clone(),
-                loan_type: fx.loan_type.clone(),
-                amount,
-                rate_bp: 1_200,
-                maturity_ts: 0,
-                max_amount: amount,
-                min_rate_bp: 1_000,
-                fast_draw: true,
-                escrow_id: 0,
-                sos_date: 0,
-            },
-        )
+    fx.invest(&fx.borrower, NIN);
+    fx.invest(&fx.neighbour, 20_000 * NIN);
+    // R34: ₹10,000 per loan.
+    let err = c
+        .try_draw_loan(&fx.union, &fx.borrower, &id, &(10_000 * NIN + 1), &0)
         .unwrap_err();
     assert_eq!(err, Ok(Error::CapExceeded));
+    fx.draw(&id, 10_000 * NIN);
+    let err = c
+        .try_draw_loan(&fx.union, &fx.borrower, &id, &NIN, &0)
+        .unwrap_err();
+    assert_eq!(err, Ok(Error::LoanExists));
+
+    // Cash comes from the junior pool only.
+    let other = setup();
+    other.invest(&other.borrower, 600 * NIN);
+    let err = other
+        .core()
+        .try_draw_loan(
+            &other.union,
+            &other.borrower,
+            &loan_id(&other.env, 1),
+            &(601 * NIN),
+            &0,
+        )
+        .unwrap_err();
+    assert_eq!(err, Ok(Error::InsufficientCash));
 }
 
 #[test]
-fn remove_undrawn_loan_returns_cash() {
+fn money_comes_in_only_through_fx_pool() {
     let fx = setup();
-    seed_liquidity(&fx, 80 * NIN, 20 * NIN);
-    let loan_id = BytesN::from_array(&fx.env, &[0x46; 32]);
-    draw(&fx, &loan_id, 50 * NIN, 800, 1_000, false, 0);
-    let cash_before = fx.core().get_junior_market(&fx.union, &fx.loan_type).cash
-        + fx.core().get_senior_market(&fx.union).cash;
-    fx.core().remove_loan(&fx.leader, &fx.union, &loan_id);
-    let cash_after = fx.core().get_junior_market(&fx.union, &fx.loan_type).cash
-        + fx.core().get_senior_market(&fx.union).cash;
-    assert_eq!(cash_after, cash_before + 50 * NIN);
-    assert!(fx.core().get_loan(&fx.union, &loan_id).is_none());
+    fx.invest(&fx.borrower, 1_000 * NIN);
+    let auths = fx.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, fx.fx_id);
+
+    // No fx_pool configured: nothing can come in.
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let roles = env.register(RolesContract, (admin.clone(),));
+    let titles = env.register(LandTitleContract, (admin.clone(), roles.clone()));
+    let nin = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let core = env.register(FundCore, (admin, roles, titles, nin));
+    let c = FundCoreClient::new(&env, &core);
+    let member = Address::generate(&env);
+    let union = Address::generate(&env);
+    assert_eq!(
+        c.try_repay_loan(&union, &loan_id(&env, 1), &NIN)
+            .unwrap_err(),
+        Ok(Error::NotFxPool)
+    );
+    assert!(c.try_deposit_junior(&union, &member, &NIN).is_err());
 }
 
 #[test]
-fn cash_conservation_across_deposit_draw_repay() {
+fn deposits_need_a_title_and_senior_rejects_members() {
     let fx = setup();
-    let j = 300 * NIN;
-    let s = 200 * NIN;
-    seed_liquidity(&fx, j, s);
-    let amount = 120 * NIN;
-    let loan_id = BytesN::from_array(&fx.env, &[0x47; 32]);
-    draw(&fx, &loan_id, amount, 1_200, 1_000, true, 0);
-    let markets = fx.core().get_junior_market(&fx.union, &fx.loan_type).cash
-        + fx.core().get_senior_market(&fx.union).cash;
-    let held = fx.token().balance(&fx.core_id);
-    assert_eq!(held, markets); // disbursed amount left the contract
-    assert_eq!(markets + amount, j + s);
+    let c = fx.core();
+    let stranger = Address::generate(&fx.env);
+    assert_eq!(
+        c.try_deposit_junior(&fx.union, &stranger, &NIN)
+            .unwrap_err(),
+        Ok(Error::NftRequired)
+    );
+    assert_eq!(
+        c.try_deposit_senior(&fx.union, &fx.borrower, &NIN)
+            .unwrap_err(),
+        Ok(Error::NftForbidden)
+    );
+}
 
-    fx.core()
-        .repay_loan(&fx.borrower, &fx.union, &loan_id, &amount);
-    let markets2 = fx.core().get_junior_market(&fx.union, &fx.loan_type).cash
-        + fx.core().get_senior_market(&fx.union).cash;
-    assert_eq!(markets2, j + s);
-    assert_eq!(fx.token().balance(&fx.core_id), j + s);
+#[test]
+fn lock_holds_what_she_owes_and_frees_with_repayment() {
+    let fx = setup();
+    let c = fx.core();
+    let id = loan_id(&fx.env, 1);
+    fx.invest(&fx.borrower, 1_000 * NIN);
+    fx.invest(&fx.neighbour, 1_000 * NIN);
+    fx.draw(&id, 800 * NIN);
+
+    let p = c.position(&fx.union, &fx.borrower);
+    assert_eq!(p.invested, 1_000 * NIN);
+    assert_eq!(p.locked, 800 * NIN);
+    assert_eq!(p.free, 200 * NIN);
+    // Shares are 1:1 with nIN before any interest.
+    assert_eq!(
+        c.try_request_unbond_junior(&fx.union, &fx.borrower, &(201 * NIN))
+            .unwrap_err(),
+        Ok(Error::BadShares)
+    );
+    c.request_unbond_junior(&fx.union, &fx.borrower, &(200 * NIN));
+
+    // Half repaid at once: half the lock frees (no interest yet).
+    fx.repay(&id, 400 * NIN);
+    let p = c.position(&fx.union, &fx.borrower);
+    assert_eq!(p.locked, 400 * NIN);
+    assert_eq!(p.free, 400 * NIN);
+
+    // Interest grows the lock.
+    fx.at(T0 + YEAR);
+    let p = c.position(&fx.union, &fx.borrower);
+    assert_eq!(p.locked, 400 * NIN + 400 * NIN * 1250 / 10_000);
+}
+
+#[test]
+fn unbond_claim_after_14_days_pays_yield_once() {
+    let fx = setup();
+    let c = fx.core();
+    let id = loan_id(&fx.env, 1);
+    fx.invest(&fx.borrower, 1_000 * NIN);
+    fx.invest(&fx.neighbour, 1_000 * NIN);
+    fx.draw(&id, 1_000 * NIN);
+    fx.at(T0 + YEAR);
+    fx.repay(&id, 1_125 * NIN);
+
+    c.request_unbond_junior(&fx.union, &fx.neighbour, &(1_000 * NIN));
+    assert_eq!(
+        c.try_claim_junior(&fx.union, &fx.neighbour, &0)
+            .unwrap_err(),
+        Ok(Error::NotEligibleMaturity)
+    );
+    fx.at(T0 + YEAR + 14 * 86_400);
+    c.claim_junior(&fx.union, &fx.neighbour, &0);
+    c.request_unbond_junior(&fx.union, &fx.borrower, &(1_000 * NIN));
+    fx.at(T0 + YEAR + 28 * 86_400);
+    c.claim_junior(&fx.union, &fx.borrower, &0);
+
+    // Everything paid out: only the fees (and rounding dust) stay behind.
+    let interest = 125 * NIN;
+    let fees = interest / 100 + interest * 77 / 10_000;
+    let paid = fx.token().balance(&fx.neighbour) + fx.token().balance(&fx.borrower);
+    assert!((paid - (2_000 * NIN + interest - fees)).abs() <= 2);
+    assert!(fx.token().balance(&fx.core_id) - fees <= 2);
+}
+
+#[test]
+fn no_end_of_season_means_no_overdue_and_no_default() {
+    let fx = setup();
+    let c = fx.core();
+    let id = loan_id(&fx.env, 1);
+    fx.invest(&fx.borrower, 1_000 * NIN);
+    fx.draw(&id, 500 * NIN);
+    fx.at(T0 + 5 * YEAR);
+    assert_eq!(
+        c.try_mark_default(&fx.union, &id).unwrap_err(),
+        Ok(Error::NoMaturity)
+    );
+    assert_eq!(
+        c.try_flag_overdue(&fx.union, &id).unwrap_err(),
+        Ok(Error::NoMaturity)
+    );
+    assert_eq!(c.due_date(&fx.union, &id), None);
+}
+
+#[test]
+fn maturity_is_the_oracles_fact_in_the_past() {
+    let fx = setup();
+    let c = fx.core();
+    let id = loan_id(&fx.env, 1);
+    fx.invest(&fx.borrower, 1_000 * NIN);
+    fx.draw(&id, 500 * NIN);
+    fx.at(T0 + 60 * DAY);
+    assert_eq!(
+        c.try_report_maturity(&fx.leader, &fx.union, &id, &(T0 + 50 * DAY))
+            .unwrap_err(),
+        Ok(Error::NotOracle)
+    );
+    assert_eq!(
+        c.try_report_maturity(&fx.oracle, &fx.union, &id, &(T0 + 61 * DAY))
+            .unwrap_err(),
+        Ok(Error::BadMaturity)
+    );
+    assert_eq!(
+        c.try_report_maturity(&fx.oracle, &fx.union, &id, &(T0 - 1))
+            .unwrap_err(),
+        Ok(Error::BadMaturity)
+    );
+    c.report_maturity(&fx.oracle, &fx.union, &id, &(T0 + 50 * DAY));
+    assert_eq!(
+        c.try_report_maturity(&fx.oracle, &fx.union, &id, &(T0 + 50 * DAY))
+            .unwrap_err(),
+        Ok(Error::MaturityAlreadySet)
+    );
+    // Harvest before drawdown + 90 days: due = drawdown + 90 + 21 days.
+    assert_eq!(c.due_date(&fx.union, &id), Some(T0 + 111 * DAY));
+}
+
+#[test]
+fn overdue_puts_the_union_on_hold_until_repaid() {
+    let fx = setup();
+    let c = fx.core();
+    let id = loan_id(&fx.env, 1);
+    fx.invest(&fx.borrower, 1_000 * NIN);
+    fx.invest(&fx.neighbour, 1_000 * NIN);
+    fx.draw(&id, 500 * NIN);
+    fx.at(T0 + 120 * DAY);
+    c.report_maturity(&fx.oracle, &fx.union, &id, &(T0 + 120 * DAY));
+    // due = max(drawdown + 90, eos) + 21 = eos + 21.
+    fx.at(T0 + 141 * DAY);
+    assert_eq!(
+        c.try_flag_overdue(&fx.union, &id).unwrap_err(),
+        Ok(Error::NotDue)
+    );
+    fx.at(T0 + 141 * DAY + 1);
+    c.flag_overdue(&fx.union, &id);
+    assert_eq!(c.on_hold(&fx.union), 1);
+    assert_eq!(
+        c.try_flag_overdue(&fx.union, &id).unwrap_err(),
+        Ok(Error::BadState)
+    );
+
+    let err = c
+        .try_draw_loan(&fx.union, &fx.neighbour, &loan_id(&fx.env, 2), &NIN, &0)
+        .unwrap_err();
+    assert_eq!(err, Ok(Error::LendingOnHold));
+
+    // A part payment keeps the hold; the full payment lifts it.
+    fx.repay(&id, 100 * NIN);
+    assert_eq!(c.on_hold(&fx.union), 1);
+    assert!(fx.repay(&id, 1_000 * NIN));
+    assert_eq!(c.on_hold(&fx.union), 0);
+    c.draw_loan(&fx.union, &fx.neighbour, &loan_id(&fx.env, 2), &NIN, &0);
+}
+
+#[test]
+fn default_waits_for_the_payback_date_and_anyone_may_call() {
+    let fx = setup();
+    let c = fx.core();
+    let id = loan_id(&fx.env, 1);
+    fx.invest(&fx.borrower, 1_000 * NIN);
+    fx.draw(&id, 500 * NIN);
+    fx.at(T0 + 100 * DAY);
+    c.report_maturity(&fx.oracle, &fx.union, &id, &(T0 + 100 * DAY));
+    // maturityTs + 21 days (D-d) is also the payback date here.
+    fx.at(T0 + 121 * DAY);
+    assert_eq!(
+        c.try_mark_default(&fx.union, &id).unwrap_err(),
+        Ok(Error::NotDue)
+    );
+    fx.at(T0 + 121 * DAY + 1);
+    let before = fx.env.auths().len();
+    c.mark_default(&fx.union, &id);
+    assert_eq!(fx.env.auths().len(), 0, "no signature needed ({before})");
+    assert_eq!(
+        c.try_mark_default(&fx.union, &id).unwrap_err(),
+        Ok(Error::LoanClosed)
+    );
+}
+
+#[test]
+fn default_takes_her_investment_first_then_the_junior_pool() {
+    let fx = setup();
+    let c = fx.core();
+    let id = loan_id(&fx.env, 1);
+    fx.invest(&fx.borrower, 600 * NIN);
+    fx.invest(&fx.neighbour, 1_400 * NIN);
+    fx.draw(&id, 1_000 * NIN);
+    fx.at(T0 + 100 * DAY);
+    c.report_maturity(&fx.oracle, &fx.union, &id, &(T0 + 100 * DAY));
+    fx.at(T0 + 200 * DAY);
+    c.mark_default(&fx.union, &id);
+
+    // Her 600 first, then 400 off the pool: the neighbour's 1,400 is now 1,000.
+    let her = c.position(&fx.union, &fx.borrower);
+    assert_eq!(her.invested, 0);
+    let p = c.position(&fx.union, &fx.neighbour);
+    assert!((p.invested - 1_000 * NIN).abs() <= 1);
+    assert_eq!(c.union_borrows(&fx.union), 0);
+    assert_eq!(c.get_junior_market(&fx.union).total_borrows, 0);
+    let ln = c.get_loan(&fx.union, &id).unwrap();
+    assert!(ln.defaulted && ln.closed);
+    fx.assert_conserved();
+}
+
+#[test]
+fn default_covered_by_her_own_investment_spares_the_pool() {
+    let fx = setup();
+    let c = fx.core();
+    let id = loan_id(&fx.env, 1);
+    fx.invest(&fx.borrower, 1_000 * NIN);
+    fx.invest(&fx.neighbour, 1_000 * NIN);
+    fx.draw(&id, 300 * NIN);
+    fx.at(T0 + 100 * DAY);
+    c.report_maturity(&fx.oracle, &fx.union, &id, &(T0 + 100 * DAY));
+    fx.at(T0 + 200 * DAY);
+    c.mark_default(&fx.union, &id);
+    assert!((c.position(&fx.union, &fx.borrower).invested - 700 * NIN).abs() <= 1);
+    assert_eq!(c.position(&fx.union, &fx.neighbour).invested, 1_000 * NIN);
+}
+
+#[test]
+fn recovery_after_default_goes_back_to_the_pool() {
+    let fx = setup();
+    let c = fx.core();
+    let id = loan_id(&fx.env, 1);
+    fx.invest(&fx.borrower, 600 * NIN);
+    fx.invest(&fx.neighbour, 1_400 * NIN);
+    fx.draw(&id, 1_000 * NIN);
+    assert_eq!(
+        c.try_credit_recovery(&fx.union, &id, &NIN).unwrap_err(),
+        Ok(Error::NotDefaulted)
+    );
+    fx.at(T0 + 100 * DAY);
+    c.report_maturity(&fx.oracle, &fx.union, &id, &(T0 + 100 * DAY));
+    fx.at(T0 + 200 * DAY);
+    c.mark_default(&fx.union, &id);
+    StellarAssetClient::new(&fx.env, &fx.nin).mint(&fx.fx_id, &(400 * NIN));
+    c.credit_recovery(&fx.union, &id, &(400 * NIN));
+    assert!((c.position(&fx.union, &fx.neighbour).invested - 1_400 * NIN).abs() <= 1);
+    fx.assert_conserved();
+}
+
+#[test]
+fn draw_closes_the_cash_at_hand_escrow() {
+    let fx = setup();
+    fx.invest(&fx.borrower, 1_000 * NIN);
+    fx.fx()
+        .open_escrow(&7, &fx.union, &(1_000 * NIN), &(7 * 86_400));
+    fx.core().draw_loan(
+        &fx.union,
+        &fx.borrower,
+        &loan_id(&fx.env, 1),
+        &(400 * NIN),
+        &7,
+    );
+    assert_eq!(fx.fx().get_escrow(&7).unwrap().remaining, 600 * NIN);
+    assert_eq!(
+        fx.core()
+            .get_loan(&fx.union, &loan_id(&fx.env, 1))
+            .unwrap()
+            .escrow_id,
+        7
+    );
+}
+
+#[test]
+fn no_admin_or_oracle_as_leader() {
+    let fx = setup();
+    let c = fx.core();
+    let admin = c.get_config().admin;
+    let err = c
+        .try_withdraw_union_treasury(&admin, &fx.union, &NIN, &false)
+        .unwrap_err();
+    assert_eq!(err, Ok(Error::NotLeader));
+    let err = c
+        .try_withdraw_union_treasury(&fx.oracle, &fx.union, &NIN, &false)
+        .unwrap_err();
+    assert_eq!(err, Ok(Error::NotLeader));
+    let err = c
+        .try_withdraw_union_treasury(&fx.leader, &fx.union, &NIN, &false)
+        .unwrap_err();
+    assert_eq!(err, Ok(Error::InsufficientCash));
+}
+
+#[test]
+fn pause_stops_draws_and_money_in() {
+    let fx = setup();
+    let c = fx.core();
+    fx.invest(&fx.borrower, 1_000 * NIN);
+    c.pause();
+    let err = c
+        .try_draw_loan(&fx.union, &fx.borrower, &loan_id(&fx.env, 1), &NIN, &0)
+        .unwrap_err();
+    assert_eq!(err, Ok(Error::Paused));
+    assert_eq!(
+        c.try_deposit_junior(&fx.union, &fx.borrower, &NIN)
+            .unwrap_err(),
+        Ok(Error::Paused)
+    );
+    c.unpause();
+    fx.draw(&loan_id(&fx.env, 1), NIN);
+}
+
+#[test]
+fn union_config_is_admin_only_and_checked() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let roles = env.register(RolesContract, (admin.clone(),));
+    let titles = env.register(LandTitleContract, (admin.clone(), roles.clone()));
+    let nin = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let core = env.register(FundCore, (admin, roles, titles, nin));
+    let c = FundCoreClient::new(&env, &core);
+    let union = Address::generate(&env);
+    // No auth mocked: the admin's signature is missing.
+    assert!(c.try_set_union_config(&union, &union_cfg()).is_err());
+    env.mock_all_auths();
+    let mut bad = union_cfg();
+    bad.treasury_fee_bp = 9_000;
+    bad.rainy_fee_bp = 2_000;
+    assert_eq!(
+        c.try_set_union_config(&union, &bad).unwrap_err(),
+        Ok(Error::BadArg)
+    );
+    c.set_union_config(&union, &union_cfg());
+    assert_eq!(c.get_union_config(&union), Some(union_cfg()));
 }

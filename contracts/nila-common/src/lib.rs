@@ -6,7 +6,7 @@
 //! - persistent: LP positions, loans, union markets
 //! - temporary: cash-escrow entries (fx-pool only)
 
-use soroban_sdk::{contractclient, contracttype, Address, BytesN, Env, Vec};
+use soroban_sdk::{contractclient, contracttype, Address, BytesN, Env};
 
 /// ~5s ledgers → 17,280 ledgers / day (network-configured; documented assumption).
 pub const DAY_IN_LEDGERS: u32 = 17_280;
@@ -37,72 +37,34 @@ pub struct MarketLite {
     pub claimable_principal: i128,
 }
 
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InvestorLite {
-    pub unbond_period: u64,
-    pub shares: i128,
-    pub locked: i128,
-    pub pending: i128,
-    pub pending_principal_snap: i128,
-    pub unclaimed: i128,
-    pub entry_index: i128,
-}
-
+/// One crop-share cash loan (T1: cash part only, junior money only, D5).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Loan {
     pub borrower: Address,
-    pub loan_type: BytesN<32>,
+    /// Cash part handed out by the leader (D9).
     pub principal: i128,
     pub rate_bp: u32,
-    pub create_ts: u64,
     pub drawdown_ts: u64,
+    /// Detected end of season reported by the oracle; 0 until reported (no EOS, no default).
     pub maturity_ts: u64,
     pub principal_paid: i128,
     pub interest_paid: i128,
-    pub funded_from_junior: i128,
-    pub funded_from_senior: i128,
+    pub interest_accrued: i128,
+    pub last_accrual_ts: u64,
+    pub escrow_id: u64,
+    pub overdue: bool,
     pub defaulted: bool,
-    pub liquidated: bool,
+    pub closed: bool,
     pub milestone: u32,
     pub milestone_digest: BytesN<32>,
     pub digest_ts: u64,
-    pub last_accrual_ts: u64,
-    pub interest_accrued: i128,
-    pub lower_rate: bool,
-    pub sos_date: u64,
 }
 
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReserveCfg {
-    pub safety_bp: u32,
-    pub safety_floor: i128,
-    pub hard_stop: bool,
-    pub exists: bool,
-    pub escrow_duration: u32,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MemberRecord {
-    pub union: Address,
-    pub member: Address,
-    pub polygon_address: BytesN<20>,
-    pub plot_ids: Vec<u64>,
-    pub cycle: u32,
-    pub confirmed_ts: u64,
-    /// Last attestation: the confirm itself, a `set_plots` or a `reattest`.
-    pub attested_ts: u64,
-    pub active: bool,
-}
-
-/// Membership gate the fund, anchor, and nIN trustline share (TAD §4.2).
-#[contractclient(name = "MembershipClient")]
-pub trait MembershipTrait {
-    fn is_member(union: Address, account: Address) -> bool;
-    fn plots_of(union: Address, account: Address) -> Vec<u64>;
+/// Membership is holding a land title the union minted (land_title contract).
+#[contractclient(name = "LandTitleClient")]
+pub trait LandTitleTrait {
+    fn holds_title(union: Address, account: Address) -> bool;
 }
 
 /// Trust-wide roles in the roles contract, set by the admin (the trust's multisig, R75).
@@ -129,12 +91,6 @@ pub trait RolesTrait {
     fn is_oracle(account: Address) -> bool;
     fn is_leader(union: Address, account: Address) -> bool;
     fn has_role(account: Address, role: Role) -> bool;
-}
-
-#[contractclient(name = "ViewerClient")]
-pub trait ViewerTrait {
-    fn on_loan_created(union: Address, loan_id: BytesN<32>, borrower: Address);
-    fn on_loan_closed(union: Address, loan_id: BytesN<32>, borrower: Address);
 }
 
 /// Flattened FX callback: Core passes amount; FX does not read back into Core.
