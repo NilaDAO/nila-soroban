@@ -1069,8 +1069,8 @@ impl FundCore {
 
     /// Anyone, after the payback date (D-d), which is never earlier than
     /// `maturityTs + 21 days`. Without a reported end of season there is no default.
-    /// Loss order (D10): her own junior investment first, then the junior pool. Senior is
-    /// not touched for a cash-part loan (D5, C8); the voucher part's senior leg comes in T3.
+    /// Writes off all she owes, principal and interest. Loss order (D10): her own junior
+    /// investment first (principal and interest), then the junior pool, then senior.
     pub fn mark_default(env: Env, union: Address, loan_id: BytesN<32>) -> Result<(), Error> {
         require_not_paused(&env)?;
         let mut ln = load_loan(&env, &union, &loan_id)?;
@@ -1081,21 +1081,25 @@ impl FundCore {
         if env.ledger().timestamp() <= due {
             return Err(Error::NotDue);
         }
+        // Everything she owes is written off: principal and the interest accrued to date.
+        accrue(&env, &mut ln, env.ledger().timestamp())?;
         let loss = ln.principal - ln.principal_paid;
+        let interest = ln.interest_accrued - ln.interest_paid;
 
-        // 1. Her investment: burn her active shares up to the loss.
+        // 1. Her investment covers what she owes, principal and interest (R27, D10).
         let mut jm = load_market(&env, true, &union);
         let mut inv = load_inv(&env, true, &union, &ln.borrower);
+        let owed = loss + interest;
         let avail = active_shares(&inv);
         let avail_value = to_underlying(&env, avail, jm.index).ok_or(Error::Overflow)?;
-        let (member_applied, burn) = if avail_value <= loss {
+        let (member_applied, burn) = if avail_value <= owed {
             (avail_value, avail)
         } else {
             (
-                loss,
+                owed,
                 core::cmp::min(
                     avail,
-                    to_shares(&env, loss, jm.index).ok_or(Error::Overflow)?,
+                    to_shares(&env, owed, jm.index).ok_or(Error::Overflow)?,
                 ),
             )
         };
@@ -1107,9 +1111,26 @@ impl FundCore {
             jm.total_shares -= burn;
             save_inv(&env, true, &union, &ln.borrower, &inv);
         }
+        jm.total_borrows -= core::cmp::min(jm.total_borrows, loss);
+        // Her shares pay principal first; what they cover of the interest goes to the pool.
+        let member_interest = member_applied - core::cmp::min(member_applied, loss);
+        if member_interest > 0 {
+            if jm.total_shares > 0 {
+                jm.index = index_bump(&env, jm.index, jm.total_shares, member_interest)
+                    .ok_or(Error::Overflow)?;
+            } else {
+                jm.cash -= member_interest;
+                i_add(
+                    &env,
+                    &DataKey::UnionTreasury(union.clone()),
+                    member_interest,
+                )?;
+            }
+        }
 
-        // 2. Then the junior pool: an index haircut.
-        let rest = loss - member_applied;
+        // 2. Then the junior pool, 3. then senior: index haircuts on the unpaid principal.
+        // Unpaid interest beyond her investment was never booked and is written off.
+        let rest = loss - core::cmp::min(member_applied, loss);
         let (junior_applied, idx) = haircut_index(
             &env,
             jm.index,
@@ -1118,11 +1139,21 @@ impl FundCore {
         )
         .ok_or(Error::Overflow)?;
         jm.index = idx;
-        jm.total_borrows -= core::cmp::min(jm.total_borrows, loss);
         save_market(&env, true, &union, &jm);
-        // The cash part is junior money only (D5, C8): senior capital never carries it (I1).
-        // What the junior pool cannot cover is reported, not moved.
-        let shortfall = rest - junior_applied;
+        let mut senior_applied = 0;
+        if rest > junior_applied {
+            let mut sm = load_market(&env, false, &union);
+            let (sa, sidx) = haircut_index(
+                &env,
+                sm.index,
+                to_underlying(&env, sm.total_shares, sm.index).unwrap_or(0),
+                rest - junior_applied,
+            )
+            .ok_or(Error::Overflow)?;
+            senior_applied = sa;
+            sm.index = sidx;
+            save_market(&env, false, &union, &sm);
+        }
         let ub = DataKey::UnionBorrows(union.clone());
         i_add(&env, &ub, -core::cmp::min(i_get(&env, &ub), loss))?;
 
@@ -1135,7 +1166,8 @@ impl FundCore {
             loan_id,
             member_applied,
             junior_applied,
-            shortfall,
+            senior_applied,
+            interest_written_off: interest,
         }
         .publish(&env);
         bump_instance(&env);

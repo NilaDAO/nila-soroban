@@ -505,7 +505,8 @@ fn default_takes_her_investment_first_then_the_junior_pool() {
     fx.at(T0 + 200 * DAY);
     c.mark_default(&fx.union, &id);
 
-    // Her 600 first, then 400 off the pool: the neighbour's 1,400 is now 1,000.
+    // Her 600 first (interest is owed too, so all of it), then 400 off the pool:
+    // the neighbour's 1,400 is now 1,000.
     let her = c.position(&fx.union, &fx.borrower);
     assert_eq!(her.invested, 0);
     let p = c.position(&fx.union, &fx.neighbour);
@@ -529,8 +530,16 @@ fn default_covered_by_her_own_investment_spares_the_pool() {
     c.report_maturity(&fx.oracle, &fx.union, &id, &(T0 + 100 * DAY));
     fx.at(T0 + 200 * DAY);
     c.mark_default(&fx.union, &id);
-    assert!((c.position(&fx.union, &fx.borrower).invested - 700 * NIN).abs() <= 1);
-    assert_eq!(c.position(&fx.union, &fx.neighbour).invested, 1_000 * NIN);
+    // She owes 300 plus 200 days of 12.5% on it; her shares pay both. The interest part is
+    // pool income, shared pro rata by the remaining shares, as at a repayment.
+    let interest = 300 * NIN * 1250 / 10_000 * 200 / 365;
+    let her = c.position(&fx.union, &fx.borrower).invested;
+    let his = c.position(&fx.union, &fx.neighbour).invested;
+    assert!((her + his - 1_700 * NIN).abs() <= 2);
+    let his_share = interest * 1_000 * NIN / (1_700 * NIN - interest);
+    assert!((his - 1_000 * NIN - his_share).abs() <= NIN / 100);
+    assert!(her < 700 * NIN);
+    fx.assert_conserved();
 }
 
 #[test]

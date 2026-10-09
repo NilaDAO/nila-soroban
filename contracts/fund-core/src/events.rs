@@ -100,8 +100,9 @@ pub struct LoanDefaulted {
     pub loan_id: BytesN<32>,
     pub member_applied: i128,
     pub junior_applied: i128,
-    /// Loss the junior pool could not cover; senior is never cut for a cash part.
-    pub shortfall: i128,
+    pub senior_applied: i128,
+    /// Interest accrued and unpaid at the default, written off with the principal.
+    pub interest_written_off: i128,
 }
 
 #[contractevent]
