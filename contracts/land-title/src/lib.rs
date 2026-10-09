@@ -41,6 +41,7 @@ pub enum DataKey {
     Roles,
     Paused,
     UpgradeDelay,
+    PendingDelay,
     PendingUpgrade,
     Title(u64),              // Polygon token id -> title
     Count(Address, Address), // (union, holder) -> titles held from that union
@@ -314,13 +315,47 @@ impl LandTitleContract {
             .unwrap_or(false)
     }
 
+    /// Raising the delay applies at once. Lowering it waits out the current delay: the first
+    /// call files the change, a second call after the delay applies it.
     pub fn set_upgrade_delay(env: Env, delay_seconds: u64) -> Result<(), Error> {
         require_admin(&env)?;
+        let current: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeDelay)
+            .unwrap_or(0);
+        if delay_seconds < current {
+            let now = env.ledger().timestamp();
+            match env
+                .storage()
+                .instance()
+                .get::<_, (u64, u64)>(&DataKey::PendingDelay)
+            {
+                Some((d, eta)) if d == delay_seconds && now >= eta => {
+                    env.storage().instance().remove(&DataKey::PendingDelay);
+                }
+                _ => {
+                    env.storage().instance().set(
+                        &DataKey::PendingDelay,
+                        &(delay_seconds, now.saturating_add(current)),
+                    );
+                    bump_instance(&env);
+                    return Ok(());
+                }
+            }
+        }
         env.storage()
             .instance()
             .set(&DataKey::UpgradeDelay, &delay_seconds);
         bump_instance(&env);
         Ok(())
+    }
+
+    pub fn upgrade_delay(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::UpgradeDelay)
+            .unwrap_or(0)
     }
 
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {

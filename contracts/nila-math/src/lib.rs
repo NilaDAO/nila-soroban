@@ -67,16 +67,15 @@ pub fn mul_div(env: &Env, a: i128, b: i128, d: i128) -> Option<i128> {
     quot.to_u128().and_then(|x| i128::try_from(x).ok())
 }
 
-/// Convert an nIN amount into shares at `index` (RAY-scaled).
+/// Convert an nIN amount into shares at `index` (RAY-scaled). Index 0 is a pool written off
+/// in full, not "unset": it has no share price, so this returns `None`.
 pub fn to_shares(env: &Env, amount: i128, index: i128) -> Option<i128> {
-    let idx = if index == 0 { RAY } else { index };
-    mul_div(env, amount, RAY, idx)
+    mul_div(env, amount, RAY, index)
 }
 
-/// Convert shares back to nIN at `index` (RAY-scaled).
+/// Convert shares back to nIN at `index` (RAY-scaled). At index 0 shares are worth nothing.
 pub fn to_underlying(env: &Env, shares: i128, index: i128) -> Option<i128> {
-    let idx = if index == 0 { RAY } else { index };
-    mul_div(env, shares, idx, RAY)
+    mul_div(env, shares, index, RAY)
 }
 
 /// Simple interest on leftover principal over `elapsed` seconds.
@@ -231,5 +230,12 @@ mod test {
         let book = 8_200_000 * NIN;
         let shares = to_shares(&env, book, RAY).unwrap();
         assert_eq!(shares, book);
+    }
+
+    #[test]
+    fn index_zero_is_a_written_off_pool() {
+        let env = Env::default();
+        assert_eq!(to_underlying(&env, 1_000, 0), Some(0));
+        assert_eq!(to_shares(&env, 1_000, 0), None);
     }
 }

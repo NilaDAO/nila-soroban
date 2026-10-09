@@ -35,3 +35,9 @@ jobs:
               exit 1
             fi
           done
+      - name: No testnet-short build in release wasm
+        run: |
+          if LC_ALL=C grep -a -l "testnet-short" target/wasm32v1-none/release/*.wasm; then
+            echo "a wasm built with testnet-short-windows (one day = one second) must never ship"
+            exit 1
+          fi

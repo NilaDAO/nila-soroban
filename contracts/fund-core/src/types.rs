@@ -40,6 +40,8 @@ pub enum Error {
     TooManyLoans = 39,
     NotOracle = 40,
     NotLeader = 41,
+    /// The pool was written off in full; it takes no new money.
+    PoolWrittenOff = 42,
 }
 
 #[contracttype]

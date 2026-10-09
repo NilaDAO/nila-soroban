@@ -192,6 +192,18 @@ fn upgrade_waits_for_the_delay() {
 }
 
 #[test]
+fn upgrade_delay_is_lowered_only_through_the_delay() {
+    let fx = setup();
+    let c = fx.client();
+    c.set_upgrade_delay(&(48 * 3600));
+    c.set_upgrade_delay(&0);
+    assert_eq!(c.upgrade_delay(), 48 * 3600);
+    fx.env.ledger().set_timestamp(1_700_000_000 + 48 * 3600);
+    c.set_upgrade_delay(&0);
+    assert_eq!(c.upgrade_delay(), 0);
+}
+
+#[test]
 fn pause_and_upgrade_need_the_admin() {
     let env = Env::default();
     let admin = Address::generate(&env);

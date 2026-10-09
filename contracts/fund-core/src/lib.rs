@@ -42,7 +42,7 @@ pub const DAY: u64 = 1;
 pub const MIN_TERM: u64 = 90 * DAY;
 /// Repay window after the end of season (LOAN_RULES §1).
 pub const REPAY_WINDOW: u64 = 21 * DAY;
-/// Loans kept per member for `loans_of` and the lock (R27, R43).
+/// Open loans per member, for `loans_of` and the lock (R27, R43).
 pub const MAX_LOANS_PER_MEMBER: u32 = 32;
 
 #[contracttype]
@@ -51,6 +51,7 @@ pub enum DataKey {
     Config,
     Paused,
     PendingUpgrade,
+    PendingDelay,
     UnionCfg(Address),
     SeniorMarket(Address),
     JuniorMarket(Address),
@@ -58,7 +59,6 @@ pub enum DataKey {
     JuniorInv(Address, Address),
     Loan(Address, BytesN<32>),
     LoansOf(Address, Address),
-    UnionClaimable(Address),
     UnionBorrows(Address),
     UnionTreasury(Address),
     UnionRainy(Address),
@@ -107,10 +107,20 @@ fn load_market(env: &Env, junior: bool, union: &Address) -> Market {
         .persistent()
         .get(&market_key(junior, union))
         .unwrap_or_default();
-    if m.index == 0 {
+    if !m.exists {
         m.index = RAY;
     }
     m
+}
+
+/// A pool written off in full keeps index 0: its old shares are worth nothing, and it
+/// takes no new money (a fresh deposit would buy shares at par next to them).
+fn require_live(m: &Market) -> Result<(), Error> {
+    if m.exists && m.index == 0 {
+        Err(Error::PoolWrittenOff)
+    } else {
+        Ok(())
+    }
 }
 
 fn save_market(env: &Env, junior: bool, union: &Address, m: &Market) {
@@ -127,11 +137,15 @@ fn inv_key(junior: bool, union: &Address, who: &Address) -> DataKey {
     }
 }
 
+/// Reads extend live entries: a passive investor or a loan waiting for its end of season
+/// may not be written for longer than the TTL.
 fn load_inv(env: &Env, junior: bool, union: &Address, who: &Address) -> Investor {
-    env.storage()
-        .persistent()
-        .get(&inv_key(junior, union, who))
-        .unwrap_or_default()
+    let key = inv_key(junior, union, who);
+    let inv: Option<Investor> = env.storage().persistent().get(&key);
+    if inv.is_some() {
+        bump_key(env, &key);
+    }
+    inv.unwrap_or_default()
 }
 
 fn save_inv(env: &Env, junior: bool, union: &Address, who: &Address, inv: &Investor) {
@@ -141,10 +155,14 @@ fn save_inv(env: &Env, junior: bool, union: &Address, who: &Address, inv: &Inves
 }
 
 fn load_loan(env: &Env, union: &Address, loan_id: &BytesN<32>) -> Result<Loan, Error> {
-    env.storage()
+    let key = DataKey::Loan(union.clone(), loan_id.clone());
+    let ln: Loan = env
+        .storage()
         .persistent()
-        .get(&DataKey::Loan(union.clone(), loan_id.clone()))
-        .ok_or(Error::LoanNotExist)
+        .get(&key)
+        .ok_or(Error::LoanNotExist)?;
+    bump_key(env, &key);
+    Ok(ln)
 }
 
 fn save_loan(env: &Env, union: &Address, loan_id: &BytesN<32>, ln: &Loan) {
@@ -324,16 +342,15 @@ fn position(env: &Env, union: &Address, member: &Address) -> Result<Position, Er
 
 // ---------- pools ----------
 
-fn required_reserve(env: &Env, union: &Address) -> Result<(UnionConfig, i128), Error> {
-    let uc = union_cfg(env, union)?;
-    let claimable = i_get(env, &DataKey::UnionClaimable(union.clone()));
+/// Reserve held for one tranche's own unbond queue; the other tranche is never read (I3).
+fn reserve_for(env: &Env, uc: &UnionConfig, claimable: i128) -> Result<i128, Error> {
     let bump =
         nila_math::mul_div(env, i128::from(uc.safety_bp), claimable, BPS).ok_or(Error::Overflow)?;
     let req = claimable
         .checked_add(bump)
         .and_then(|x| x.checked_add(uc.safety_floor))
         .ok_or(Error::Overflow)?;
-    Ok((uc, req))
+    Ok(req)
 }
 
 /// Fees first, the rest to the junior pool: the cash part is junior money only (D5, R42).
@@ -374,6 +391,7 @@ fn deposit(
     require_positive(amount)?;
     nin(env).transfer(&fx, env.current_contract_address(), &amount);
     let mut m = load_market(env, junior, union);
+    require_live(&m)?;
     m.exists = true;
     let shares = to_shares(env, amount, m.index).ok_or(Error::Overflow)?;
     m.cash += amount;
@@ -413,7 +431,6 @@ fn request_unbond(
     inv.pending_principal_snap += snap;
     inv.request_ts = env.ledger().timestamp();
     m.claimable_principal += snap;
-    i_add(env, &DataKey::UnionClaimable(union.clone()), snap)?;
     save_inv(env, junior, union, who, &inv);
     save_market(env, junior, union, &m);
     Ok(snap)
@@ -452,9 +469,12 @@ fn claim(
         core::cmp::min(amount, m.claimable_principal),
         inv.pending_principal_snap,
     );
-    let (uc, req) = required_reserve(env, union)?;
-    let req_after = req - release;
-    if m.cash < amount || (uc.hard_stop && m.cash < amount + req_after) {
+    if m.cash < amount {
+        return Err(Error::InsufficientCash);
+    }
+    let uc = union_cfg(env, union)?;
+    let req_after = reserve_for(env, &uc, m.claimable_principal - release)?;
+    if uc.hard_stop && m.cash < amount + req_after {
         return Err(Error::ReserveStop);
     }
     let cost_out = nila_math::mul_div(env, inv.cost, burn, inv.shares).ok_or(Error::Overflow)?;
@@ -465,7 +485,6 @@ fn claim(
     m.total_shares -= burn;
     m.cash -= amount;
     m.claimable_principal -= release;
-    i_add(env, &DataKey::UnionClaimable(union.clone()), -release)?;
     save_inv(env, junior, union, who, &inv);
     save_market(env, junior, union, &m);
     // Her trustline is opened for this payout inside fx_pool from C3 (R10).
@@ -473,9 +492,17 @@ fn claim(
     Ok(amount)
 }
 
-fn close_hold(env: &Env, union: &Address, ln: &Loan) {
+/// A closed loan lifts its hold and leaves her open-loan list (the events keep the history).
+fn close_loan(env: &Env, union: &Address, loan_id: &BytesN<32>, ln: &Loan) {
     if ln.overdue {
         on_hold_add(env, union, -1);
+    }
+    let mut ids = loans_of(env, union, &ln.borrower);
+    if let Some(i) = ids.first_index_of(loan_id) {
+        ids.remove(i);
+        let key = DataKey::LoansOf(union.clone(), ln.borrower.clone());
+        env.storage().persistent().set(&key, &ids);
+        bump_key(env, &key);
     }
 }
 
@@ -572,6 +599,7 @@ impl FundCore {
         amount: i128,
         from_rainy: bool,
     ) -> Result<(), Error> {
+        require_not_paused(&env)?;
         require_leader(&env, &union, &leader)?;
         require_positive(amount)?;
         let key = if from_rainy {
@@ -588,25 +616,8 @@ impl FundCore {
         Ok(())
     }
 
-    /// fx_pool only (R15). Escrow accounting is C3's and is checked there.
-    pub fn credit_escrow_nin(env: Env, union: Address, amount: i128) -> Result<(), Error> {
-        require_positive(amount)?;
-        require_fx_pool(&env)?;
-        let mut m = load_market(&env, true, &union);
-        m.cash = m.cash.checked_add(amount).ok_or(Error::Overflow)?;
-        save_market(&env, true, &union, &m);
-        Ok(())
-    }
-
-    /// fx_pool only: debit junior cash for an expired escrow (R15). Checked again in C3.
-    pub fn burn_treasury_for_expiry(env: Env, union: Address, amount: i128) -> Result<(), Error> {
-        require_positive(amount)?;
-        require_fx_pool(&env)?;
-        let mut m = load_market(&env, true, &union);
-        m.cash = if m.cash >= amount { m.cash - amount } else { 0 };
-        save_market(&env, true, &union, &m);
-        Ok(())
-    }
+    // credit_escrow_nin and burn_treasury_for_expiry (R15) move book cash without tokens;
+    // they come back in C3 tied to fx_pool's escrow and an actual transfer or burn.
 
     // ---------- junior (members of the union) ----------
 
@@ -763,7 +774,7 @@ impl FundCore {
         if !holds_title(&env, &union, &member) {
             return Err(Error::NftRequired);
         }
-        let (uc, req) = required_reserve(&env, &union)?;
+        let uc = union_cfg(&env, &union)?;
         if on_hold(&env, &union) > 0 {
             return Err(Error::LendingOnHold);
         }
@@ -782,6 +793,8 @@ impl FundCore {
             return Err(Error::TooManyLoans);
         }
         let mut jm = load_market(&env, true, &union);
+        require_live(&jm)?;
+        let req = reserve_for(&env, &uc, jm.claimable_principal)?;
         if jm.cash < cash {
             return Err(Error::InsufficientCash);
         }
@@ -868,10 +881,10 @@ impl FundCore {
 
         let pay_i = core::cmp::min(pay, owed_i);
         let mut pay_p = pay - pay_i;
-        if pay_i > 0 {
-            ln.interest_paid += pay_i;
-            distribute_interest(&env, &union, &uc, pay_i)?;
-        }
+        // Always run, even for zero interest: interest moves with the ledger clock, and the
+        // simulated footprint must hold the treasury and rainy-day keys either way.
+        ln.interest_paid += pay_i;
+        distribute_interest(&env, &union, &uc, pay_i)?;
         let left = owed_i + owed_p - pay;
         let closed = left <= DUST;
         // Dust principal left at close is written off with the borrow.
@@ -880,6 +893,12 @@ impl FundCore {
             let mut jm = load_market(&env, true, &union);
             jm.cash += pay_p;
             jm.total_borrows -= core::cmp::min(jm.total_borrows, pay_p + off_books);
+            if off_books > 0 {
+                let under = to_underlying(&env, jm.total_shares, jm.index).unwrap_or(0);
+                jm.index = haircut_index(&env, jm.index, under, off_books)
+                    .ok_or(Error::Overflow)?
+                    .1;
+            }
             save_market(&env, true, &union, &jm);
             let ub = DataKey::UnionBorrows(union.clone());
             i_add(
@@ -892,7 +911,7 @@ impl FundCore {
         }
         if closed {
             ln.closed = true;
-            close_hold(&env, &union, &ln);
+            close_loan(&env, &union, &loan_id, &ln);
         }
         save_loan(&env, &union, &loan_id, &ln);
         LoanRepaid {
@@ -941,6 +960,8 @@ impl FundCore {
     /// Anyone, once the payback date has passed: lending in the union stops until the
     /// loan is repaid or defaulted (R34, R44). No end of season reported, no flag.
     pub fn flag_overdue(env: Env, union: Address, loan_id: BytesN<32>) -> Result<(), Error> {
+        // A freeze stops repayment, so it stops the clock's consequences too.
+        require_not_paused(&env)?;
         let mut ln = load_loan(&env, &union, &loan_id)?;
         if ln.closed {
             return Err(Error::LoanClosed);
@@ -966,8 +987,10 @@ impl FundCore {
 
     /// Anyone, after the payback date (D-d), which is never earlier than
     /// `maturityTs + 21 days`. Without a reported end of season there is no default.
-    /// Loss order (D10): her own junior investment first, then the junior pool, then senior.
+    /// Loss order (D10): her own junior investment first, then the junior pool. Senior is
+    /// not touched for a cash-part loan (D5, C8); the voucher part's senior leg comes in T3.
     pub fn mark_default(env: Env, union: Address, loan_id: BytesN<32>) -> Result<(), Error> {
+        require_not_paused(&env)?;
         let mut ln = load_loan(&env, &union, &loan_id)?;
         if ln.closed {
             return Err(Error::LoanClosed);
@@ -1003,7 +1026,7 @@ impl FundCore {
             save_inv(&env, true, &union, &ln.borrower, &inv);
         }
 
-        // 2. The junior pool, 3. then senior: index haircuts.
+        // 2. Then the junior pool: an index haircut.
         let rest = loss - member_applied;
         let (junior_applied, idx) = haircut_index(
             &env,
@@ -1015,33 +1038,22 @@ impl FundCore {
         jm.index = idx;
         jm.total_borrows -= core::cmp::min(jm.total_borrows, loss);
         save_market(&env, true, &union, &jm);
-        let mut senior_applied = 0;
-        if rest > junior_applied {
-            let mut sm = load_market(&env, false, &union);
-            let (sa, sidx) = haircut_index(
-                &env,
-                sm.index,
-                to_underlying(&env, sm.total_shares, sm.index).unwrap_or(0),
-                rest - junior_applied,
-            )
-            .ok_or(Error::Overflow)?;
-            senior_applied = sa;
-            sm.index = sidx;
-            save_market(&env, false, &union, &sm);
-        }
+        // The cash part is junior money only (D5, C8): senior capital never carries it (I1).
+        // What the junior pool cannot cover is reported, not moved.
+        let shortfall = rest - junior_applied;
         let ub = DataKey::UnionBorrows(union.clone());
         i_add(&env, &ub, -core::cmp::min(i_get(&env, &ub), loss))?;
 
         ln.defaulted = true;
         ln.closed = true;
-        close_hold(&env, &union, &ln);
+        close_loan(&env, &union, &loan_id, &ln);
         save_loan(&env, &union, &loan_id, &ln);
         LoanDefaulted {
             union,
             loan_id,
             member_applied,
             junior_applied,
-            senior_applied,
+            shortfall,
         }
         .publish(&env);
         bump_instance(&env);
@@ -1058,10 +1070,16 @@ impl FundCore {
     ) -> Result<(), Error> {
         let fx = require_fx_pool(&env)?;
         require_positive(amount)?;
-        let ln = load_loan(&env, &union, &loan_id)?;
+        let mut ln = load_loan(&env, &union, &loan_id)?;
         if !ln.defaulted {
             return Err(Error::NotDefaulted);
         }
+        // At most the principal that was written off; `principal_paid` counts recoveries too.
+        if amount > ln.principal - ln.principal_paid {
+            return Err(Error::CapExceeded);
+        }
+        ln.principal_paid += amount;
+        save_loan(&env, &union, &loan_id, &ln);
         nin(&env).transfer(&fx, env.current_contract_address(), &amount);
         let mut jm = load_market(&env, true, &union);
         if jm.total_shares > 0 {
@@ -1092,6 +1110,9 @@ impl FundCore {
     ) -> Result<(), Error> {
         require_oracle(&env, &oracle)?;
         let mut ln = load_loan(&env, &union, &loan_id)?;
+        if ln.closed {
+            return Err(Error::LoanClosed);
+        }
         ln.milestone = milestone;
         ln.digest_ts = env.ledger().timestamp();
         ln.milestone_digest = milestone_digest.clone();
@@ -1108,8 +1129,25 @@ impl FundCore {
 
     // ---------- upgrade (admin, timelock) ----------
 
+    /// Raising the delay applies at once. Lowering it waits out the current delay: the first
+    /// call files the change, a second call after the delay applies it.
     pub fn set_upgrade_delay(env: Env, delay_seconds: u64) -> Result<(), Error> {
         let mut c = require_admin(&env)?;
+        if delay_seconds < c.upgrade_delay {
+            let now = env.ledger().timestamp();
+            let key = DataKey::PendingDelay;
+            match env.storage().instance().get::<_, (u64, u64)>(&key) {
+                Some((d, eta)) if d == delay_seconds && now >= eta => {
+                    env.storage().instance().remove(&key);
+                }
+                _ => {
+                    let eta = now.saturating_add(c.upgrade_delay);
+                    env.storage().instance().set(&key, &(delay_seconds, eta));
+                    bump_instance(&env);
+                    return Ok(());
+                }
+            }
+        }
         c.upgrade_delay = delay_seconds;
         save_cfg(&env, &c);
         Ok(())
@@ -1200,7 +1238,7 @@ impl FundCore {
         load_loan(&env, &union, &loan_id).ok()
     }
 
-    /// Loans per union and borrower (R43).
+    /// Open loans per union and borrower (R43); closed ones are in the events.
     pub fn loans_of(env: Env, union: Address, member: Address) -> Vec<BytesN<32>> {
         loans_of(&env, &union, &member)
     }

@@ -20,6 +20,11 @@ echo "==> Building WASM"
 stellar contract build
 
 WASM_DIR="$ROOT/target/wasm32v1-none/release"
+# A fund_core built with testnet-short-windows (one day = one second) is for c2-testnet.sh only.
+if LC_ALL=C grep -a -l "testnet-short" "$WASM_DIR"/*.wasm; then
+  echo "refusing: a wasm above carries the testnet-short-windows marker" >&2
+  exit 1
+fi
 
 deploy() {
   local pkg="$1"

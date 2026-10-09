@@ -632,3 +632,92 @@ fn union_config_is_admin_only_and_checked() {
     c.set_union_config(&union, &union_cfg());
     assert_eq!(c.get_union_config(&union), Some(union_cfg()));
 }
+
+#[test]
+fn a_senior_unbond_does_not_hold_back_junior_lending() {
+    let fx = setup();
+    let c = fx.core();
+    let lp = Address::generate(&fx.env);
+    StellarAssetClient::new(&fx.env, &fx.nin).mint(&fx.fx_id, &(1_000 * NIN));
+    c.deposit_senior(&fx.union, &lp, &(1_000 * NIN));
+    c.request_unbond_senior(&fx.union, &lp, &(1_000 * NIN));
+    fx.invest(&fx.borrower, 1_000 * NIN);
+    // The senior queue's reserve is senior's own (I3): all junior cash can still lend.
+    fx.draw(&loan_id(&fx.env, 1), 1_000 * NIN);
+}
+
+#[test]
+fn pause_also_stops_overdue_default_and_treasury() {
+    let fx = setup();
+    let c = fx.core();
+    let id = loan_id(&fx.env, 1);
+    fx.invest(&fx.borrower, 1_000 * NIN);
+    fx.draw(&id, 500 * NIN);
+    fx.at(T0 + 100 * DAY);
+    c.report_maturity(&fx.oracle, &fx.union, &id, &(T0 + 100 * DAY));
+    fx.at(T0 + 200 * DAY);
+    c.pause();
+    assert_eq!(
+        c.try_flag_overdue(&fx.union, &id).unwrap_err(),
+        Ok(Error::Paused)
+    );
+    assert_eq!(
+        c.try_mark_default(&fx.union, &id).unwrap_err(),
+        Ok(Error::Paused)
+    );
+    assert_eq!(
+        c.try_withdraw_union_treasury(&fx.leader, &fx.union, &NIN, &false)
+            .unwrap_err(),
+        Ok(Error::Paused)
+    );
+    c.unpause();
+    c.mark_default(&fx.union, &id);
+}
+
+#[test]
+fn closed_loans_leave_the_open_list_and_recovery_is_capped() {
+    let fx = setup();
+    let c = fx.core();
+    let (a, b) = (loan_id(&fx.env, 1), loan_id(&fx.env, 2));
+    fx.invest(&fx.borrower, 600 * NIN);
+    fx.invest(&fx.neighbour, 1_400 * NIN);
+    fx.draw(&a, 100 * NIN);
+    fx.draw(&b, 900 * NIN);
+    assert_eq!(c.loans_of(&fx.union, &fx.borrower).len(), 2);
+    fx.repay(&a, 100 * NIN);
+    assert_eq!(c.loans_of(&fx.union, &fx.borrower).len(), 1);
+    fx.at(T0 + 100 * DAY);
+    c.report_maturity(&fx.oracle, &fx.union, &b, &(T0 + 100 * DAY));
+    fx.at(T0 + 200 * DAY);
+    c.mark_default(&fx.union, &b);
+    assert_eq!(c.loans_of(&fx.union, &fx.borrower).len(), 0);
+    StellarAssetClient::new(&fx.env, &fx.nin).mint(&fx.fx_id, &(1_000 * NIN));
+    assert_eq!(
+        c.try_credit_recovery(&fx.union, &b, &(900 * NIN + 1))
+            .unwrap_err(),
+        Ok(Error::CapExceeded)
+    );
+    c.credit_recovery(&fx.union, &b, &(900 * NIN));
+    assert_eq!(
+        c.try_credit_recovery(&fx.union, &b, &1).unwrap_err(),
+        Ok(Error::CapExceeded)
+    );
+    assert_eq!(
+        c.try_report_milestone(&fx.oracle, &fx.union, &b, &1, &loan_id(&fx.env, 9))
+            .unwrap_err(),
+        Ok(Error::LoanClosed)
+    );
+    fx.assert_conserved();
+}
+
+#[test]
+fn upgrade_delay_is_lowered_only_through_the_delay() {
+    let fx = setup();
+    let c = fx.core();
+    c.set_upgrade_delay(&(48 * 3600));
+    c.set_upgrade_delay(&0);
+    assert_eq!(c.get_config().upgrade_delay, 48 * 3600);
+    fx.at(T0 + 48 * 3600);
+    c.set_upgrade_delay(&0);
+    assert_eq!(c.get_config().upgrade_delay, 0);
+}
