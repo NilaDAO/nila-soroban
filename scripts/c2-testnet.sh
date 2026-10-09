@@ -97,7 +97,7 @@ TX_UCFG=$(tx stellar contract invoke --id "$CORE" --source ${P}-admin -- \
   set_union_config --union "$UNION" --uc "{
     \"max_loan\": \"$((10000 * NIN))\", \"gate\": \"$((600 * NIN))\", \"rate_bp\": 1250,
     \"treasury_fee_bp\": 100, \"rainy_fee_bp\": 77, \"safety_bp\": 0, \"safety_floor\": \"0\",
-    \"hard_stop\": false, \"escrow_duration\": 604800 }")
+    \"hard_stop\": false, \"escrow_duration\": 604800, \"enforce_token_amount\": false }")
 tx stellar contract invoke --id "$CORE" --source ${P}-admin -- set_fx_pool --fx_pool "$FXS" >/dev/null
 
 log "nIN to the stand-in fx_pool; fund_core's balance authorised by the issuer"
@@ -123,14 +123,27 @@ TX_INVEST2=$(invest ${P}-member2)
 
 L1=$(printf '01%.0s' {1..32})
 L2=$(printf '02%.0s' {1..32})
-draw() {
+T1=$(printf 'f1%.0s' {1..32})
+T2=$(printf 'f2%.0s' {1..32})
+draw() { # loan_id cash token_id
   tx stellar contract invoke --id "$CORE" --source ${P}-member -- \
-    draw_loan --union "$UNION" --member ${P}-member --loan_id "$1" --cash "$2" --escrow_id 0
+    draw_loan --union "$UNION" --member ${P}-member --token_id "$3" --loan_id "$1" --cash "$2" --escrow_id 0
+}
+attest() { # token_id amount — open from now
+  tx stellar contract invoke --id "$CORE" --source ${P}-attester -- \
+    attest_food_token --attester ${P}-attester --union "$UNION" --token_id "$1" \
+    --member ${P}-member --amount "$2" --from_date 0
 }
 
-log "draw over the cap must fail; draw 500 nIN signed by the member alone (no oracle, D-c)"
-must_fail "draw over ₹10,000" draw "$L1" $((10001 * NIN))
-TX_DRAW=$(draw "$L1" $((500 * NIN)))
+log "food tokens (F2): the attester copies two of her FoodTokens, 400 and 300 nIN"
+must_fail "a draw without an attested food token" draw "$L1" $((100 * NIN)) "$T1"
+TX_ATTEST=$(attest "$T1" $((400 * NIN)))
+TX_ATTEST2=$(attest "$T2" $((300 * NIN)))
+
+log "draw over the cap must fail; draw 500 nIN on the 400 token (amount gate off while testing), member alone (D-c)"
+must_fail "draw over ₹10,000" draw "$L1" $((10001 * NIN)) "$T1"
+TX_DRAW=$(draw "$L1" $((500 * NIN)) "$T1")
+must_fail "a second loan on the same food token" draw "$L2" $((100 * NIN)) "$T1"
 # She has no nIN trustline at all, so the balance read fails; either way she holds none.
 BAL=$(view "$NIN_SAC" balance --id ${P}-member 2>/dev/null || echo '"0"')
 [[ "$BAL" == '"0"' ]] || { echo "nIN reached her wallet (D9)" >&2; exit 1; }
@@ -142,7 +155,7 @@ TX_REPAY=$(tx stellar contract invoke --id "$CORE" --source ${P}-fx-standin -- \
 view "$CORE" get_loan --union "$UNION" --loan_id "$L1"
 
 log "second loan: 300 nIN, end of season reported, then default after the payback date"
-TX_DRAW2=$(draw "$L2" $((300 * NIN)))
+TX_DRAW2=$(draw "$L2" $((300 * NIN)) "$T2")
 DRAWDOWN=$(view "$CORE" get_loan --union "$UNION" --loan_id "$L2" |
   python3 -c 'import json,sys; print(json.load(sys.stdin)["drawdown_ts"])')
 must_fail "mark_default without an end of season" stellar contract invoke --id "$CORE" --source ${P}-anyone -- \
@@ -160,7 +173,9 @@ log "waiting for the payback date"
 while (($(date +%s) <= ${DUE//\"/} + 10)); do sleep 10; done
 TX_OVERDUE=$(tx stellar contract invoke --id "$CORE" --source ${P}-anyone -- \
   flag_overdue --union "$UNION" --loan_id "$L2")
-must_fail "a draw while lending is on hold" draw "$(printf '03%.0s' {1..32})" $NIN
+T3=$(printf 'f3%.0s' {1..32})
+attest "$T3" $NIN >/dev/null
+must_fail "a draw while lending is on hold" draw "$(printf '03%.0s' {1..32})" $NIN "$T3"
 TX_DEFAULT=$(tx stellar contract invoke --id "$CORE" --source ${P}-anyone -- \
   mark_default --union "$UNION" --loan_id "$L2")
 
@@ -190,6 +205,8 @@ TX_TITLE2=$TX_TITLE2
 TX_UCFG=$TX_UCFG
 TX_INVEST=$TX_INVEST
 TX_INVEST2=$TX_INVEST2
+TX_ATTEST=$TX_ATTEST
+TX_ATTEST2=$TX_ATTEST2
 TX_DRAW=$TX_DRAW
 TX_REPAY=$TX_REPAY
 TX_DRAW2=$TX_DRAW2

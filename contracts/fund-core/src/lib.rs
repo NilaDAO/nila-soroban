@@ -5,8 +5,8 @@ mod types;
 
 use events::*;
 use nila_common::{
-    bump_instance, FxPoolClient, LandTitleClient, Loan, MarketLite, RolesClient, Tranche, TTL_BUMP,
-    TTL_THRESHOLD,
+    bump_instance, FxPoolClient, LandTitleClient, Loan, MarketLite, Role, RolesClient, Tranche,
+    TTL_BUMP, TTL_THRESHOLD,
 };
 use nila_math::{
     accrued_interest, haircut_index, index_bump, to_shares, to_underlying, BPS, DEFAULT_UNBONDING,
@@ -18,7 +18,7 @@ use soroban_sdk::{
 };
 use types::{Market, PendingUpgrade};
 
-pub use types::{Config, Error, Investor, Position, UnionConfig};
+pub use types::{Config, Error, FoodToken, Investor, Position, UnionConfig};
 
 contractmeta!(key = "binver", val = "0.2.0");
 contractmeta!(
@@ -64,6 +64,8 @@ pub enum DataKey {
     UnionRainy(Address),
     /// Loans of the union flagged overdue and not yet repaid or defaulted (R34).
     OnHold(Address),
+    /// Attested food token (union, Polygon token id) that a loan may be drawn against.
+    FoodToken(Address, BytesN<32>),
 }
 
 #[contract]
@@ -250,6 +252,16 @@ fn require_oracle(env: &Env, who: &Address) -> Result<(), Error> {
         Ok(())
     } else {
         Err(Error::NotOracle)
+    }
+}
+
+/// The attester writes facts only (D21), from the one role list in `roles`.
+fn require_attester(env: &Env, who: &Address) -> Result<(), Error> {
+    who.require_auth();
+    if RolesClient::new(env, &cfg(env).roles).has_role(who, &Role::Attester) {
+        Ok(())
+    } else {
+        Err(Error::NotAttester)
     }
 }
 
@@ -756,7 +768,50 @@ impl FundCore {
 
     // ---------- loans ----------
 
-    /// The member signs (N10); no oracle voucher (D-c). The cash part comes from the
+    /// Food token fact (F2): the attester copies a Polygon FoodToken from the crop plan with
+    /// the amount that may be drawn against it and the date loans open. One loan per token;
+    /// it can be corrected until a loan is drawn against it.
+    pub fn attest_food_token(
+        env: Env,
+        attester: Address,
+        union: Address,
+        token_id: BytesN<32>,
+        member: Address,
+        amount: i128,
+        from_date: u64,
+    ) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        require_attester(&env, &attester)?;
+        require_positive(amount)?;
+        let key = DataKey::FoodToken(union.clone(), token_id.clone());
+        if let Some(old) = env.storage().persistent().get::<_, FoodToken>(&key) {
+            if old.loan_id.is_some() {
+                return Err(Error::FoodTokenUsed);
+            }
+        }
+        let ft = FoodToken {
+            member: member.clone(),
+            amount,
+            from_date,
+            loan_id: None,
+        };
+        env.storage().persistent().set(&key, &ft);
+        bump_key(&env, &key);
+        FoodTokenAttested {
+            union,
+            token_id,
+            member,
+            amount,
+            from_date,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// The member signs (N10); no oracle voucher (D-c). The loan is drawn against an attested
+    /// food token of hers: from its date, once, and at most its amount when the union's
+    /// `enforce_token_amount` is on. The cash part comes from the
     /// junior pool only (R33, C8). The leader hands her the rupees from the union's cash
     /// at hand, so the loan's nIN is burned here and no nIN reaches her wallet (D9);
     /// `escrow_id` names that cash-at-hand escrow in fx_pool, 0 for none.
@@ -764,6 +819,7 @@ impl FundCore {
         env: Env,
         union: Address,
         member: Address,
+        token_id: BytesN<32>,
         loan_id: BytesN<32>,
         cash: i128,
         escrow_id: u64,
@@ -774,12 +830,33 @@ impl FundCore {
         if !holds_title(&env, &union, &member) {
             return Err(Error::NftRequired);
         }
+        let ft_key = DataKey::FoodToken(union.clone(), token_id.clone());
+        let mut ft: FoodToken = env
+            .storage()
+            .persistent()
+            .get(&ft_key)
+            .ok_or(Error::NoFoodToken)?;
+        if ft.member != member {
+            return Err(Error::NoFoodToken);
+        }
+        if ft.loan_id.is_some() {
+            return Err(Error::FoodTokenUsed);
+        }
+        if env.ledger().timestamp() < ft.from_date {
+            return Err(Error::NotOpenYet);
+        }
+
         let uc = union_cfg(&env, &union)?;
         if on_hold(&env, &union) > 0 {
             return Err(Error::LendingOnHold);
         }
         if cash > uc.max_loan {
             return Err(Error::CapExceeded);
+        }
+        // During testing the union may give more than the attested amount (executive decision, 9 Oct);
+        // the ₹10,000 cap above still holds.
+        if uc.enforce_token_amount && cash > ft.amount {
+            return Err(Error::AboveFoodToken);
         }
         let key = DataKey::Loan(union.clone(), loan_id.clone());
         if env.storage().persistent().has(&key) {
@@ -809,6 +886,7 @@ impl FundCore {
         let now = env.ledger().timestamp();
         let ln = Loan {
             borrower: member.clone(),
+            token_id: token_id.clone(),
             principal: cash,
             rate_bp: uc.rate_bp,
             drawdown_ts: now,
@@ -826,6 +904,9 @@ impl FundCore {
             digest_ts: 0,
         };
         save_loan(&env, &union, &loan_id, &ln);
+        ft.loan_id = Some(loan_id.clone());
+        env.storage().persistent().set(&ft_key, &ft);
+        bump_key(&env, &ft_key);
         ids.push_back(loan_id.clone());
         let lk = DataKey::LoansOf(union.clone(), member.clone());
         env.storage().persistent().set(&lk, &ids);
@@ -841,6 +922,7 @@ impl FundCore {
             union,
             loan_id,
             borrower: member,
+            token_id,
             cash,
             rate_bp: uc.rate_bp,
             escrow_id,
@@ -1236,6 +1318,12 @@ impl FundCore {
 
     pub fn get_loan(env: Env, union: Address, loan_id: BytesN<32>) -> Option<Loan> {
         load_loan(&env, &union, &loan_id).ok()
+    }
+
+    pub fn food_token(env: Env, union: Address, token_id: BytesN<32>) -> Option<FoodToken> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::FoodToken(union, token_id))
     }
 
     /// Open loans per union and borrower (R43); closed ones are in the events.

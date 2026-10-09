@@ -42,6 +42,15 @@ pub enum Error {
     NotLeader = 41,
     /// The pool was written off in full; it takes no new money.
     PoolWrittenOff = 42,
+    NotAttester = 43,
+    /// No attested food token of hers under that id.
+    NoFoodToken = 44,
+    /// A loan was already drawn against this food token.
+    FoodTokenUsed = 45,
+    /// Before the food token's from-date.
+    NotOpenYet = 46,
+    /// More cash than the food token's attested amount.
+    AboveFoodToken = 47,
 }
 
 #[contracttype]
@@ -74,6 +83,23 @@ pub struct UnionConfig {
     pub safety_floor: i128,
     pub hard_stop: bool,
     pub escrow_duration: u32,
+    /// Cap each draw at the food token's attested amount. Off during testing: the union may
+    /// give more than attested, within `max_loan`.
+    pub enforce_token_amount: bool,
+}
+
+/// Food token fact written by the attester (F2): copied from the Polygon FoodToken of a crop
+/// plan. Until T3's plan engine, the attestation is how a loan is approved.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FoodToken {
+    pub member: Address,
+    /// Most cash that may be drawn against it.
+    pub amount: i128,
+    /// Loans accepted from this date.
+    pub from_date: u64,
+    /// The loan drawn against it; one loan per token.
+    pub loan_id: Option<BytesN<32>>,
 }
 
 /// A member's junior position (R26, R27, R29), in nIN.

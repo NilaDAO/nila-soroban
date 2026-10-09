@@ -42,6 +42,8 @@ pub struct MarketLite {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Loan {
     pub borrower: Address,
+    /// The attested food token the loan was drawn against.
+    pub token_id: BytesN<32>,
     /// Cash part handed out by the leader (D9).
     pub principal: i128,
     pub rate_bp: u32,

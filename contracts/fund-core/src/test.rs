@@ -69,9 +69,16 @@ impl Fx {
         self.core().repay_loan(&self.union, id, &amount)
     }
 
-    fn draw(&self, id: &BytesN<32>, cash: i128) {
+    /// F2: the attester copies her food token, open from T0. Tests use the loan id as token id.
+    fn attest(&self, member: &Address, token: &BytesN<32>, amount: i128) {
         self.core()
-            .draw_loan(&self.union, &self.borrower, id, &cash, &0);
+            .attest_food_token(&self.attester, &self.union, token, member, &amount, &T0);
+    }
+
+    fn draw(&self, id: &BytesN<32>, cash: i128) {
+        self.attest(&self.borrower, id, cash);
+        self.core()
+            .draw_loan(&self.union, &self.borrower, id, id, &cash, &0);
     }
 
     fn at(&self, ts: u64) {
@@ -104,6 +111,7 @@ fn union_cfg() -> UnionConfig {
         safety_floor: 0,
         hard_stop: false,
         escrow_duration: 7 * 86_400,
+        enforce_token_amount: false,
     }
 }
 
@@ -221,12 +229,13 @@ fn draw_checks_title_gate_cap_and_cash() {
     let id = loan_id(&fx.env, 1);
 
     let err = c
-        .try_draw_loan(&fx.union, &stranger, &id, &(10 * NIN), &0)
+        .try_draw_loan(&fx.union, &stranger, &id, &id, &(10 * NIN), &0)
         .unwrap_err();
     assert_eq!(err, Ok(Error::NftRequired));
     // R26: 600 nIN invested before any crop share cash.
+    fx.attest(&fx.borrower, &id, 20_000 * NIN);
     let err = c
-        .try_draw_loan(&fx.union, &fx.borrower, &id, &(10 * NIN), &0)
+        .try_draw_loan(&fx.union, &fx.borrower, &id, &id, &(10 * NIN), &0)
         .unwrap_err();
     assert_eq!(err, Ok(Error::BelowGate));
 
@@ -234,27 +243,25 @@ fn draw_checks_title_gate_cap_and_cash() {
     fx.invest(&fx.neighbour, 20_000 * NIN);
     // R34: ₹10,000 per loan.
     let err = c
-        .try_draw_loan(&fx.union, &fx.borrower, &id, &(10_000 * NIN + 1), &0)
+        .try_draw_loan(&fx.union, &fx.borrower, &id, &id, &(10_000 * NIN + 1), &0)
         .unwrap_err();
     assert_eq!(err, Ok(Error::CapExceeded));
-    fx.draw(&id, 10_000 * NIN);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &id, &(10_000 * NIN), &0);
+    let token2 = loan_id(&fx.env, 2);
+    fx.attest(&fx.borrower, &token2, NIN);
     let err = c
-        .try_draw_loan(&fx.union, &fx.borrower, &id, &NIN, &0)
+        .try_draw_loan(&fx.union, &fx.borrower, &token2, &id, &NIN, &0)
         .unwrap_err();
     assert_eq!(err, Ok(Error::LoanExists));
 
     // Cash comes from the junior pool only.
     let other = setup();
     other.invest(&other.borrower, 600 * NIN);
+    let t = loan_id(&other.env, 1);
+    other.attest(&other.borrower, &t, 1_000 * NIN);
     let err = other
         .core()
-        .try_draw_loan(
-            &other.union,
-            &other.borrower,
-            &loan_id(&other.env, 1),
-            &(601 * NIN),
-            &0,
-        )
+        .try_draw_loan(&other.union, &other.borrower, &t, &t, &(601 * NIN), &0)
         .unwrap_err();
     assert_eq!(err, Ok(Error::InsufficientCash));
 }
@@ -445,8 +452,10 @@ fn overdue_puts_the_union_on_hold_until_repaid() {
         Ok(Error::BadState)
     );
 
+    let id2 = loan_id(&fx.env, 2);
+    fx.attest(&fx.neighbour, &id2, NIN);
     let err = c
-        .try_draw_loan(&fx.union, &fx.neighbour, &loan_id(&fx.env, 2), &NIN, &0)
+        .try_draw_loan(&fx.union, &fx.neighbour, &id2, &id2, &NIN, &0)
         .unwrap_err();
     assert_eq!(err, Ok(Error::LendingOnHold));
 
@@ -455,7 +464,7 @@ fn overdue_puts_the_union_on_hold_until_repaid() {
     assert_eq!(c.on_hold(&fx.union), 1);
     assert!(fx.repay(&id, 1_000 * NIN));
     assert_eq!(c.on_hold(&fx.union), 0);
-    c.draw_loan(&fx.union, &fx.neighbour, &loan_id(&fx.env, 2), &NIN, &0);
+    c.draw_loan(&fx.union, &fx.neighbour, &id2, &id2, &NIN, &0);
 }
 
 #[test]
@@ -552,13 +561,10 @@ fn draw_closes_the_cash_at_hand_escrow() {
     fx.invest(&fx.borrower, 1_000 * NIN);
     fx.fx()
         .open_escrow(&7, &fx.union, &(1_000 * NIN), &(7 * 86_400));
-    fx.core().draw_loan(
-        &fx.union,
-        &fx.borrower,
-        &loan_id(&fx.env, 1),
-        &(400 * NIN),
-        &7,
-    );
+    let id = loan_id(&fx.env, 1);
+    fx.attest(&fx.borrower, &id, 400 * NIN);
+    fx.core()
+        .draw_loan(&fx.union, &fx.borrower, &id, &id, &(400 * NIN), &7);
     assert_eq!(fx.fx().get_escrow(&7).unwrap().remaining, 600 * NIN);
     assert_eq!(
         fx.core()
@@ -595,7 +601,14 @@ fn pause_stops_draws_and_money_in() {
     fx.invest(&fx.borrower, 1_000 * NIN);
     c.pause();
     let err = c
-        .try_draw_loan(&fx.union, &fx.borrower, &loan_id(&fx.env, 1), &NIN, &0)
+        .try_draw_loan(
+            &fx.union,
+            &fx.borrower,
+            &loan_id(&fx.env, 1),
+            &loan_id(&fx.env, 1),
+            &NIN,
+            &0,
+        )
         .unwrap_err();
     assert_eq!(err, Ok(Error::Paused));
     assert_eq!(
@@ -720,4 +733,72 @@ fn upgrade_delay_is_lowered_only_through_the_delay() {
     fx.at(T0 + 48 * 3600);
     c.set_upgrade_delay(&0);
     assert_eq!(c.get_config().upgrade_delay, 0);
+}
+
+#[test]
+fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
+    let fx = setup();
+    let c = fx.core();
+    fx.invest(&fx.borrower, 1_000 * NIN);
+    fx.invest(&fx.neighbour, 1_000 * NIN);
+    let (tok, l1, l2) = (
+        loan_id(&fx.env, 7),
+        loan_id(&fx.env, 1),
+        loan_id(&fx.env, 2),
+    );
+    let draw = |token: &BytesN<32>, id: &BytesN<32>, cash: i128| {
+        c.try_draw_loan(&fx.union, &fx.borrower, token, id, &cash, &0)
+            .unwrap_err()
+    };
+
+    assert_eq!(draw(&tok, &l1, NIN), Ok(Error::NoFoodToken));
+    // Someone else's token is not hers.
+    fx.attest(&fx.neighbour, &tok, 500 * NIN);
+    assert_eq!(draw(&tok, &l1, NIN), Ok(Error::NoFoodToken));
+    // Attester only.
+    assert_eq!(
+        c.try_attest_food_token(&fx.leader, &fx.union, &tok, &fx.borrower, &(500 * NIN), &T0)
+            .unwrap_err(),
+        Ok(Error::NotAttester)
+    );
+    // Corrected before use, open from day 30.
+    c.attest_food_token(
+        &fx.attester,
+        &fx.union,
+        &tok,
+        &fx.borrower,
+        &(500 * NIN),
+        &(T0 + 30 * DAY),
+    );
+    assert_eq!(draw(&tok, &l1, NIN), Ok(Error::NotOpenYet));
+    fx.at(T0 + 30 * DAY);
+    // With the amount gate on, at most the attested amount.
+    let mut uc = union_cfg();
+    uc.enforce_token_amount = true;
+    c.set_union_config(&fx.union, &uc);
+    assert_eq!(draw(&tok, &l1, 500 * NIN + 1), Ok(Error::AboveFoodToken));
+    // Testing (gate off): the union may give more than attested, within the ₹10,000 cap.
+    c.set_union_config(&fx.union, &union_cfg());
+    assert_eq!(draw(&tok, &l1, 10_000 * NIN + 1), Ok(Error::CapExceeded));
+    c.draw_loan(&fx.union, &fx.borrower, &tok, &l1, &(800 * NIN), &0);
+    assert_eq!(
+        c.food_token(&fx.union, &tok).unwrap().loan_id,
+        Some(l1.clone())
+    );
+    assert_eq!(c.get_loan(&fx.union, &l1).unwrap().token_id, tok);
+
+    // One loan per token, and no re-attesting a used one.
+    assert_eq!(draw(&tok, &l2, NIN), Ok(Error::FoodTokenUsed));
+    assert_eq!(
+        c.try_attest_food_token(
+            &fx.attester,
+            &fx.union,
+            &tok,
+            &fx.borrower,
+            &(500 * NIN),
+            &T0
+        )
+        .unwrap_err(),
+        Ok(Error::FoodTokenUsed)
+    );
 }

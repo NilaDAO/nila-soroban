@@ -47,7 +47,18 @@ pub struct Claimed {
     pub amount: i128,
 }
 
-/// For the attester's F3 fact (R31): the crop share is now redeemed.
+#[contractevent]
+pub struct FoodTokenAttested {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub token_id: BytesN<32>,
+    pub member: Address,
+    pub amount: i128,
+    pub from_date: u64,
+}
+
+/// For the attester's F3 fact (R31): the food token is now redeemed.
 #[contractevent]
 pub struct LoanDrawn {
     #[topic]
@@ -55,6 +66,7 @@ pub struct LoanDrawn {
     #[topic]
     pub loan_id: BytesN<32>,
     pub borrower: Address,
+    pub token_id: BytesN<32>,
     pub cash: i128,
     pub rate_bp: u32,
     pub escrow_id: u64,
