@@ -139,17 +139,6 @@ pub struct Paused {
     pub paused: bool,
 }
 
-#[contractevent]
-pub struct UpgradeProposed {
-    pub wasm_hash: BytesN<32>,
-    pub eta: u64,
-}
-
-#[contractevent]
-pub struct UpgradeApplied {
-    pub wasm_hash: BytesN<32>,
-}
-
 /// Treasury in (cash scan, positive) or out to a leader (negative), R17.
 #[contractevent]
 pub struct TreasuryMoved {

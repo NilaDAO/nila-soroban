@@ -66,7 +66,6 @@ pub struct Config {
     pub nin: Address,
     /// fx_pool: the cash-scan entry point for all money coming in, and the nIN SAC admin.
     pub fx_pool: Option<Address>,
-    pub upgrade_delay: u64,
 }
 
 /// Per-union lending terms, set by the admin (R26, R34, R37, R42, R76).
@@ -145,11 +144,4 @@ pub struct Investor {
     /// separately: it is in the share value and leaves with the shares.
     pub cost: i128,
     pub pending_principal_snap: i128,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PendingUpgrade {
-    pub wasm_hash: BytesN<32>,
-    pub eta: u64,
 }

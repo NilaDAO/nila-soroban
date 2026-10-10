@@ -13,7 +13,7 @@
 //!
 //! USDC, LP offers and Reflector (R18–R24, R46, R77) are T2.
 
-use nila_common::{bump_instance, FundCoreClient, LandTitleClient, RolesClient};
+use nila_common::{bump_instance, upgrade, FundCoreClient, LandTitleClient, RolesClient};
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
     contract, contracterror, contractevent, contractimpl, contractmeta, contracttype,
@@ -46,8 +46,8 @@ pub const MAX_CASH_OUT_TERM: u64 = 7 * DAY;
 pub const DEFAULT_MAX_SCAN: i128 = 10_000 * 10_000_000;
 /// Open escrows per union: the leader settles before scanning more.
 pub const MAX_OPEN_ESCROWS: u32 = 64;
-/// Upgrade timelock at deploy (R75); the admin may change it, lowering waits it out.
-pub const DEFAULT_UPGRADE_DELAY: u64 = 48 * 3_600;
+/// Upgrade timelock at deploy: 48 hours (R75, C15); short builds rehearse it in seconds.
+pub const UPGRADE_DELAY: u64 = 2 * DAY;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -104,9 +104,6 @@ pub enum DataKey {
     DailyCap,
     MaxScan,
     Paused,
-    UpgradeDelay,
-    PendingUpgrade,
-    PendingDelay,
     NextEscrow,
     Escrow(u64),
     /// Open escrow ids of a union, oldest first.
@@ -138,13 +135,6 @@ pub struct CashOut {
     pub union: Address,
     pub amount: i128,
     pub expires: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PendingUpgrade {
-    pub wasm_hash: BytesN<32>,
-    pub eta: u64,
 }
 
 #[contractevent]
@@ -231,29 +221,8 @@ pub struct Activated {
 }
 
 #[contractevent]
-pub struct UpgradeDelaySet {
-    pub delay_seconds: u64,
-    /// When a lowered delay may be applied; 0 once applied.
-    pub eta: u64,
-}
-
-#[contractevent]
-pub struct UpgradeCancelled {}
-
-#[contractevent]
 pub struct Paused {
     pub paused: bool,
-}
-
-#[contractevent]
-pub struct UpgradeProposed {
-    pub wasm_hash: BytesN<32>,
-    pub eta: u64,
-}
-
-#[contractevent]
-pub struct UpgradeApplied {
-    pub wasm_hash: BytesN<32>,
 }
 
 #[contract]
@@ -454,7 +423,7 @@ impl FxPoolContract {
         s.set(&DataKey::Usdc, &usdc);
         s.set(&DataKey::DailyCap, &daily_cap);
         s.set(&DataKey::MaxScan, &DEFAULT_MAX_SCAN);
-        s.set(&DataKey::UpgradeDelay, &DEFAULT_UPGRADE_DELAY);
+        upgrade::init(&env, UPGRADE_DELAY);
         bump_instance(&env);
     }
 
@@ -807,93 +776,40 @@ impl FxPoolContract {
         Ok(co.amount)
     }
 
-    // ---------- upgrade (admin, timelock) ----------
+    // ---------- upgrade (admin, timelock, nila_common::upgrade) ----------
 
-    /// Raising the delay applies at once; lowering it waits out the current delay.
+    /// Raising applies at once; lowering applies only when set again after the current delay.
     pub fn set_upgrade_delay(env: Env, delay_seconds: u64) -> Result<(), Error> {
         require_admin(&env)?;
-        let cur: u64 = get(&env, &DataKey::UpgradeDelay);
-        if delay_seconds < cur {
-            let now = env.ledger().timestamp();
-            let key = DataKey::PendingDelay;
-            match env.storage().instance().get::<_, (u64, u64)>(&key) {
-                Some((d, eta)) if d == delay_seconds && now >= eta => {
-                    env.storage().instance().remove(&key);
-                }
-                _ => {
-                    let eta = now.saturating_add(cur);
-                    env.storage().instance().set(&key, &(delay_seconds, eta));
-                    UpgradeDelaySet { delay_seconds, eta }.publish(&env);
-                    bump_instance(&env);
-                    return Ok(());
-                }
-            }
-        }
-        env.storage()
-            .instance()
-            .set(&DataKey::UpgradeDelay, &delay_seconds);
-        UpgradeDelaySet {
-            delay_seconds,
-            eta: 0,
-        }
-        .publish(&env);
+        upgrade::set_delay(&env, delay_seconds);
         bump_instance(&env);
         Ok(())
     }
 
+    pub fn pending_upgrade(env: Env) -> Option<upgrade::PendingUpgrade> {
+        upgrade::pending(&env)
+    }
+
+    /// Files the new wasm; `execute_upgrade` applies it once the delay has passed.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         require_admin(&env)?;
-        let delay: u64 = get(&env, &DataKey::UpgradeDelay);
-        if delay == 0 {
-            env.deployer()
-                .update_current_contract_wasm(new_wasm_hash.clone());
-            UpgradeApplied {
-                wasm_hash: new_wasm_hash,
-            }
-            .publish(&env);
-        } else {
-            let eta = env.ledger().timestamp().saturating_add(delay);
-            env.storage().instance().set(
-                &DataKey::PendingUpgrade,
-                &PendingUpgrade {
-                    wasm_hash: new_wasm_hash.clone(),
-                    eta,
-                },
-            );
-            UpgradeProposed {
-                wasm_hash: new_wasm_hash,
-                eta,
-            }
-            .publish(&env);
-        }
+        upgrade::propose(&env, new_wasm_hash);
         bump_instance(&env);
         Ok(())
     }
 
     pub fn execute_upgrade(env: Env) -> Result<(), Error> {
         require_admin(&env)?;
-        let p: PendingUpgrade = env
-            .storage()
-            .instance()
-            .get(&DataKey::PendingUpgrade)
-            .ok_or(Error::UpgradeNotReady)?;
-        if env.ledger().timestamp() < p.eta {
+        if !upgrade::execute(&env) {
             return Err(Error::UpgradeNotReady);
         }
-        env.storage().instance().remove(&DataKey::PendingUpgrade);
-        env.deployer()
-            .update_current_contract_wasm(p.wasm_hash.clone());
-        UpgradeApplied {
-            wasm_hash: p.wasm_hash,
-        }
-        .publish(&env);
         Ok(())
     }
 
     pub fn cancel_upgrade(env: Env) -> Result<(), Error> {
         require_admin(&env)?;
-        env.storage().instance().remove(&DataKey::PendingUpgrade);
-        UpgradeCancelled {}.publish(&env);
+        upgrade::cancel(&env);
+        bump_instance(&env);
         Ok(())
     }
 
@@ -931,7 +847,7 @@ impl FxPoolContract {
     }
 
     pub fn upgrade_delay(env: Env) -> u64 {
-        get(&env, &DataKey::UpgradeDelay)
+        upgrade::delay(&env)
     }
 
     pub fn is_paused(env: Env) -> bool {

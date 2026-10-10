@@ -121,3 +121,72 @@ fn unknown_escrow_and_code() {
     assert_eq!(f.cash_out(&h), None);
     assert_eq!(f.cash_at_hand(&Address::generate(&env)), 0);
 }
+
+/// sha256 over the XDR of one sample of every stored key and value. If this changes, data a
+/// deployed fx_pool holds no longer decodes after an upgrade: write a migration, or leave the
+/// stored shape alone (docs/STORAGE_LAYOUT.md).
+#[test]
+fn storage_layout_is_frozen() {
+    use soroban_sdk::{xdr::ToXdr, BytesN, IntoVal, Val};
+    let env = Env::default();
+    let a = Address::from_str(
+        &env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+    #[allow(unused_variables)]
+    let h = BytesN::from_array(&env, &[7; 32]);
+    let mut v: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(&env);
+    v.push_back(DataKey::Admin.into_val(&env));
+    v.push_back(DataKey::Roles.into_val(&env));
+    v.push_back(DataKey::LandTitle.into_val(&env));
+    v.push_back(DataKey::Usdc.into_val(&env));
+    v.push_back(DataKey::Nin.into_val(&env));
+    v.push_back(DataKey::FundCore.into_val(&env));
+    v.push_back(DataKey::DailyCap.into_val(&env));
+    v.push_back(DataKey::MaxScan.into_val(&env));
+    v.push_back(DataKey::Paused.into_val(&env));
+    v.push_back(DataKey::NextEscrow.into_val(&env));
+    v.push_back(DataKey::Escrow(1).into_val(&env));
+    v.push_back(DataKey::EscrowsOf(a.clone()).into_val(&env));
+    v.push_back(DataKey::CashAtHand(a.clone()).into_val(&env));
+    v.push_back(DataKey::Scan(h.clone()).into_val(&env));
+    v.push_back(DataKey::CashOut(h.clone()).into_val(&env));
+    v.push_back(DataKey::CodeUsed(h.clone()).into_val(&env));
+    v.push_back(
+        Escrow {
+            union: a.clone(),
+            member: a.clone(),
+            purpose: Purpose::Repay,
+            amount: 1,
+            remaining: 2,
+            expires: 3,
+        }
+        .into_val(&env),
+    );
+    v.push_back(
+        CashOut {
+            member: a.clone(),
+            union: a.clone(),
+            amount: 1,
+            expires: 2,
+        }
+        .into_val(&env),
+    );
+    for k in [
+        nila_common::upgrade::UpgradeKey::UpgDelay,
+        nila_common::upgrade::UpgradeKey::UpgPending,
+        nila_common::upgrade::UpgradeKey::UpgPendingDelay,
+    ] {
+        v.push_back(k.into_val(&env));
+    }
+    let got: BytesN<32> = env.crypto().sha256(&v.to_xdr(&env)).into();
+    let hex: std::string::String = got
+        .to_array()
+        .iter()
+        .map(|b| std::format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        hex, "89d5f380ff266b1d0ec6b8977b4a63c8f34bb33c36330e53b780f99a269c90a3",
+        "fx_pool storage layout changed"
+    );
+}

@@ -10,7 +10,7 @@
 //! title that union minted. The attester (F1) copies each Polygon title here:
 //! id, holder, minting union and its record hash (R70, R71).
 
-use nila_common::{bump_instance, Role, RolesClient, TTL_BUMP, TTL_THRESHOLD};
+use nila_common::{bump_instance, upgrade, Role, RolesClient, TTL_BUMP, TTL_THRESHOLD};
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contractmeta, contracttype, Address,
     BytesN, Env,
@@ -40,9 +40,6 @@ pub enum DataKey {
     Admin,
     Roles,
     Paused,
-    UpgradeDelay,
-    PendingDelay,
-    PendingUpgrade,
     Title(u64),              // Polygon token id -> title
     Count(Address, Address), // (union, holder) -> titles held from that union
 }
@@ -58,13 +55,6 @@ pub struct Title {
     pub record_hash: BytesN<32>,
     pub metadata_hash: BytesN<32>,
     pub updated_ts: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PendingUpgrade {
-    pub wasm_hash: BytesN<32>,
-    pub eta: u64,
 }
 
 #[contractevent]
@@ -96,17 +86,6 @@ pub struct RecordSet {
 #[contractevent]
 pub struct Paused {
     pub paused: bool,
-}
-
-#[contractevent]
-pub struct UpgradeProposed {
-    pub wasm_hash: BytesN<32>,
-    pub eta: u64,
-}
-
-#[contractevent]
-pub struct UpgradeApplied {
-    pub wasm_hash: BytesN<32>,
 }
 
 #[contract]
@@ -182,6 +161,7 @@ impl LandTitleContract {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Roles, &roles);
         env.storage().instance().set(&DataKey::Paused, &false);
+        upgrade::init(&env, upgrade::DEFAULT_DELAY);
         bump_instance(&env);
     }
 
@@ -315,106 +295,43 @@ impl LandTitleContract {
             .unwrap_or(false)
     }
 
-    /// Raising the delay applies at once. Lowering it waits out the current delay: the first
-    /// call files the change, a second call after the delay applies it.
+    // ---------- upgrade (admin, 48-hour timelock, nila_common::upgrade) ----------
+
+    /// Raising applies at once; lowering applies only when set again after the current delay.
     pub fn set_upgrade_delay(env: Env, delay_seconds: u64) -> Result<(), Error> {
         require_admin(&env)?;
-        let current: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::UpgradeDelay)
-            .unwrap_or(0);
-        if delay_seconds < current {
-            let now = env.ledger().timestamp();
-            match env
-                .storage()
-                .instance()
-                .get::<_, (u64, u64)>(&DataKey::PendingDelay)
-            {
-                Some((d, eta)) if d == delay_seconds && now >= eta => {
-                    env.storage().instance().remove(&DataKey::PendingDelay);
-                }
-                _ => {
-                    env.storage().instance().set(
-                        &DataKey::PendingDelay,
-                        &(delay_seconds, now.saturating_add(current)),
-                    );
-                    bump_instance(&env);
-                    return Ok(());
-                }
-            }
-        }
-        env.storage()
-            .instance()
-            .set(&DataKey::UpgradeDelay, &delay_seconds);
+        upgrade::set_delay(&env, delay_seconds);
         bump_instance(&env);
         Ok(())
     }
 
     pub fn upgrade_delay(env: Env) -> u64 {
-        env.storage()
-            .instance()
-            .get(&DataKey::UpgradeDelay)
-            .unwrap_or(0)
+        upgrade::delay(&env)
     }
 
+    pub fn pending_upgrade(env: Env) -> Option<upgrade::PendingUpgrade> {
+        upgrade::pending(&env)
+    }
+
+    /// Files the new wasm; `execute_upgrade` applies it once the delay has passed.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         require_admin(&env)?;
-        let delay: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::UpgradeDelay)
-            .unwrap_or(0);
-        if delay == 0 {
-            env.deployer()
-                .update_current_contract_wasm(new_wasm_hash.clone());
-            UpgradeApplied {
-                wasm_hash: new_wasm_hash,
-            }
-            .publish(&env);
-        } else {
-            let eta = env.ledger().timestamp().saturating_add(delay);
-            env.storage().instance().set(
-                &DataKey::PendingUpgrade,
-                &PendingUpgrade {
-                    wasm_hash: new_wasm_hash.clone(),
-                    eta,
-                },
-            );
-            UpgradeProposed {
-                wasm_hash: new_wasm_hash,
-                eta,
-            }
-            .publish(&env);
-        }
+        upgrade::propose(&env, new_wasm_hash);
         bump_instance(&env);
         Ok(())
     }
 
     pub fn execute_upgrade(env: Env) -> Result<(), Error> {
         require_admin(&env)?;
-        let pending: PendingUpgrade = env
-            .storage()
-            .instance()
-            .get(&DataKey::PendingUpgrade)
-            .ok_or(Error::UpgradeNotReady)?;
-        if env.ledger().timestamp() < pending.eta {
+        if !upgrade::execute(&env) {
             return Err(Error::UpgradeNotReady);
         }
-        env.storage().instance().remove(&DataKey::PendingUpgrade);
-        env.deployer()
-            .update_current_contract_wasm(pending.wasm_hash.clone());
-        UpgradeApplied {
-            wasm_hash: pending.wasm_hash,
-        }
-        .publish(&env);
-        bump_instance(&env);
         Ok(())
     }
 
     pub fn cancel_upgrade(env: Env) -> Result<(), Error> {
         require_admin(&env)?;
-        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        upgrade::cancel(&env);
         bump_instance(&env);
         Ok(())
     }

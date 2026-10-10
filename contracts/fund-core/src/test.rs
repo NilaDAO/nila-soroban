@@ -730,15 +730,28 @@ fn closed_loans_leave_the_open_list_and_recovery_is_capped() {
 }
 
 #[test]
-fn upgrade_delay_is_lowered_only_through_the_delay() {
+fn upgrade_waits_48_hours_and_the_delay_is_lowered_only_through_it() {
     let fx = setup();
     let c = fx.core();
-    c.set_upgrade_delay(&(48 * 3600));
+    assert_eq!(c.upgrade_delay(), 48 * 3600);
+    let h = loan_id(&fx.env, 0xAA);
+    c.upgrade(&h);
+    assert_eq!(c.pending_upgrade().unwrap().eta, T0 + 48 * 3600);
+    assert_eq!(c.try_execute_upgrade(), Err(Ok(Error::UpgradeNotReady)));
+    c.cancel_upgrade();
+    assert_eq!(c.pending_upgrade(), None);
+    // Only the admin.
+    fx.env.set_auths(&[]);
+    assert!(c.try_upgrade(&h).is_err());
+    fx.env.mock_all_auths();
+
     c.set_upgrade_delay(&0);
-    assert_eq!(c.get_config().upgrade_delay, 48 * 3600);
+    assert_eq!(c.upgrade_delay(), 48 * 3600);
     fx.at(T0 + 48 * 3600);
     c.set_upgrade_delay(&0);
-    assert_eq!(c.get_config().upgrade_delay, 0);
+    assert_eq!(c.upgrade_delay(), 0);
+    c.set_upgrade_delay(&(72 * 3600));
+    assert_eq!(c.upgrade_delay(), 72 * 3600);
 }
 
 #[test]
@@ -1198,4 +1211,115 @@ fn fx_pool_slot_set_once_and_codes_used_once() {
     c.unpause();
     f.burn_expired_escrow(&e);
     fx.assert_conserved();
+}
+
+// ---------- C4: storage layout guard ----------
+
+/// sha256 over the XDR of one sample of every stored key and value. If this changes, data a
+/// deployed fund_core holds no longer decodes after an upgrade: write a migration, or leave
+/// the stored shape alone (docs/STORAGE_LAYOUT.md).
+#[test]
+fn storage_layout_is_frozen() {
+    use soroban_sdk::{xdr::ToXdr, Val};
+    let env = Env::default();
+    let a = Address::from_str(
+        &env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+    let h = BytesN::from_array(&env, &[7; 32]);
+    let mut v: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(&env);
+    for k in [
+        DataKey::Config,
+        DataKey::Paused,
+        DataKey::UnionCfg(a.clone()),
+        DataKey::SeniorMarket(a.clone()),
+        DataKey::JuniorMarket(a.clone()),
+        DataKey::SeniorInv(a.clone(), a.clone()),
+        DataKey::JuniorInv(a.clone(), a.clone()),
+        DataKey::Loan(a.clone(), h.clone()),
+        DataKey::LoansOf(a.clone(), a.clone()),
+        DataKey::UnionBorrows(a.clone()),
+        DataKey::UnionTreasury(a.clone()),
+        DataKey::UnionRainy(a.clone()),
+        DataKey::OnHold(a.clone()),
+        DataKey::FoodToken(a.clone(), h.clone()),
+    ] {
+        v.push_back(k.into_val(&env));
+    }
+    v.push_back(
+        Config {
+            admin: a.clone(),
+            roles: a.clone(),
+            land_title: a.clone(),
+            nin: a.clone(),
+            fx_pool: Some(a.clone()),
+        }
+        .into_val(&env),
+    );
+    v.push_back(union_cfg().into_val(&env));
+    v.push_back(
+        Market {
+            cash: 1,
+            index: 2,
+            total_shares: 3,
+            total_borrows: 4,
+            claimable_principal: 5,
+            exists: true,
+        }
+        .into_val(&env),
+    );
+    v.push_back(
+        Investor {
+            shares: 1,
+            pending: 2,
+            claimable: 3,
+            request_ts: 4,
+            cost: 5,
+            pending_principal_snap: 6,
+        }
+        .into_val(&env),
+    );
+    v.push_back(
+        Loan {
+            borrower: a.clone(),
+            token_id: h.clone(),
+            principal: 1,
+            rate_bp: 2,
+            drawdown_ts: 3,
+            maturity_ts: 4,
+            principal_paid: 5,
+            interest_paid: 6,
+            interest_accrued: 7,
+            last_accrual_ts: 8,
+            overdue: true,
+            defaulted: false,
+            closed: true,
+            milestone: 9,
+            milestone_digest: h.clone(),
+            digest_ts: 10,
+        }
+        .into_val(&env),
+    );
+    v.push_back(
+        FoodToken {
+            member: a.clone(),
+            amount: 1,
+            from_date: 2,
+            loan_id: Some(h.clone()),
+        }
+        .into_val(&env),
+    );
+    v.push_back(nila_common::upgrade::UpgradeKey::UpgDelay.into_val(&env));
+    v.push_back(nila_common::upgrade::UpgradeKey::UpgPending.into_val(&env));
+    v.push_back(nila_common::upgrade::UpgradeKey::UpgPendingDelay.into_val(&env));
+    let got: BytesN<32> = env.crypto().sha256(&v.to_xdr(&env)).into();
+    let hex: std::string::String = got
+        .to_array()
+        .iter()
+        .map(|b| std::format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        hex, "c03031421f7e827c13222cf2794cba59e9c5c33f2dce6dd7cdf3e83c7db39bd0",
+        "fund_core storage layout changed"
+    );
 }

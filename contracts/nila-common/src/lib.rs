@@ -8,6 +8,8 @@
 
 use soroban_sdk::{contractclient, contracttype, Address, BytesN, Env};
 
+pub mod upgrade;
+
 /// ~5s ledgers → 17,280 ledgers / day (network-configured; documented assumption).
 pub const DAY_IN_LEDGERS: u32 = 17_280;
 /// Extend instance/persistent when TTL falls below 30 days.

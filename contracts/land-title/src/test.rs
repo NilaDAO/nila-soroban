@@ -234,3 +234,52 @@ fn membership_read_keeps_the_entry_alive() {
 }
 
 const DAY: u32 = nila_common::DAY_IN_LEDGERS;
+
+/// sha256 over the XDR of one sample of every stored key and value. If this changes, data a
+/// deployed land_title holds no longer decodes after an upgrade: write a migration, or leave the
+/// stored shape alone (docs/STORAGE_LAYOUT.md).
+#[test]
+fn storage_layout_is_frozen() {
+    use soroban_sdk::{xdr::ToXdr, BytesN, IntoVal, Val};
+    let env = Env::default();
+    let a = Address::from_str(
+        &env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+    #[allow(unused_variables)]
+    let h = BytesN::from_array(&env, &[7; 32]);
+    let mut v: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(&env);
+    v.push_back(DataKey::Admin.into_val(&env));
+    v.push_back(DataKey::Roles.into_val(&env));
+    v.push_back(DataKey::Paused.into_val(&env));
+    v.push_back(DataKey::Title(1).into_val(&env));
+    v.push_back(DataKey::Count(a.clone(), a.clone()).into_val(&env));
+    v.push_back(
+        Title {
+            holder: a.clone(),
+            union: a.clone(),
+            polygon_holder: BytesN::from_array(&env, &[9; 20]),
+            record_hash: h.clone(),
+            metadata_hash: h.clone(),
+            updated_ts: 1,
+        }
+        .into_val(&env),
+    );
+    for k in [
+        nila_common::upgrade::UpgradeKey::UpgDelay,
+        nila_common::upgrade::UpgradeKey::UpgPending,
+        nila_common::upgrade::UpgradeKey::UpgPendingDelay,
+    ] {
+        v.push_back(k.into_val(&env));
+    }
+    let got: BytesN<32> = env.crypto().sha256(&v.to_xdr(&env)).into();
+    let hex: std::string::String = got
+        .to_array()
+        .iter()
+        .map(|b| std::format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        hex, "bf0ee8c8b32fbe1e4e0fa3cfa5697d79c5c4ee7cfff579548bd19a60ffe5b8d5",
+        "land_title storage layout changed"
+    );
+}

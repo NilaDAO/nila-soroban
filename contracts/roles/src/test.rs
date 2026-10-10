@@ -163,3 +163,57 @@ fn reads_keep_a_leader_alive() {
         assert!(ttl > 30 * nila_common::DAY_IN_LEDGERS);
     });
 }
+
+#[test]
+fn upgrade_is_timelocked_and_the_delay_cannot_be_cut_at_once() {
+    use soroban_sdk::{testutils::Ledger, BytesN};
+    let (env, _admin, r) = setup();
+    env.ledger().set_timestamp(1_000);
+    assert_eq!(r.upgrade_delay(), 48 * 3600);
+    r.upgrade(&BytesN::from_array(&env, &[1; 32]));
+    assert_eq!(r.try_execute_upgrade(), Err(Ok(Error::UpgradeNotReady)));
+    r.cancel_upgrade();
+    // A stolen admin key cannot drop the delay to zero and upgrade at once.
+    r.set_upgrade_delay(&0);
+    assert_eq!(r.upgrade_delay(), 48 * 3600);
+    env.ledger().set_timestamp(1_000 + 48 * 3600);
+    r.set_upgrade_delay(&0);
+    assert_eq!(r.upgrade_delay(), 0);
+}
+
+/// sha256 over the XDR of one sample of every stored key and value. If this changes, data a
+/// deployed roles holds no longer decodes after an upgrade: write a migration, or leave the
+/// stored shape alone (docs/STORAGE_LAYOUT.md).
+#[test]
+fn storage_layout_is_frozen() {
+    use soroban_sdk::{xdr::ToXdr, BytesN, IntoVal, Val};
+    let env = Env::default();
+    let a = Address::from_str(
+        &env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+    #[allow(unused_variables)]
+    let h = BytesN::from_array(&env, &[7; 32]);
+    let mut v: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(&env);
+    v.push_back(DataKey::Admin.into_val(&env));
+    v.push_back(DataKey::Role(a.clone(), Role::Attester).into_val(&env));
+    v.push_back(DataKey::Leader(a.clone(), a.clone()).into_val(&env));
+    v.push_back(DataKey::UnionRole(a.clone(), a.clone(), UnionRole::Secretary).into_val(&env));
+    for k in [
+        nila_common::upgrade::UpgradeKey::UpgDelay,
+        nila_common::upgrade::UpgradeKey::UpgPending,
+        nila_common::upgrade::UpgradeKey::UpgPendingDelay,
+    ] {
+        v.push_back(k.into_val(&env));
+    }
+    let got: BytesN<32> = env.crypto().sha256(&v.to_xdr(&env)).into();
+    let hex: std::string::String = got
+        .to_array()
+        .iter()
+        .map(|b| std::format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        hex, "d9dbdaa4cf23ac24e5f9cf6870d25d53f7414457dd4916c840b4803a43bcecfc",
+        "roles storage layout changed"
+    );
+}

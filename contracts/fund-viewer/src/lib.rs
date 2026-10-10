@@ -1,10 +1,10 @@
 #![no_std]
 
-use nila_common::bump_instance;
+use nila_common::{bump_instance, upgrade};
 use nila_math::preview_rate_bp;
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contractmeta, contracttype, Address, Env,
-    String,
+    contract, contracterror, contractevent, contractimpl, contractmeta, contracttype, Address,
+    BytesN, Env, String,
 };
 
 contractmeta!(key = "binver", val = "0.1.0");
@@ -20,6 +20,7 @@ pub enum Error {
     NotAdmin = 1,
     NotFound = 3,
     AlreadyExists = 4,
+    UpgradeNotReady = 5,
 }
 
 #[contracttype]
@@ -61,6 +62,7 @@ fn require_admin(env: &Env) -> Result<(), Error> {
 impl FundViewerContract {
     pub fn __constructor(env: Env, admin: Address) {
         env.storage().instance().set(&DataKey::Admin, &admin);
+        upgrade::init(&env, upgrade::DEFAULT_DELAY);
         bump_instance(&env);
     }
 
@@ -108,6 +110,46 @@ impl FundViewerContract {
     pub fn preview_rate_bp(env: Env, params: nila_math::RateParams, util_bp: u32) -> u32 {
         let _ = env;
         preview_rate_bp(&params, util_bp)
+    }
+
+    // ---------- upgrade (admin, 48-hour timelock, nila_common::upgrade) ----------
+
+    /// Raising applies at once; lowering applies only when set again after the current delay.
+    pub fn set_upgrade_delay(env: Env, delay_seconds: u64) -> Result<(), Error> {
+        require_admin(&env)?;
+        upgrade::set_delay(&env, delay_seconds);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    pub fn upgrade_delay(env: Env) -> u64 {
+        upgrade::delay(&env)
+    }
+
+    pub fn pending_upgrade(env: Env) -> Option<upgrade::PendingUpgrade> {
+        upgrade::pending(&env)
+    }
+
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+        require_admin(&env)?;
+        upgrade::propose(&env, new_wasm_hash);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    pub fn execute_upgrade(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        if !upgrade::execute(&env) {
+            return Err(Error::UpgradeNotReady);
+        }
+        Ok(())
+    }
+
+    pub fn cancel_upgrade(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        upgrade::cancel(&env);
+        bump_instance(&env);
+        Ok(())
     }
 }
 
