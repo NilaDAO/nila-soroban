@@ -1161,3 +1161,41 @@ fn cash_out_pay_out_and_reclaim() {
     fx.assert_fx_empty();
     fx.assert_conserved();
 }
+
+#[test]
+fn fx_pool_slot_set_once_and_codes_used_once() {
+    let fx = setup();
+    let c = fx.core();
+    assert_eq!(
+        c.try_set_fx_pool(&Address::generate(&fx.env)),
+        Err(Ok(Error::FxPoolAlreadySet))
+    );
+    let f = fx.fx();
+    fx.scan(Purpose::Treasury, &fx.leader, 2_000 * NIN, 1, None)
+        .unwrap();
+    fx.scan(Purpose::Invest, &fx.neighbour, 1_000 * NIN, 2, None)
+        .unwrap();
+    c.request_unbond_junior(&fx.union, &fx.neighbour, &(400 * NIN));
+    fx.at(T0 + 14 * 86_400);
+    c.claim_junior(&fx.union, &fx.neighbour, &0);
+    let code = Bytes::from_array(&fx.env, b"one-time");
+    let h: BytesN<32> = fx.env.crypto().sha256(&code).into();
+    let exp = T0 + 15 * 86_400;
+    f.request_cash_out(&fx.neighbour, &fx.union, &(100 * NIN), &h, &exp);
+    f.pay_out(&fx.leader, &code);
+    // R16: the code is closed; its preimage is public now, so it is never accepted again.
+    assert_eq!(
+        f.try_request_cash_out(&fx.neighbour, &fx.union, &(100 * NIN), &h, &exp),
+        Err(Ok(FxError::CodeUsed))
+    );
+    // While fund_core is paused no expiry burns the treasury.
+    let e = fx
+        .scan(Purpose::Invest, &fx.borrower, 100 * NIN, 3, None)
+        .unwrap();
+    fx.at(T0 + 30 * 86_400);
+    c.pause();
+    assert!(f.try_burn_expired_escrow(&e).is_err());
+    c.unpause();
+    f.burn_expired_escrow(&e);
+    fx.assert_conserved();
+}

@@ -20,7 +20,7 @@ echo "==> Building WASM"
 stellar contract build
 
 WASM_DIR="$ROOT/target/wasm32v1-none/release"
-# A fund_core built with testnet-short-windows (one day = one second) is for c2-testnet.sh only.
+# fund_core / fx_pool built with testnet-short-windows are for the c*-testnet.sh rehearsals only.
 if LC_ALL=C grep -a -l "testnet-short" "$WASM_DIR"/*.wasm; then
   echo "refusing: a wasm above carries the testnet-short-windows marker" >&2
   exit 1
@@ -64,8 +64,10 @@ USDC="${USDC_SAC:?set USDC_SAC to the USDC SAC address}"
 DAILY_CAP="${DAILY_CAP:-25000000000}" # 2,500 USDC at 7 decimals
 FX=$(deploy nila_fx_pool \
   --admin "$SOURCE" \
-  --usdc "$USDC" \
+  --roles "$ROLES" \
+  --land_title "$LAND_TITLE" \
   --nin "$NIN" \
+  --usdc "$USDC" \
   --daily_cap "$DAILY_CAP")
 echo "fx_pool=$FX"
 
@@ -73,6 +75,14 @@ stellar contract invoke --id "$FX" --source-account "$SOURCE" --network "$NETWOR
   set_fund_core --fund_core "$CORE"
 stellar contract invoke --id "$CORE" --source-account "$SOURCE" --network "$NETWORK" -- \
   set_fx_pool --fx_pool "$FX"
+
+# R8: the nIN issuer hands the SAC admin to fx_pool (only it mints, claws back and authorises
+# trustlines), then fx_pool authorises its own and fund_core's balances. The issuer signs:
+#   stellar contract invoke --id "$NIN" --source-account <issuer> -- set_admin --new_admin "$FX"
+#   stellar contract invoke --id "$FX" --source-account "$SOURCE" -- activate
+# Then lock the issuer (master weight 0) or its classic ops still mint, authorise and claw back.
+# On mainnet the issuer is the trust (D7, X14): executive decision decides that lock.
+echo "==> next: issuer runs set_admin(fx_pool) on the nIN SAC, then fx_pool.activate (see above)"
 
 mkdir -p "$ROOT/.stellar"
 cat > "$ROOT/.stellar/${NETWORK}-addresses.env" <<EOF

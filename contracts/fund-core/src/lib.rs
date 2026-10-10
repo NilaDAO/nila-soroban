@@ -580,8 +580,13 @@ impl FundCore {
         Ok(())
     }
 
+    /// Set once: fx_pool can burn treasury cover and gates every payout, so only a
+    /// timelocked upgrade may repoint it.
     pub fn set_fx_pool(env: Env, fx_pool: Address) -> Result<(), Error> {
         let mut c = require_admin(&env)?;
+        if c.fx_pool.is_some() {
+            return Err(Error::FxPoolAlreadySet);
+        }
         c.fx_pool = Some(fx_pool.clone());
         save_cfg(&env, &c);
         FxPoolSet { fx_pool }.publish(&env);
@@ -675,6 +680,8 @@ impl FundCore {
     /// fx_pool only: an escrow expired unsettled (R15). The union kept the rupees, so the
     /// same nIN burns from its treasury, then its rainy-day fund. Returns what was covered.
     pub fn cover_expired_escrow(env: Env, union: Address, amount: i128) -> Result<i128, Error> {
+        // While paused no draw can settle cash at hand, so no expiry may burn the treasury.
+        require_not_paused(&env)?;
         require_fx_pool(&env)?;
         if amount < 0 {
             return Err(Error::NegativeAmount);

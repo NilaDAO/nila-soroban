@@ -18,5 +18,5 @@ nila-common = { workspace = true }
 soroban-sdk = { workspace = true, features = ["testutils"] }
 
 [features]
-# One day = one second, so a testnet rehearsal reaches escrow and cash-out expiry. Never for mainnet.
+# One day = ten seconds, so a testnet rehearsal reaches escrow and cash-out expiry. Never for mainnet.
 testnet-short-windows = []

@@ -29,13 +29,14 @@ contractmeta!(
 #[cfg(feature = "testnet-short-windows")]
 contractmeta!(
     key = "windows",
-    val = "testnet-short: one day is one second"
+    val = "testnet-short: one day is ten seconds"
 );
 
 #[cfg(not(feature = "testnet-short-windows"))]
 pub const DAY: u64 = 86_400;
+/// Ten seconds, not one: a cash-out must outlive a few ledgers between request and pay-out.
 #[cfg(feature = "testnet-short-windows")]
-pub const DAY: u64 = 1;
+pub const DAY: u64 = 10;
 
 /// Cash at hand is lent out or settled within 7 days (R15).
 pub const ESCROW_TERM: u64 = 7 * DAY;
@@ -113,6 +114,8 @@ pub enum DataKey {
     CashAtHand(Address),
     Scan(BytesN<32>),
     CashOut(BytesN<32>),
+    /// A code paid out or reclaimed: never accepted again (its preimage is public).
+    CodeUsed(BytesN<32>),
 }
 
 /// Rupees a leader took in, not yet lent out or settled (R15).
@@ -216,6 +219,26 @@ pub struct CashOutReclaimed {
     pub code_hash: BytesN<32>,
     pub amount: i128,
 }
+
+#[contractevent]
+pub struct DailyCapSet {
+    pub daily_cap: i128,
+}
+
+#[contractevent]
+pub struct Activated {
+    pub fund_core: Address,
+}
+
+#[contractevent]
+pub struct UpgradeDelaySet {
+    pub delay_seconds: u64,
+    /// When a lowered delay may be applied; 0 once applied.
+    pub eta: u64,
+}
+
+#[contractevent]
+pub struct UpgradeCancelled {}
 
 #[contractevent]
 pub struct Paused {
@@ -381,6 +404,12 @@ fn settle(env: &Env, union: &Address, amount: i128) -> i128 {
     took
 }
 
+fn close_code(env: &Env, code_hash: &BytesN<32>) {
+    let k = DataKey::CodeUsed(code_hash.clone());
+    env.storage().persistent().set(&k, &true);
+    bump(env, &k);
+}
+
 /// R10: her trustline is authorised only for the transfer and deauthorised right after.
 fn sandwich_transfer(env: &Env, from: &Address, to: &Address, member: &Address, amount: i128) {
     let nin = nin_addr(env);
@@ -451,6 +480,7 @@ impl FxPoolContract {
         let sac = StellarAssetClient::new(&env, &nin_addr(&env));
         sac.set_authorized(&env.current_contract_address(), &true);
         sac.set_authorized(&core, &true);
+        Activated { fund_core: core }.publish(&env);
         bump_instance(&env);
         Ok(())
     }
@@ -471,6 +501,7 @@ impl FxPoolContract {
     pub fn set_daily_cap(env: Env, cap: i128) -> Result<(), Error> {
         require_admin(&env)?;
         env.storage().instance().set(&DataKey::DailyCap, &cap);
+        DailyCapSet { daily_cap: cap }.publish(&env);
         bump_instance(&env);
         Ok(())
     }
@@ -608,6 +639,7 @@ impl FxPoolContract {
     /// Anyone, after expiry: the union kept rupees it neither lent nor settled, so the same
     /// amount of its treasury nIN is burned in fund_core (R15).
     pub fn burn_expired_escrow(env: Env, escrow_id: u64) -> Result<i128, Error> {
+        require_not_paused(&env)?;
         let k = DataKey::Escrow(escrow_id);
         let e: Escrow = env.storage().persistent().get(&k).ok_or(Error::NotFound)?;
         if env.ledger().timestamp() < e.expires {
@@ -683,7 +715,12 @@ impl FxPoolContract {
             return Err(Error::NotMember);
         }
         let k = DataKey::CashOut(code_hash.clone());
-        if env.storage().persistent().has(&k) {
+        if env.storage().persistent().has(&k)
+            || env
+                .storage()
+                .persistent()
+                .has(&DataKey::CodeUsed(code_hash.clone()))
+        {
             return Err(Error::CodeUsed);
         }
         sandwich_transfer(
@@ -727,6 +764,7 @@ impl FxPoolContract {
             return Err(Error::Expired);
         }
         env.storage().persistent().remove(&k);
+        close_code(&env, &code_hash);
         TokenClient::new(&env, &nin_addr(&env)).burn(&env.current_contract_address(), &co.amount);
         settle(&env, &co.union, co.amount);
         CashOutPaid {
@@ -749,6 +787,8 @@ impl FxPoolContract {
             return Err(Error::NotExpired);
         }
         env.storage().persistent().remove(&k);
+        close_code(&env, &code_hash);
+        // Her own nIN back (C12): the one authorisation without a fresh membership check.
         sandwich_transfer(
             &env,
             &env.current_contract_address(),
@@ -783,6 +823,7 @@ impl FxPoolContract {
                 _ => {
                     let eta = now.saturating_add(cur);
                     env.storage().instance().set(&key, &(delay_seconds, eta));
+                    UpgradeDelaySet { delay_seconds, eta }.publish(&env);
                     bump_instance(&env);
                     return Ok(());
                 }
@@ -791,6 +832,11 @@ impl FxPoolContract {
         env.storage()
             .instance()
             .set(&DataKey::UpgradeDelay, &delay_seconds);
+        UpgradeDelaySet {
+            delay_seconds,
+            eta: 0,
+        }
+        .publish(&env);
         bump_instance(&env);
         Ok(())
     }
@@ -847,6 +893,7 @@ impl FxPoolContract {
     pub fn cancel_upgrade(env: Env) -> Result<(), Error> {
         require_admin(&env)?;
         env.storage().instance().remove(&DataKey::PendingUpgrade);
+        UpgradeCancelled {}.publish(&env);
         Ok(())
     }
 

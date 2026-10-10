@@ -53,6 +53,8 @@ pub enum Error {
     AboveFoodToken = 47,
     /// The treasury would fall below the union's cash at hand in fx_pool (R15).
     CashAtHand = 48,
+    /// fx_pool is set once; only a timelocked upgrade can repoint it.
+    FxPoolAlreadySet = 49,
 }
 
 #[contracttype]

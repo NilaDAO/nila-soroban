@@ -3,6 +3,9 @@
 # second loan that runs past its payback date into default.
 # Usage: bash scripts/c2-testnet.sh        (testnet only; refuses any other network)
 #
+# Kept as the C2 record. It no longer runs on this branch: C3 made fx_pool a real contract
+# (draw_loan settles its cash at hand and lost escrow_id). The C3 flow is scripts/c3-testnet.sh.
+#
 # fund_core is built with `testnet-short-windows` (one day = one second) so the payback date
 # (drawdown + 90 days, end of season + 21 days) comes after ~2 minutes. That build declares
 # itself in its contract meta ("windows") and must never reach mainnet.
