@@ -9,8 +9,7 @@ use nila_common::{
     TTL_BUMP, TTL_THRESHOLD,
 };
 use nila_math::{
-    accrued_interest, haircut_index, index_bump, to_shares, to_underlying, BPS, DEFAULT_UNBONDING,
-    DUST, RAY,
+    accrued_interest, haircut_index, index_bump, to_shares, to_underlying, BPS, DUST, RAY,
 };
 use soroban_sdk::{
     contract, contractimpl, contractmeta, contracttype, token::TokenClient, vec, Address, BytesN,
@@ -40,6 +39,8 @@ pub const DAY: u64 = 1;
 
 /// Payback is never earlier than drawdown + 90 days (LOAN_RULES §1).
 pub const MIN_TERM: u64 = 90 * DAY;
+/// Unbond request to claim (R28).
+pub const UNBONDING: u64 = 14 * DAY;
 /// Repay window after the end of season (LOAN_RULES §1).
 pub const REPAY_WINDOW: u64 = 21 * DAY;
 /// Open loans per member, for `loans_of` and the lock (R27, R43).
@@ -462,7 +463,7 @@ fn claim(
     let mut inv = load_inv(env, junior, union, who);
     let mut m = load_market(env, junior, union);
     if inv.pending > 0 {
-        if env.ledger().timestamp() < inv.request_ts + DEFAULT_UNBONDING {
+        if env.ledger().timestamp() < inv.request_ts + UNBONDING {
             return Err(Error::NotEligibleMaturity);
         }
         inv.claimable += inv.pending;

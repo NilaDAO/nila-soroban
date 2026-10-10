@@ -140,7 +140,8 @@ tx stellar contract invoke --id "$CORE" --source ${P}-admin -- \
 
 scan() { # purpose member amount [loan_id] — purpose 0 invest, 1 repay, 2 recovery, 3 treasury
   local extra=()
-  [[ -n "${4:-}" ]] && extra=(--loan_id "$4")
+  # Option<BytesN<32>>: the CLI reads it as a JSON string.
+  [[ -n "${4:-}" ]] && extra=(--loan_id "\"$4\"")
   tx stellar contract invoke --id "$FX" --source ${P}-leader -- \
     cash_scan_mint --leader ${P}-leader --union "$UNION" --purpose "$1" --member "$2" \
     --amount "$3" --scan_hash "$(receipt)" ${extra[@]+"${extra[@]}"}
