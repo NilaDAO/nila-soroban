@@ -69,7 +69,8 @@ pub struct LoanDrawn {
     pub token_id: BytesN<32>,
     pub cash: i128,
     pub rate_bp: u32,
-    pub escrow_id: u64,
+    /// How much of the union's cash at hand in fx_pool the draw settled (D9).
+    pub cash_settled: i128,
 }
 
 #[contractevent]
@@ -147,4 +148,22 @@ pub struct UpgradeProposed {
 #[contractevent]
 pub struct UpgradeApplied {
     pub wasm_hash: BytesN<32>,
+}
+
+/// Treasury in (cash scan, positive) or out to a leader (negative), R17.
+#[contractevent]
+pub struct TreasuryMoved {
+    #[topic]
+    pub union: Address,
+    pub amount: i128,
+    pub rainy: bool,
+}
+
+/// An fx_pool escrow expired unsettled; its nIN burned from the treasury (R15).
+#[contractevent]
+pub struct EscrowCovered {
+    #[topic]
+    pub union: Address,
+    pub amount: i128,
+    pub covered: i128,
 }

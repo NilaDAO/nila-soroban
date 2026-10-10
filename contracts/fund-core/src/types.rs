@@ -51,6 +51,8 @@ pub enum Error {
     NotOpenYet = 46,
     /// More cash than the food token's attested amount.
     AboveFoodToken = 47,
+    /// The treasury would fall below the union's cash at hand in fx_pool (R15).
+    CashAtHand = 48,
 }
 
 #[contracttype]
@@ -60,7 +62,7 @@ pub struct Config {
     pub roles: Address,
     pub land_title: Address,
     pub nin: Address,
-    /// Cash-scan entry point for all money coming in (C3). Until then a stand-in on testnet.
+    /// fx_pool: the cash-scan entry point for all money coming in, and the nIN SAC admin.
     pub fx_pool: Option<Address>,
     pub upgrade_delay: u64,
 }
@@ -82,7 +84,6 @@ pub struct UnionConfig {
     pub safety_bp: u32,
     pub safety_floor: i128,
     pub hard_stop: bool,
-    pub escrow_duration: u32,
     /// Cap each draw at the food token's attested amount. Off during testing: the union may
     /// give more than attested, within `max_loan`.
     pub enforce_token_amount: bool,

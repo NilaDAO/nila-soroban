@@ -8,7 +8,7 @@ use nila_land_title::{LandTitleContract, LandTitleContractClient};
 use nila_math::{NIN, YEAR};
 use nila_roles::RolesContract;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, IssuerFlags, Ledger},
     token::{StellarAssetClient, TokenClient},
     Address, BytesN, Env,
 };
@@ -78,7 +78,7 @@ impl Fx {
     fn draw(&self, id: &BytesN<32>, cash: i128) {
         self.attest(&self.borrower, id, cash);
         self.core()
-            .draw_loan(&self.union, &self.borrower, id, id, &cash, &0);
+            .draw_loan(&self.union, &self.borrower, id, id, &cash);
     }
 
     fn at(&self, ts: u64) {
@@ -110,7 +110,6 @@ fn union_cfg() -> UnionConfig {
         safety_bp: 0,
         safety_floor: 0,
         hard_stop: false,
-        escrow_duration: 7 * 86_400,
         enforce_token_amount: false,
     }
 }
@@ -130,6 +129,10 @@ fn setup() -> Fx {
 
     let sac = env.register_stellar_asset_contract_v2(admin.clone());
     let nin = sac.address();
+    // R8: authorisation required, revocable, clawback, as on testnet.
+    sac.issuer().set_flag(IssuerFlags::RequiredFlag);
+    sac.issuer().set_flag(IssuerFlags::RevocableFlag);
+    sac.issuer().set_flag(IssuerFlags::ClawbackEnabledFlag);
 
     let roles_id = env.register(RolesContract, (admin.clone(),));
     let roles = nila_roles::RolesContractClient::new(&env, &roles_id);
@@ -140,14 +143,29 @@ fn setup() -> Fx {
     let titles_id = env.register(LandTitleContract, (admin.clone(), roles_id.clone()));
     let core_id = env.register(
         FundCore,
-        (admin.clone(), roles_id, titles_id.clone(), nin.clone()),
+        (
+            admin.clone(),
+            roles_id.clone(),
+            titles_id.clone(),
+            nin.clone(),
+        ),
     );
     let usdc = Address::generate(&env);
     let fx_id = env.register(
         FxPoolContract,
-        (admin.clone(), usdc, nin.clone(), 25_000 * NIN),
+        (
+            admin.clone(),
+            roles_id,
+            titles_id.clone(),
+            nin.clone(),
+            usdc,
+            25_000 * NIN,
+        ),
     );
     FxPoolContractClient::new(&env, &fx_id).set_fund_core(&core_id);
+    // R8: fx_pool is the nIN SAC admin and authorises the two contract balances.
+    StellarAssetClient::new(&env, &nin).set_admin(&fx_id);
+    FxPoolContractClient::new(&env, &fx_id).activate();
 
     let fx = Fx {
         env,
@@ -229,13 +247,13 @@ fn draw_checks_title_gate_cap_and_cash() {
     let id = loan_id(&fx.env, 1);
 
     let err = c
-        .try_draw_loan(&fx.union, &stranger, &id, &id, &(10 * NIN), &0)
+        .try_draw_loan(&fx.union, &stranger, &id, &id, &(10 * NIN))
         .unwrap_err();
     assert_eq!(err, Ok(Error::NftRequired));
     // R26: 600 nIN invested before any crop share cash.
     fx.attest(&fx.borrower, &id, 20_000 * NIN);
     let err = c
-        .try_draw_loan(&fx.union, &fx.borrower, &id, &id, &(10 * NIN), &0)
+        .try_draw_loan(&fx.union, &fx.borrower, &id, &id, &(10 * NIN))
         .unwrap_err();
     assert_eq!(err, Ok(Error::BelowGate));
 
@@ -243,14 +261,14 @@ fn draw_checks_title_gate_cap_and_cash() {
     fx.invest(&fx.neighbour, 20_000 * NIN);
     // R34: ₹10,000 per loan.
     let err = c
-        .try_draw_loan(&fx.union, &fx.borrower, &id, &id, &(10_000 * NIN + 1), &0)
+        .try_draw_loan(&fx.union, &fx.borrower, &id, &id, &(10_000 * NIN + 1))
         .unwrap_err();
     assert_eq!(err, Ok(Error::CapExceeded));
-    c.draw_loan(&fx.union, &fx.borrower, &id, &id, &(10_000 * NIN), &0);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &id, &(10_000 * NIN));
     let token2 = loan_id(&fx.env, 2);
     fx.attest(&fx.borrower, &token2, NIN);
     let err = c
-        .try_draw_loan(&fx.union, &fx.borrower, &token2, &id, &NIN, &0)
+        .try_draw_loan(&fx.union, &fx.borrower, &token2, &id, &NIN)
         .unwrap_err();
     assert_eq!(err, Ok(Error::LoanExists));
 
@@ -261,7 +279,7 @@ fn draw_checks_title_gate_cap_and_cash() {
     other.attest(&other.borrower, &t, 1_000 * NIN);
     let err = other
         .core()
-        .try_draw_loan(&other.union, &other.borrower, &t, &t, &(601 * NIN), &0)
+        .try_draw_loan(&other.union, &other.borrower, &t, &t, &(601 * NIN))
         .unwrap_err();
     assert_eq!(err, Ok(Error::InsufficientCash));
 }
@@ -455,7 +473,7 @@ fn overdue_puts_the_union_on_hold_until_repaid() {
     let id2 = loan_id(&fx.env, 2);
     fx.attest(&fx.neighbour, &id2, NIN);
     let err = c
-        .try_draw_loan(&fx.union, &fx.neighbour, &id2, &id2, &NIN, &0)
+        .try_draw_loan(&fx.union, &fx.neighbour, &id2, &id2, &NIN)
         .unwrap_err();
     assert_eq!(err, Ok(Error::LendingOnHold));
 
@@ -464,7 +482,7 @@ fn overdue_puts_the_union_on_hold_until_repaid() {
     assert_eq!(c.on_hold(&fx.union), 1);
     assert!(fx.repay(&id, 1_000 * NIN));
     assert_eq!(c.on_hold(&fx.union), 0);
-    c.draw_loan(&fx.union, &fx.neighbour, &id2, &id2, &NIN, &0);
+    c.draw_loan(&fx.union, &fx.neighbour, &id2, &id2, &NIN);
 }
 
 #[test]
@@ -565,26 +583,6 @@ fn recovery_after_default_goes_back_to_the_pool() {
 }
 
 #[test]
-fn draw_closes_the_cash_at_hand_escrow() {
-    let fx = setup();
-    fx.invest(&fx.borrower, 1_000 * NIN);
-    fx.fx()
-        .open_escrow(&7, &fx.union, &(1_000 * NIN), &(7 * 86_400));
-    let id = loan_id(&fx.env, 1);
-    fx.attest(&fx.borrower, &id, 400 * NIN);
-    fx.core()
-        .draw_loan(&fx.union, &fx.borrower, &id, &id, &(400 * NIN), &7);
-    assert_eq!(fx.fx().get_escrow(&7).unwrap().remaining, 600 * NIN);
-    assert_eq!(
-        fx.core()
-            .get_loan(&fx.union, &loan_id(&fx.env, 1))
-            .unwrap()
-            .escrow_id,
-        7
-    );
-}
-
-#[test]
 fn no_admin_or_oracle_as_leader() {
     let fx = setup();
     let c = fx.core();
@@ -616,7 +614,6 @@ fn pause_stops_draws_and_money_in() {
             &loan_id(&fx.env, 1),
             &loan_id(&fx.env, 1),
             &NIN,
-            &0,
         )
         .unwrap_err();
     assert_eq!(err, Ok(Error::Paused));
@@ -756,7 +753,7 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
         loan_id(&fx.env, 2),
     );
     let draw = |token: &BytesN<32>, id: &BytesN<32>, cash: i128| {
-        c.try_draw_loan(&fx.union, &fx.borrower, token, id, &cash, &0)
+        c.try_draw_loan(&fx.union, &fx.borrower, token, id, &cash)
             .unwrap_err()
     };
 
@@ -789,7 +786,7 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
     // Testing (gate off): the union may give more than attested, within the ₹10,000 cap.
     c.set_union_config(&fx.union, &union_cfg());
     assert_eq!(draw(&tok, &l1, 10_000 * NIN + 1), Ok(Error::CapExceeded));
-    c.draw_loan(&fx.union, &fx.borrower, &tok, &l1, &(800 * NIN), &0);
+    c.draw_loan(&fx.union, &fx.borrower, &tok, &l1, &(800 * NIN));
     assert_eq!(
         c.food_token(&fx.union, &tok).unwrap().loan_id,
         Some(l1.clone())
@@ -810,4 +807,357 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
         .unwrap_err(),
         Ok(Error::FoodTokenUsed)
     );
+}
+
+// ---------- C3: the cash desk through the real fx_pool, strict auth ----------
+
+use nila_fx_pool::{Error as FxError, Purpose};
+use soroban_sdk::{
+    testutils::{MockAuth, MockAuthInvoke},
+    Bytes, IntoVal,
+};
+
+fn hash(env: &Env, b: u8) -> BytesN<32> {
+    BytesN::from_array(env, &[b; 32])
+}
+
+impl Fx {
+    /// The leader scans rupees in; only the leader signs (fx_pool signs its own pull).
+    fn scan(
+        &self,
+        purpose: Purpose,
+        member: &Address,
+        amount: i128,
+        receipt: u8,
+        loan: Option<BytesN<32>>,
+    ) -> Result<u64, FxError> {
+        let args = (
+            self.leader.clone(),
+            self.union.clone(),
+            purpose,
+            member.clone(),
+            amount,
+            hash(&self.env, receipt),
+            loan.clone(),
+        );
+        self.env.mock_auths(&[MockAuth {
+            address: &self.leader,
+            invoke: &MockAuthInvoke {
+                contract: &self.fx_id,
+                fn_name: "cash_scan_mint",
+                args: args.into_val(&self.env),
+                sub_invokes: &[],
+            },
+        }]);
+        let r = self.fx().try_cash_scan_mint(
+            &self.leader,
+            &self.union,
+            &purpose,
+            member,
+            &amount,
+            &hash(&self.env, receipt),
+            &loan,
+        );
+        self.env.mock_all_auths();
+        match r {
+            Ok(Ok(id)) => Ok(id),
+            Err(Ok(e)) => Err(e),
+            other => panic!("receipt {receipt}: {other:?}"),
+        }
+    }
+
+    fn authorized(&self, who: &Address) -> bool {
+        StellarAssetClient::new(&self.env, &self.nin).authorized(who)
+    }
+
+    /// fx_pool holds only escrowed cash-outs; here none are open.
+    fn assert_fx_empty(&self) {
+        assert_eq!(self.token().balance(&self.fx_id), 0);
+    }
+}
+
+#[test]
+fn cash_scan_invest_draw_repay_with_strict_auth() {
+    let fx = setup();
+    let c = fx.core();
+    let f = fx.fx();
+    // Cash at hand may not exceed the treasury: the union funds it first (R15, R17).
+    assert_eq!(
+        fx.scan(Purpose::Invest, &fx.borrower, 1_000 * NIN, 1, None),
+        Err(FxError::AboveTreasury)
+    );
+    assert_eq!(
+        fx.scan(Purpose::Treasury, &fx.leader, 1_500 * NIN, 2, None),
+        Ok(0)
+    );
+    assert_eq!(c.union_treasury(&fx.union), 1_500 * NIN);
+    assert_eq!(f.cash_at_hand(&fx.union), 0);
+
+    let e1 = fx
+        .scan(Purpose::Invest, &fx.borrower, 1_000 * NIN, 3, None)
+        .unwrap();
+    assert_eq!(e1, 1);
+    assert_eq!(c.position(&fx.union, &fx.borrower).invested, 1_000 * NIN);
+    assert_eq!(f.cash_at_hand(&fx.union), 1_000 * NIN);
+    // A receipt is used once.
+    assert_eq!(
+        fx.scan(Purpose::Invest, &fx.borrower, NIN, 3, None),
+        Err(FxError::ScanUsed)
+    );
+    assert_eq!(
+        fx.scan(Purpose::Invest, &fx.neighbour, 501 * NIN, 4, None),
+        Err(FxError::AboveTreasury)
+    );
+    fx.assert_fx_empty();
+    fx.assert_conserved();
+
+    // The draw's cash part leaves the cash at hand (D9).
+    let id = loan_id(&fx.env, 1);
+    fx.attest(&fx.borrower, &id, 400 * NIN);
+    fx.env.mock_auths(&[MockAuth {
+        address: &fx.borrower,
+        invoke: &MockAuthInvoke {
+            contract: &fx.core_id,
+            fn_name: "draw_loan",
+            args: (
+                fx.union.clone(),
+                fx.borrower.clone(),
+                id.clone(),
+                id.clone(),
+                400 * NIN,
+            )
+                .into_val(&fx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &id, &(400 * NIN));
+    fx.env.mock_all_auths();
+    assert_eq!(f.cash_at_hand(&fx.union), 600 * NIN);
+    assert_eq!(f.get_escrow(&e1).unwrap().remaining, 600 * NIN);
+    assert_eq!(fx.token().balance(&fx.borrower), 0);
+
+    // Repay in cash, more than owed: only what she owes is minted; the leader gives change.
+    fx.at(T0 + YEAR / 2);
+    let interest = 400 * NIN * 1250 / 10_000 / 2;
+    let e2 = fx
+        .scan(Purpose::Repay, &fx.borrower, 500 * NIN, 5, Some(id.clone()))
+        .unwrap();
+    assert!(c.get_loan(&fx.union, &id).unwrap().closed);
+    assert_eq!(f.get_escrow(&e2).unwrap().amount, 400 * NIN + interest);
+    assert_eq!(f.cash_at_hand(&fx.union), 1_000 * NIN + interest);
+    assert_eq!(
+        fx.scan(Purpose::Repay, &fx.borrower, NIN, 6, None),
+        Err(FxError::NoLoan)
+    );
+    fx.assert_fx_empty();
+    fx.assert_conserved();
+}
+
+#[test]
+fn scan_caps_and_roles() {
+    let fx = setup();
+    fx.scan(Purpose::Treasury, &fx.leader, 10_000 * NIN, 1, None)
+        .unwrap();
+    // ₹10,000 per scan (R76).
+    assert_eq!(
+        fx.scan(Purpose::Invest, &fx.borrower, 10_000 * NIN + 1, 2, None),
+        Err(FxError::CapExceeded)
+    );
+    assert_eq!(
+        fx.scan(Purpose::Invest, &fx.borrower, 0, 3, None),
+        Err(FxError::AmountZero)
+    );
+    // A non-member cannot be invested for: fund_core refuses, nothing is minted.
+    let stranger = Address::generate(&fx.env);
+    assert!(fx
+        .fx()
+        .try_cash_scan_mint(
+            &fx.leader,
+            &fx.union,
+            &Purpose::Invest,
+            &stranger,
+            &NIN,
+            &hash(&fx.env, 4),
+            &None
+        )
+        .is_err());
+    // Only a leader of the union scans.
+    assert_eq!(
+        fx.fx().try_cash_scan_mint(
+            &fx.borrower,
+            &fx.union,
+            &Purpose::Invest,
+            &fx.borrower,
+            &NIN,
+            &hash(&fx.env, 5),
+            &None
+        ),
+        Err(Ok(FxError::NotLeader))
+    );
+    // The admin raises the cap in steps, evented (C15).
+    fx.fx().set_max_scan(&(20_000 * NIN));
+    assert_eq!(fx.fx().max_scan(), 20_000 * NIN);
+    fx.assert_fx_empty();
+    fx.assert_conserved();
+}
+
+#[test]
+fn unsettled_cash_at_hand_burns_treasury_after_7_days() {
+    let fx = setup();
+    let c = fx.core();
+    fx.scan(Purpose::Treasury, &fx.leader, 1_000 * NIN, 1, None)
+        .unwrap();
+    let e = fx
+        .scan(Purpose::Invest, &fx.borrower, 800 * NIN, 2, None)
+        .unwrap();
+    // The treasury cannot be withdrawn below the cash at hand.
+    assert_eq!(
+        c.try_withdraw_union_treasury(&fx.leader, &fx.union, &(201 * NIN), &false),
+        Err(Ok(Error::CashAtHand))
+    );
+    assert_eq!(
+        fx.fx().try_burn_expired_escrow(&e),
+        Err(Ok(FxError::NotExpired))
+    );
+    fx.at(T0 + 7 * 86_400);
+    // Anyone may call it once expired; the union kept the rupees.
+    fx.env.set_auths(&[]);
+    assert_eq!(fx.fx().burn_expired_escrow(&e), 800 * NIN);
+    fx.env.mock_all_auths();
+    assert_eq!(c.union_treasury(&fx.union), 200 * NIN);
+    assert_eq!(fx.fx().cash_at_hand(&fx.union), 0);
+    // Her investment is untouched.
+    assert_eq!(c.position(&fx.union, &fx.borrower).invested, 800 * NIN);
+    fx.assert_conserved();
+}
+
+#[test]
+fn trustline_opens_only_inside_the_payout() {
+    let fx = setup();
+    let c = fx.core();
+    fx.scan(Purpose::Treasury, &fx.leader, 2_000 * NIN, 1, None)
+        .unwrap();
+    fx.scan(Purpose::Invest, &fx.neighbour, 1_000 * NIN, 2, None)
+        .unwrap();
+    c.request_unbond_junior(&fx.union, &fx.neighbour, &(400 * NIN));
+    fx.at(T0 + 14 * 86_400);
+    c.claim_junior(&fx.union, &fx.neighbour, &0);
+    assert_eq!(fx.token().balance(&fx.neighbour), 400 * NIN);
+    // R10: deauthorised again right after; she cannot send it anywhere herself.
+    assert!(!fx.authorized(&fx.neighbour));
+    assert!(fx
+        .token()
+        .try_transfer(&fx.neighbour, &fx.borrower, &NIN)
+        .is_err());
+    // Only fund_core may ask fx_pool to authorise, and only for a title holder or leader.
+    fx.env.set_auths(&[]);
+    assert!(fx
+        .fx()
+        .try_set_member_auth(&fx.union, &fx.neighbour, &true)
+        .is_err());
+    fx.env.mock_all_auths();
+    let stranger = Address::generate(&fx.env);
+    assert_eq!(
+        fx.fx().try_set_member_auth(&fx.union, &stranger, &true),
+        Err(Ok(FxError::NotMember))
+    );
+    // Treasury to a leader goes the same way.
+    c.withdraw_union_treasury(&fx.leader, &fx.union, &(500 * NIN), &false);
+    assert_eq!(fx.token().balance(&fx.leader), 500 * NIN);
+    assert!(!fx.authorized(&fx.leader));
+    fx.assert_conserved();
+}
+
+#[test]
+fn cash_out_pay_out_and_reclaim() {
+    let fx = setup();
+    let c = fx.core();
+    let f = fx.fx();
+    fx.scan(Purpose::Treasury, &fx.leader, 2_000 * NIN, 1, None)
+        .unwrap();
+    fx.scan(Purpose::Invest, &fx.neighbour, 1_000 * NIN, 2, None)
+        .unwrap();
+    c.request_unbond_junior(&fx.union, &fx.neighbour, &(600 * NIN));
+    fx.at(T0 + 14 * 86_400);
+    c.claim_junior(&fx.union, &fx.neighbour, &0);
+    let now = T0 + 14 * 86_400;
+
+    // A7: her nIN into fx_pool under the code's hash; only she signs.
+    let code = Bytes::from_array(&fx.env, b"meena-code-1");
+    let code_hash: BytesN<32> = fx.env.crypto().sha256(&code).into();
+    let expires = now + 86_400;
+    fx.env.mock_auths(&[MockAuth {
+        address: &fx.neighbour,
+        invoke: &MockAuthInvoke {
+            contract: &fx.fx_id,
+            fn_name: "request_cash_out",
+            args: (
+                fx.neighbour.clone(),
+                fx.union.clone(),
+                250 * NIN,
+                code_hash.clone(),
+                expires,
+            )
+                .into_val(&fx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &fx.nin,
+                fn_name: "transfer",
+                args: (fx.neighbour.clone(), fx.fx_id.clone(), 250 * NIN).into_val(&fx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+    f.request_cash_out(&fx.neighbour, &fx.union, &(250 * NIN), &code_hash, &expires);
+    fx.env.mock_all_auths();
+    assert!(!fx.authorized(&fx.neighbour));
+    assert_eq!(fx.token().balance(&fx.fx_id), 250 * NIN);
+    assert_eq!(fx.token().balance(&fx.neighbour), 350 * NIN);
+
+    // The leader scans the code and counts out the rupees: burned, cash at hand down.
+    let hand = f.cash_at_hand(&fx.union);
+    assert_eq!(
+        f.try_pay_out(&fx.borrower, &code),
+        Err(Ok(FxError::NotLeader))
+    );
+    assert_eq!(f.pay_out(&fx.leader, &code), 250 * NIN);
+    assert_eq!(f.cash_at_hand(&fx.union), hand - 250 * NIN);
+    assert_eq!(f.try_pay_out(&fx.leader, &code), Err(Ok(FxError::NotFound)));
+    fx.assert_fx_empty();
+
+    // Caps: ₹10,000, at most 7 days, a code is used once while open.
+    let h2 = hash(&fx.env, 9);
+    assert_eq!(
+        f.try_request_cash_out(&fx.neighbour, &fx.union, &(10_000 * NIN + 1), &h2, &expires),
+        Err(Ok(FxError::CapExceeded))
+    );
+    assert_eq!(
+        f.try_request_cash_out(&fx.neighbour, &fx.union, &NIN, &h2, &(now + 8 * 86_400)),
+        Err(Ok(FxError::BadExpiry))
+    );
+    let stranger = Address::generate(&fx.env);
+    assert_eq!(
+        f.try_request_cash_out(&stranger, &fx.union, &NIN, &h2, &expires),
+        Err(Ok(FxError::NotMember))
+    );
+
+    // Never collected: after expiry anyone returns it to her wallet, deauthorised again.
+    f.request_cash_out(&fx.neighbour, &fx.union, &(100 * NIN), &h2, &expires);
+    assert_eq!(
+        f.try_request_cash_out(&fx.neighbour, &fx.union, &NIN, &h2, &expires),
+        Err(Ok(FxError::CodeUsed))
+    );
+    assert_eq!(f.try_reclaim_cash_out(&h2), Err(Ok(FxError::NotExpired)));
+    fx.at(expires);
+    let code2 = Bytes::from_array(&fx.env, &[9; 32]);
+    assert_eq!(
+        f.try_pay_out(&fx.leader, &code2),
+        Err(Ok(FxError::NotFound))
+    );
+    fx.env.set_auths(&[]);
+    assert_eq!(f.reclaim_cash_out(&h2), 100 * NIN);
+    fx.env.mock_all_auths();
+    assert_eq!(fx.token().balance(&fx.neighbour), 350 * NIN);
+    assert!(!fx.authorized(&fx.neighbour));
+    fx.assert_fx_empty();
+    fx.assert_conserved();
 }

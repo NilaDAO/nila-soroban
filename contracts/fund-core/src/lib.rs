@@ -499,9 +499,22 @@ fn claim(
     m.claimable_principal -= release;
     save_inv(env, junior, union, who, &inv);
     save_market(env, junior, union, &m);
-    // Her trustline is opened for this payout inside fx_pool from C3 (R10).
-    nin(env).transfer(&env.current_contract_address(), who, &amount);
+    if junior {
+        pay_member(env, union, who, amount)?;
+    } else {
+        // Senior payouts go out through fx_pool's USDC redeem (R47, X15): T2.
+        nin(env).transfer(&env.current_contract_address(), who, &amount);
+    }
     Ok(amount)
+}
+
+/// R10: fx_pool (the nIN SAC admin) authorises her trustline for this payout only.
+fn pay_member(env: &Env, union: &Address, who: &Address, amount: i128) -> Result<(), Error> {
+    let fx = FxPoolClient::new(env, &cfg(env).fx_pool.ok_or(Error::NotFxPool)?);
+    fx.set_member_auth(union, who, &true);
+    nin(env).transfer(&env.current_contract_address(), who, &amount);
+    fx.set_member_auth(union, who, &false);
+    Ok(())
 }
 
 /// A closed loan lifts its hold and leaves her open-loan list (the events keep the history).
@@ -622,14 +635,74 @@ impl FundCore {
         if amount > i_get(&env, &key) {
             return Err(Error::InsufficientCash);
         }
+        let fx = cfg(&env).fx_pool.ok_or(Error::NotFxPool)?;
+        // Cash at hand never exceeds the treasury (R15).
+        if !from_rainy
+            && i_get(&env, &key) - amount < FxPoolClient::new(&env, &fx).cash_at_hand(&union)
+        {
+            return Err(Error::CashAtHand);
+        }
         i_add(&env, &key, -amount)?;
-        nin(&env).transfer(&env.current_contract_address(), &leader, &amount);
+        pay_member(&env, &union, &leader, amount)?;
+        TreasuryMoved {
+            union,
+            amount: -amount,
+            rainy: from_rainy,
+        }
+        .publish(&env);
         bump_instance(&env);
         Ok(())
     }
 
-    // credit_escrow_nin and burn_treasury_for_expiry (R15) move book cash without tokens;
-    // they come back in C3 tied to fx_pool's escrow and an actual transfer or burn.
+    /// Cash-scan TREASURY: the union's own rupees into its treasury (R17), via fx_pool.
+    pub fn deposit_union_treasury(env: Env, union: Address, amount: i128) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        let fx = require_fx_pool(&env)?;
+        require_positive(amount)?;
+        union_cfg(&env, &union)?;
+        nin(&env).transfer(&fx, env.current_contract_address(), &amount);
+        i_add(&env, &DataKey::UnionTreasury(union.clone()), amount)?;
+        TreasuryMoved {
+            union,
+            amount,
+            rainy: false,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// fx_pool only: an escrow expired unsettled (R15). The union kept the rupees, so the
+    /// same nIN burns from its treasury, then its rainy-day fund. Returns what was covered.
+    pub fn cover_expired_escrow(env: Env, union: Address, amount: i128) -> Result<i128, Error> {
+        require_fx_pool(&env)?;
+        if amount < 0 {
+            return Err(Error::NegativeAmount);
+        }
+        let mut left = amount;
+        for key in [
+            DataKey::UnionTreasury(union.clone()),
+            DataKey::UnionRainy(union.clone()),
+        ] {
+            let take = core::cmp::min(left, i_get(&env, &key));
+            if take > 0 {
+                i_add(&env, &key, -take)?;
+                left -= take;
+            }
+        }
+        let covered = amount - left;
+        if covered > 0 {
+            nin(&env).burn(&env.current_contract_address(), &covered);
+        }
+        EscrowCovered {
+            union,
+            amount,
+            covered,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(covered)
+    }
 
     // ---------- junior (members of the union) ----------
 
@@ -813,8 +886,8 @@ impl FundCore {
     /// food token of hers: from its date, once, and at most its amount when the union's
     /// `enforce_token_amount` is on. The cash part comes from the
     /// junior pool only (R33, C8). The leader hands her the rupees from the union's cash
-    /// at hand, so the loan's nIN is burned here and no nIN reaches her wallet (D9);
-    /// `escrow_id` names that cash-at-hand escrow in fx_pool, 0 for none.
+    /// at hand, so the loan's nIN is burned here, the cash at hand in fx_pool is settled
+    /// oldest first, and no nIN reaches her wallet (D9, R35).
     pub fn draw_loan(
         env: Env,
         union: Address,
@@ -822,7 +895,6 @@ impl FundCore {
         token_id: BytesN<32>,
         loan_id: BytesN<32>,
         cash: i128,
-        escrow_id: u64,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         member.require_auth();
@@ -895,7 +967,6 @@ impl FundCore {
             interest_paid: 0,
             interest_accrued: 0,
             last_accrual_ts: now,
-            escrow_id,
             overdue: false,
             defaulted: false,
             closed: false,
@@ -913,10 +984,8 @@ impl FundCore {
         bump_key(&env, &lk);
 
         nin(&env).burn(&env.current_contract_address(), &cash);
-        if escrow_id != 0 {
-            let fx = cfg(&env).fx_pool.ok_or(Error::NotFxPool)?;
-            FxPoolClient::new(&env, &fx).resolve_escrow_cash(&escrow_id, &cash);
-        }
+        let fx = cfg(&env).fx_pool.ok_or(Error::NotFxPool)?;
+        let settled = FxPoolClient::new(&env, &fx).settle_cash(&union, &cash);
 
         LoanDrawn {
             union,
@@ -925,7 +994,7 @@ impl FundCore {
             token_id,
             cash,
             rate_bp: uc.rate_bp,
-            escrow_id,
+            cash_settled: settled,
         }
         .publish(&env);
         bump_instance(&env);

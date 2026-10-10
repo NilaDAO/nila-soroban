@@ -4,7 +4,7 @@
 //! Storage policy (TAD §4.3):
 //! - instance: facility config, admin, caps, lock terms
 //! - persistent: LP positions, loans, union markets
-//! - temporary: cash-escrow entries (fx-pool only)
+//! - persistent: cash-escrow and cash-out entries (fx-pool; kept until resolved)
 
 use soroban_sdk::{contractclient, contracttype, Address, BytesN, Env};
 
@@ -54,7 +54,6 @@ pub struct Loan {
     pub interest_paid: i128,
     pub interest_accrued: i128,
     pub last_accrual_ts: u64,
-    pub escrow_id: u64,
     pub overdue: bool,
     pub defaulted: bool,
     pub closed: bool,
@@ -95,8 +94,26 @@ pub trait RolesTrait {
     fn has_role(account: Address, role: Role) -> bool;
 }
 
-/// Flattened FX callback: Core passes amount; FX does not read back into Core.
+/// What fund_core asks of fx_pool (C3). fx_pool never reads back into fund_core inside
+/// these calls (TAD §7.1).
 #[contractclient(name = "FxPoolClient")]
 pub trait FxPoolTrait {
-    fn resolve_escrow_cash(escrow_id: u64, amount: i128);
+    /// The cash part of a draw was handed out of the union's cash at hand (D9, R35).
+    fn settle_cash(union: Address, amount: i128) -> i128;
+    /// R10: authorise or deauthorise her nIN trustline around a payout.
+    fn set_member_auth(union: Address, account: Address, authorized: bool);
+    /// Cash at hand: the union's open escrows (R15).
+    fn cash_at_hand(union: Address) -> i128;
+}
+
+/// What fx_pool's cash scan calls on fund_core (R13–R15, R17). fx_pool signs as the payer.
+#[contractclient(name = "FundCoreClient")]
+pub trait FundCoreTrait {
+    fn deposit_junior(union: Address, member: Address, amount: i128);
+    fn repay_loan(union: Address, loan_id: BytesN<32>, amount: i128) -> bool;
+    fn credit_recovery(union: Address, loan_id: BytesN<32>, amount: i128);
+    fn deposit_union_treasury(union: Address, amount: i128);
+    /// An escrow expired unsettled: the union keeps the rupees, so its treasury nIN burns.
+    fn cover_expired_escrow(union: Address, amount: i128) -> i128;
+    fn union_treasury(union: Address) -> i128;
 }
