@@ -81,7 +81,7 @@ stellar contract invoke --id "$CORE" --source-account "$SOURCE" --network "$NETW
 #   stellar contract invoke --id "$NIN" --source-account <issuer> -- set_admin --new_admin "$FX"
 #   stellar contract invoke --id "$FX" --source-account "$SOURCE" -- activate
 # Then lock the issuer (master weight 0) or its classic ops still mint, authorise and claw back.
-# On mainnet the issuer is the trust (D7, X14): executive decision decides that lock.
+# Mainnet too: the trust locks the issuer right after set_admin (executive decision, 10 Oct).
 echo "==> next: issuer runs set_admin(fx_pool) on the nIN SAC, then fx_pool.activate (see above)"
 
 mkdir -p "$ROOT/.stellar"
