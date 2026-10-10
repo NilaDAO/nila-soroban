@@ -1333,3 +1333,21 @@ fn storage_layout_is_frozen() {
         "fund_core storage layout changed"
     );
 }
+
+#[test]
+fn the_rate_never_exceeds_the_cap_in_code() {
+    let fx = setup();
+    let c = fx.core();
+    let mut uc = union_cfg();
+    uc.rate_bp = MAX_RATE_BP + 1;
+    assert_eq!(
+        c.try_set_union_config(&fx.union, &uc),
+        Err(Ok(Error::AboveMaxRate))
+    );
+    uc.rate_bp = MAX_RATE_BP;
+    c.set_union_config(&fx.union, &uc);
+    // A discount below the cap is fine.
+    uc.rate_bp = MAX_RATE_BP - 300;
+    c.set_union_config(&fx.union, &uc);
+    assert_eq!(MAX_RATE_BP, 1250);
+}

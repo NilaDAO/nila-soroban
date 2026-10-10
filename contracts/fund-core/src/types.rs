@@ -57,6 +57,8 @@ pub enum Error {
     FxPoolAlreadySet = 49,
     /// Above the 30-day maximum.
     BadDelay = 50,
+    /// Above the maximum loan rate in code (C14).
+    AboveMaxRate = 51,
 }
 
 #[contracttype]

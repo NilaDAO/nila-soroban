@@ -39,6 +39,10 @@ pub const DAY: u64 = 1;
 
 /// Payback is never earlier than drawdown + 90 days (LOAN_RULES §1).
 pub const MIN_TERM: u64 = 90 * DAY;
+/// Highest loan rate any union may be given (C14, executive decision 10 Oct): 12.5% simple. The legal
+/// maximum notified under TN Money-Lenders Act s.7 is not yet sourced; once counsel confirms
+/// it, this is raised by a timelocked upgrade, never by a parameter.
+pub const MAX_RATE_BP: u32 = 1250;
 /// Upgrade timelock at deploy: 48 hours (C15); short builds rehearse it in seconds.
 pub const UPGRADE_DELAY: u64 = 2 * DAY;
 /// Unbond request to claim (R28).
@@ -602,9 +606,11 @@ impl FundCore {
         }
         if i128::from(uc.treasury_fee_bp) + i128::from(uc.rainy_fee_bp) > BPS
             || i128::from(uc.safety_bp) > BPS
-            || i128::from(uc.rate_bp) > BPS
         {
             return Err(Error::BadArg);
+        }
+        if uc.rate_bp > MAX_RATE_BP {
+            return Err(Error::AboveMaxRate);
         }
         let key = DataKey::UnionCfg(union.clone());
         env.storage().persistent().set(&key, &uc);

@@ -132,9 +132,10 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 ## F. Open before mainnet (not contract work)
 
 - X14: the trust as issuer and anchor (legal). Q51: what nIN is, legally (counsel).
-- C14: a **hard maximum rate in code** (executive decision, 10 Oct). Not written yet. It needs the rate
-  notified under TN Money-Lenders Act s.7; that figure is unsourced (legal memo Q8, counsel to
-  produce the G.O.).
+- C14: the hard maximum rate in code is **12.5%** (`MAX_RATE_BP = 1250`, executive decision 10 Oct);
+  `set_union_config` refuses more. The legal maximum notified under TN Money-Lenders Act s.7
+  is still unsourced (legal memo Q8; counsel to produce the G.O.). Raise the cap only by a
+  timelocked upgrade once it is confirmed.
 - **Signer roster (X3, C11).** Decided (executive decision, 10 Oct): 3-of-5 with at most two Nila signers.
   The names are still open (X3).
 - **Recovery.**
