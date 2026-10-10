@@ -23,8 +23,8 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 - [ ] `storage_layout_is_frozen` passes in all five contracts, with the hashes as pinned in
       `docs/STORAGE_LAYOUT.md`.
 - [ ] Reviewer verdicts for C1–C4 are on file (`nila-design/contracts/changelog.md`).
-- [ ] **Recommended before caps rise above launch level:** an external audit of fund_core and
-      fx_pool.
+- [ ] External audit of fund_core and fx_pool **before caps rise** above launch level
+      (executive decision, 10 Oct). Launch at the ₹10,000 caps without it.
 
 ## B. Accounts and keys
 
@@ -68,7 +68,8 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     - `gate` 600
     - `rate_bp` 1250
     - fees 100 + 77
-    - **decide `enforce_token_amount`**: it is off while testing.
+    - `enforce_token_amount` **off** (executive decision, 10 Oct): the attested amount mimics the field's
+      yield, not a loan limit.
 15. Attester: `land_title.set_title` for each existing Polygon title (F1, the move).
 
 ## D. Verify after deploy (read-only)
@@ -131,19 +132,19 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 ## F. Open before mainnet (not contract work)
 
 - X14: the trust as issuer and anchor (legal). Q51: what nIN is, legally (counsel).
-- C14: rates must stay under the notified maximum.
-  - Today `set_union_config` only checks `rate_bp ≤ 100%`.
-  - A hard `max_rate` cap in the contract is **not written**. Decide whether one is needed
-    before mainnet.
-- **Signer roster (X3, C11).** Who signs for the trust, and is the threshold above what Nila
-  people hold together? K1's 3-of-5 with three Nila signers does not meet C11.
+- C14: a **hard maximum rate in code** (executive decision, 10 Oct). Not written yet. It needs the rate
+  notified under TN Money-Lenders Act s.7; that figure is unsourced (legal memo Q8, counsel to
+  produce the G.O.).
+- **Signer roster (X3, C11).** Decided (executive decision, 10 Oct): 3-of-5 with at most two Nila signers.
+  The names are still open (X3).
 - **Recovery.**
   - The issuer is locked and fx_pool is the nIN SAC admin, so replacing fx_pool as SAC admin
     needs an fx_pool upgrade (48 h).
   - Only roles has `set_admin`. Replacing the trust account on the other four contracts needs
     an upgrade of each.
-  - Losing the trust quorum freezes all of it. Decide on signer backups, and whether the four
-    should get a timelocked `set_admin`.
+  - Losing the trust quorum freezes all of it. Decided (executive decision, 10 Oct): signer hygiene, with
+    more signers than the threshold, hardware keys kept apart and a written key-loss
+    procedure. No contract `set_admin`.
 - Q36: the indexer. Q34: which button calls which function. X22: what a pay-out releases.
 - T2 work is not in this release:
   - USDC, LP offers and senior payouts (X15, R46–R47);
