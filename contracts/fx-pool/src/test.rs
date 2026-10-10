@@ -152,6 +152,14 @@ fn storage_layout_is_frozen() {
     v.push_back(DataKey::Scan(h.clone()).into_val(&env));
     v.push_back(DataKey::CashOut(h.clone()).into_val(&env));
     v.push_back(DataKey::CodeUsed(h.clone()).into_val(&env));
+    for pu in [
+        Purpose::Invest,
+        Purpose::Repay,
+        Purpose::Recovery,
+        Purpose::Treasury,
+    ] {
+        v.push_back(pu.into_val(&env));
+    }
     v.push_back(
         Escrow {
             union: a.clone(),
@@ -179,6 +187,14 @@ fn storage_layout_is_frozen() {
     ] {
         v.push_back(k.into_val(&env));
     }
+    v.push_back(
+        nila_common::upgrade::PendingUpgrade {
+            wasm_hash: h.clone(),
+            eta: 1,
+        }
+        .into_val(&env),
+    );
+    v.push_back(nila_common::upgrade::PendingDelay { delay: 1, eta: 2 }.into_val(&env));
     let got: BytesN<32> = env.crypto().sha256(&v.to_xdr(&env)).into();
     let hex: std::string::String = got
         .to_array()
@@ -186,7 +202,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "89d5f380ff266b1d0ec6b8977b4a63c8f34bb33c36330e53b780f99a269c90a3",
+        hex, "388c1e8e004d13d9acf44a21881bb953c31b6814c306f39d5f111cb7afb7e724",
         "fx_pool storage layout changed"
     );
 }

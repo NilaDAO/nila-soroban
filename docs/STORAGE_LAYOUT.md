@@ -4,7 +4,10 @@ What each contract keeps on-chain, and where. An upgrade swaps the code and keep
 so the new code must decode every key and value below exactly as stored.
 
 **The guard.** Each contract has a `storage_layout_is_frozen` test. It hashes the XDR of one
-sample of every stored key and value. Renaming, reordering, adding or removing a field or a
+sample of every stored key, every stored struct, and every variant of the stored enums
+(`Role`, `UnionRole`, `Purpose`, `Tranche`). It does **not** see a change in the type of a
+plain stored value (an `i128` becoming a `u64`, a `Vec`'s element type, a `bool` flag). Treat
+the value columns below as frozen too, and review them by hand in any upgrade. Renaming, reordering, adding or removing a field or a
 `DataKey` variant changes the hash and fails CI. When it fails, do one of two things:
 
 - **Keep the shape.** Put new data under a **new** key (a new `DataKey` variant at the end is

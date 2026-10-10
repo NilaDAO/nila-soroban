@@ -55,6 +55,8 @@ pub enum Error {
     CashAtHand = 48,
     /// fx_pool is set once; only a timelocked upgrade can repoint it.
     FxPoolAlreadySet = 49,
+    /// Above the 30-day maximum.
+    BadDelay = 50,
 }
 
 #[contracttype]

@@ -118,6 +118,8 @@ expect "upgrade delay of fund_core (short build: 2 days = 2 s)" "$(view "$CORE" 
 log "admin by the trust: a plain key, and one signature of three, are refused"
 must_fail "an admin call signed by the deployer key" stellar contract invoke --id "$CORE" \
   --source ${P}-deployer -- set_fx_pool --fx_pool "$FX"
+must_fail "an admin call signed by the trust's own master key (weight 0)" stellar contract invoke \
+  --id "$CORE" --source ${P}-trust -- set_fx_pool --fx_pool "$FX"
 must_fail "an admin call with 1 of 3 signatures" admin_call 1 "$CORE" set_fx_pool --fx_pool "$FX"
 TX_SET_FX=$(admin_call 2 "$CORE" set_fx_pool --fx_pool "$FX")
 TX_SET_CORE=$(admin_call 2 "$FX" set_fund_core --fund_core "$CORE")
@@ -135,6 +137,7 @@ TX_ROLES_LOWER=$(admin_call 2 "$ROLES" set_upgrade_delay --delay_seconds 0)
 expect "roles delay right after asking for 0 (lowering waits 48 h)" "$(view "$ROLES" upgrade_delay)" "172800"
 TX_ROLES_CANCEL=$(admin_call 2 "$ROLES" cancel_upgrade)
 expect "roles pending upgrade" "$(view "$ROLES" pending_upgrade)" "null"
+expect "roles filed lowering voided by the cancel" "$(view "$ROLES" pending_delay)" "null"
 
 log "real upgrade: fund_core (short build) -> release build of the same source, state kept"
 TX_PAUSE=$(admin_call 2 "$CORE" pause)

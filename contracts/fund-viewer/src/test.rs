@@ -75,6 +75,14 @@ fn storage_layout_is_frozen() {
     ] {
         v.push_back(k.into_val(&env));
     }
+    v.push_back(
+        nila_common::upgrade::PendingUpgrade {
+            wasm_hash: h.clone(),
+            eta: 1,
+        }
+        .into_val(&env),
+    );
+    v.push_back(nila_common::upgrade::PendingDelay { delay: 1, eta: 2 }.into_val(&env));
     let got: BytesN<32> = env.crypto().sha256(&v.to_xdr(&env)).into();
     let hex: std::string::String = got
         .to_array()
@@ -82,7 +90,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "5aee22acdc81c2871c28f340662055c74ccaf53d763b0b3aab086d2a6505d896",
+        hex, "4478a4004bb517e75960d6f7fd25aab5b747241dfeb4ce241598174242704142",
         "fund_viewer storage layout changed"
     );
 }

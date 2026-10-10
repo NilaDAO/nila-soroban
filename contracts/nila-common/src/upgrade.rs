@@ -2,9 +2,12 @@
 //!
 //! The calling contract checks its admin first; these functions only keep the clock.
 //! - An upgrade is proposed, then executed once the delay has passed, or cancelled.
-//! - Raising the delay applies at once. Lowering it is filed and applies only when the same
-//!   value is set again after the current delay has passed, so a key that gets stolen
-//!   cannot shorten the window it is watched through.
+//! - Raising the delay applies at once and voids any filed lowering. Lowering it is filed and
+//!   applies only when the same value is set again after the current delay has passed, within
+//!   `LOWER_WINDOW`; a stale filing is void. So a stolen key cannot shorten the window it is
+//!   watched through, and no old filing stays armed.
+//! - The delay stays within `MAX_DELAY`, so the contract can always be upgraded again.
+//! - There is no instant path: even a zero delay files first and executes in a second call.
 //! - Every step is evented.
 
 // The macro-generated code for `UpgradeKey` trips this lint on its deliberate prefix.
@@ -14,6 +17,10 @@ use soroban_sdk::{contractevent, contracttype, BytesN, Env};
 
 /// 48 hours at deploy (C15).
 pub const DEFAULT_DELAY: u64 = 48 * 3_600;
+/// Upper bound: a larger delay would freeze the code for good.
+pub const MAX_DELAY: u64 = 30 * 24 * 3_600;
+/// A matured lowering must be applied within this window, or it is void.
+pub const LOWER_WINDOW: u64 = 7 * 24 * 3_600;
 
 /// Prefixed so they never collide with a contract's own instance keys.
 #[contracttype]
@@ -80,13 +87,17 @@ pub fn pending_delay(env: &Env) -> Option<PendingDelay> {
     env.storage().instance().get(&UpgradeKey::UpgPendingDelay)
 }
 
-pub fn set_delay(env: &Env, new_delay: u64) {
+/// False when `new_delay` exceeds `MAX_DELAY`.
+pub fn set_delay(env: &Env, new_delay: u64) -> bool {
+    if new_delay > MAX_DELAY {
+        return false;
+    }
     let s = env.storage().instance();
     let cur = delay(env);
     if new_delay < cur {
         let now = env.ledger().timestamp();
         match pending_delay(env) {
-            Some(p) if p.delay == new_delay && now >= p.eta => {
+            Some(p) if p.delay == new_delay && now >= p.eta && now <= p.eta + LOWER_WINDOW => {
                 s.remove(&UpgradeKey::UpgPendingDelay);
             }
             _ => {
@@ -103,9 +114,12 @@ pub fn set_delay(env: &Env, new_delay: u64) {
                     eta,
                 }
                 .publish(env);
-                return;
+                return true;
             }
         }
+    } else {
+        // A raise (or the same value) voids any filed lowering.
+        s.remove(&UpgradeKey::UpgPendingDelay);
     }
     s.set(&UpgradeKey::UpgDelay, &new_delay);
     UpgradeDelaySet {
@@ -113,16 +127,13 @@ pub fn set_delay(env: &Env, new_delay: u64) {
         eta: 0,
     }
     .publish(env);
+    true
 }
 
-/// Files the upgrade; with a zero delay it applies at once.
+/// Files the upgrade, replacing (and evented as cancelling) any earlier filing.
 pub fn propose(env: &Env, wasm_hash: BytesN<32>) {
-    let d = delay(env);
-    if d == 0 {
-        apply(env, wasm_hash);
-        return;
-    }
-    let eta = env.ledger().timestamp().saturating_add(d);
+    cancel(env);
+    let eta = env.ledger().timestamp().saturating_add(delay(env));
     env.storage().instance().set(
         &UpgradeKey::UpgPending,
         &PendingUpgrade {
@@ -145,7 +156,11 @@ pub fn execute(env: &Env) -> bool {
     }
 }
 
+/// Cancels the filed upgrade and any filed lowering of the delay.
 pub fn cancel(env: &Env) {
+    env.storage()
+        .instance()
+        .remove(&UpgradeKey::UpgPendingDelay);
     if let Some(p) = pending(env) {
         env.storage().instance().remove(&UpgradeKey::UpgPending);
         UpgradeCancelled {

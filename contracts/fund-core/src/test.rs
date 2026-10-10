@@ -1312,6 +1312,16 @@ fn storage_layout_is_frozen() {
     v.push_back(nila_common::upgrade::UpgradeKey::UpgDelay.into_val(&env));
     v.push_back(nila_common::upgrade::UpgradeKey::UpgPending.into_val(&env));
     v.push_back(nila_common::upgrade::UpgradeKey::UpgPendingDelay.into_val(&env));
+    v.push_back(
+        nila_common::upgrade::PendingUpgrade {
+            wasm_hash: h.clone(),
+            eta: 1,
+        }
+        .into_val(&env),
+    );
+    v.push_back(nila_common::upgrade::PendingDelay { delay: 1, eta: 2 }.into_val(&env));
+    v.push_back(nila_common::Tranche::Junior.into_val(&env));
+    v.push_back(nila_common::Tranche::Senior.into_val(&env));
     let got: BytesN<32> = env.crypto().sha256(&v.to_xdr(&env)).into();
     let hex: std::string::String = got
         .to_array()
@@ -1319,7 +1329,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "c03031421f7e827c13222cf2794cba59e9c5c33f2dce6dd7cdf3e83c7db39bd0",
+        hex, "32b41e485829aceaadb971e553b35da6c212e0949d8acbf1f15cdd04fba5000e",
         "fund_core storage layout changed"
     );
 }

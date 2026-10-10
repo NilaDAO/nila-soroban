@@ -75,6 +75,8 @@ pub enum Error {
     NoLoan = 18,
     CoreAlreadySet = 19,
     UpgradeNotReady = 20,
+    /// Above the 30-day maximum.
+    BadDelay = 21,
 }
 
 /// What the rupees at the desk are for.
@@ -778,16 +780,24 @@ impl FxPoolContract {
 
     // ---------- upgrade (admin, timelock, nila_common::upgrade) ----------
 
-    /// Raising applies at once; lowering applies only when set again after the current delay.
+    /// Raising applies at once and voids a filed lowering; lowering applies only when set again
+    /// after the current delay, within 7 days; at most 30 days.
     pub fn set_upgrade_delay(env: Env, delay_seconds: u64) -> Result<(), Error> {
         require_admin(&env)?;
-        upgrade::set_delay(&env, delay_seconds);
+        if !upgrade::set_delay(&env, delay_seconds) {
+            return Err(Error::BadDelay);
+        }
         bump_instance(&env);
         Ok(())
     }
 
     pub fn pending_upgrade(env: Env) -> Option<upgrade::PendingUpgrade> {
         upgrade::pending(&env)
+    }
+
+    /// A filed lowering of the delay, if any.
+    pub fn pending_delay(env: Env) -> Option<upgrade::PendingDelay> {
+        upgrade::pending_delay(&env)
     }
 
     /// Files the new wasm; `execute_upgrade` applies it once the delay has passed.
@@ -844,6 +854,10 @@ impl FxPoolContract {
 
     pub fn fund_core(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::FundCore)
+    }
+
+    pub fn admin(env: Env) -> Address {
+        get(&env, &DataKey::Admin)
     }
 
     pub fn upgrade_delay(env: Env) -> u64 {

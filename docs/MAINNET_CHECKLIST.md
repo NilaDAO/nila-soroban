@@ -13,6 +13,10 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 - [ ] Toolchain pinned by `rust-toolchain.toml` (Rust 1.94.1, `wasm32v1-none`, soroban-sdk
       27.0.2). Build with `stellar contract build`. Record the sha256 of each wasm; that sha256
       is the on-chain wasm hash.
+- [ ] **Reproducible build.** Each signer rebuilds from the tag on their own machine, or in a
+      pinned container, and gets the same sha256 before signing a deploy or an `upgrade(hash)`.
+      Write the build command down once and reuse it. CI's plain `cargo build` is a size gate,
+      not the release build.
 - [ ] CI is green: fmt, clippy `-D warnings`, all tests, 128 KiB size gate, and the
       **no testnet-short** step. `deploy-testnet.sh` refuses those builds too. Check the wasm
       you upload yourself: `LC_ALL=C grep -a -l testnet-short *.wasm` must print nothing.
@@ -27,8 +31,11 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 - [ ] **Trust admin account (D2, C11).** It is the admin of all five contracts.
   - At least 3 signers on hardware keys (Ledger supports Stellar), weight 1 each.
   - Low, medium and high thresholds at the majority. Master weight 0.
-  - **Nila people hold fewer signatures than the threshold.**
-  - Record the signer list. One signature, or any single key, must fail (rehearsed).
+  - **Nila people hold fewer signatures than the threshold** (C11, I6). ContractsCompliance K1
+    plans 3-of-5 with three Nila operating signers; that breaks C11 unless X3 changes. **Open
+    for executive decision (§F).**
+  - Record the signer list. One signature and a plain key must fail (rehearsed in
+    `c4-testnet.sh` with 2-of-3, including the trust's own master key).
 - [ ] **Union accounts (D12).** One account per union: 5 signers, threshold 3, master weight 0.
       It appoints its leaders in roles.
 - [ ] **nIN issuer = the trust (D7).** The legal side (X14) must be settled first. Then:
@@ -40,6 +47,8 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 
 ## C. Deploy order (each step signed by the account named)
 
+0. Issuer: set the flags (auth required, revocable, clawback), set `home_domain`, and deploy
+   the nIN SAC. Its address is a constructor argument below.
 1. Deployer: `roles(admin = trust)`.
 2. Deployer: `land_title(admin = trust, roles)`.
 3. Deployer: `fund_viewer(admin = trust)`.
@@ -47,7 +56,7 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 5. Deployer: `fx_pool(admin = trust, roles, land_title, nin_sac, usdc_sac, daily_cap)`.
 6. Trust: `fx_pool.set_fund_core(fund_core)`. **Set once.**
 7. Trust: `fund_core.set_fx_pool(fx_pool)`. **Set once.**
-8. Issuer: deploy the nIN SAC, then `set_admin(fx_pool)` on it.
+8. Issuer: `set_admin(fx_pool)` on the nIN SAC.
 9. Trust: `fx_pool.activate()`, which authorises the balances of fx_pool and fund_core.
 10. Issuer: **lock** with master weight 0 (executive decision, 10 Oct). Without the lock, classic ops still
     mint, authorise and claw back. Check that any issuer transaction now fails.
@@ -64,11 +73,15 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 
 ## D. Verify after deploy (read-only)
 
-- [ ] `upgrade_delay` = 172800 (48 h) on all five, and `pending_upgrade` = null.
-- [ ] `admin` / `get_config().admin` = the trust account on every contract.
+- [ ] `upgrade_delay` = 172800 (48 h) on all five; `pending_upgrade` and `pending_delay` = null.
+      The delay is stored at the constructor and survives upgrades, so check it on the
+      deployed contract itself.
+- [ ] `admin` (roles, land_title, fund_viewer, fx_pool) and `get_config().admin` (fund_core) =
+      the trust account.
 - [ ] The nIN SAC `admin` = fx_pool. The issuer has master weight 0 and no other signers.
 - [ ] fx_pool `fund_core` and fund_core `fx_pool` point at each other.
-- [ ] `is_paused` = false. `max_scan` = 10,000 nIN. `daily_cap` as set.
+- [ ] `is_paused` = false. `max_scan` = 10,000 nIN. `daily_cap` is stored but **not enforced**
+      in T1 (it caps USDC out, which is T2).
 - [ ] The on-chain wasm (`stellar contract fetch`) sha256 equals the recorded build hash, for
       each contract.
 - [ ] One small end-to-end run per union, with real people:
@@ -81,19 +94,28 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 ## E. Operations
 
 - **Events.** RPC keeps events for 7 days only, so an indexer must run from the first ledger
-  (C19, Q36 open). Watch at least these:
-  - `UpgradeProposed`, `UpgradeDelaySet`, `AdminSet`, `Paused`, `MaxScanSet`, `FxPoolSet`;
-  - `EscrowExpired`, `LoanDefaulted`.
-- **Pause.** The trust signs `pause`, 2 of 3.
-  - fund_core stops every money path, and expiry burns stop with it.
-  - fx_pool stops scans, cash-outs and pay-outs. Reclaim of her own nIN stays open.
-  - land_title stops title writes.
+  (C19, Q36 open). Topics on-chain are snake_case. Alert on at least these:
+  - every upgrade step: `upgrade_proposed`, `upgrade_applied`, `upgrade_cancelled`,
+    `upgrade_delay_set`;
+  - admin and roles: `admin_set`, `role_updated`, `leader_updated`, `union_role_updated`;
+  - caps and wiring: `max_scan_set`, `daily_cap_set`, `fx_pool_set`, `fund_core_set`,
+    `activated`, `union_config_set`;
+  - state: `paused`, `escrow_expired`, `loan_defaulted`.
+- **Pause.** The trust signs `pause`.
+  - **fund_core** stops every money path, and expiry burns stop with it. The public
+    `mark_default` stops too (D-d), so a long pause delays defaults.
+  - **fx_pool** stops scans, cash-outs, pay-outs and expiry burns. Reclaim of her own nIN
+    stays open.
+  - **land_title** stops title writes (`set_title`, `set_record`, `burn_title`).
+  - **roles and fund_viewer have no pause**; they move no money.
 - **Upgrade.**
   1. Upload the wasm and check the layout guard in that commit.
-  2. Trust: `upgrade(hash)`.
+  2. Trust: `upgrade(hash)`. Filing again replaces the earlier filing; nothing ever applies
+     in the same call.
   3. Announce it, and let the indexer alert on `UpgradeProposed`.
   4. After 48 h, trust: `execute_upgrade`. `cancel_upgrade` stops it at any point.
-  5. Lowering the delay itself also waits 48 h.
+  5. Lowering the delay waits out the current delay, and must then be applied within 7 days.
+     Any raise or `cancel_upgrade` voids a filed lowering. The delay is never above 30 days.
 - **Caps.** Raise in steps, each evented:
   - fx_pool `set_max_scan` (per scan and per cash-out);
   - per union `max_loan`.
@@ -113,6 +135,15 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
   - Today `set_union_config` only checks `rate_bp ≤ 100%`.
   - A hard `max_rate` cap in the contract is **not written**. Decide whether one is needed
     before mainnet.
+- **Signer roster (X3, C11).** Who signs for the trust, and is the threshold above what Nila
+  people hold together? K1's 3-of-5 with three Nila signers does not meet C11.
+- **Recovery.**
+  - The issuer is locked and fx_pool is the nIN SAC admin, so replacing fx_pool as SAC admin
+    needs an fx_pool upgrade (48 h).
+  - Only roles has `set_admin`. Replacing the trust account on the other four contracts needs
+    an upgrade of each.
+  - Losing the trust quorum freezes all of it. Decide on signer backups, and whether the four
+    should get a timelocked `set_admin`.
 - Q36: the indexer. Q34: which button calls which function. X22: what a pay-out releases.
 - T2 work is not in this release:
   - USDC, LP offers and senior payouts (X15, R46–R47);

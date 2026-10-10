@@ -196,9 +196,13 @@ fn storage_layout_is_frozen() {
     let h = BytesN::from_array(&env, &[7; 32]);
     let mut v: soroban_sdk::Vec<Val> = soroban_sdk::Vec::new(&env);
     v.push_back(DataKey::Admin.into_val(&env));
-    v.push_back(DataKey::Role(a.clone(), Role::Attester).into_val(&env));
+    for r in [Role::Oracle, Role::Attester, Role::Core] {
+        v.push_back(DataKey::Role(a.clone(), r).into_val(&env));
+    }
     v.push_back(DataKey::Leader(a.clone(), a.clone()).into_val(&env));
-    v.push_back(DataKey::UnionRole(a.clone(), a.clone(), UnionRole::Secretary).into_val(&env));
+    for r in [UnionRole::Treasurer, UnionRole::Secretary] {
+        v.push_back(DataKey::UnionRole(a.clone(), a.clone(), r).into_val(&env));
+    }
     for k in [
         nila_common::upgrade::UpgradeKey::UpgDelay,
         nila_common::upgrade::UpgradeKey::UpgPending,
@@ -206,6 +210,14 @@ fn storage_layout_is_frozen() {
     ] {
         v.push_back(k.into_val(&env));
     }
+    v.push_back(
+        nila_common::upgrade::PendingUpgrade {
+            wasm_hash: h.clone(),
+            eta: 1,
+        }
+        .into_val(&env),
+    );
+    v.push_back(nila_common::upgrade::PendingDelay { delay: 1, eta: 2 }.into_val(&env));
     let got: BytesN<32> = env.crypto().sha256(&v.to_xdr(&env)).into();
     let hex: std::string::String = got
         .to_array()
@@ -213,7 +225,43 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "d9dbdaa4cf23ac24e5f9cf6870d25d53f7414457dd4916c840b4803a43bcecfc",
+        hex, "268e98646454ff294a044c0846fbf36be2d733e9ea860acd55d7c98e5a51dcc9",
         "roles storage layout changed"
     );
+}
+
+#[test]
+fn a_filed_lowering_never_stays_armed_and_the_delay_is_bounded() {
+    use soroban_sdk::{testutils::Ledger, BytesN};
+    let (env, _admin, r) = setup();
+    let t0 = 1_000;
+    env.ledger().set_timestamp(t0);
+    // File a lowering to 0, then raise to 30 days: the raise voids the filing.
+    r.set_upgrade_delay(&0);
+    assert!(r.pending_delay().is_some());
+    r.set_upgrade_delay(&(30 * 24 * 3600));
+    assert_eq!(r.pending_delay(), None);
+    env.ledger().set_timestamp(t0 + 48 * 3600);
+    r.set_upgrade_delay(&0);
+    assert_eq!(r.upgrade_delay(), 30 * 24 * 3600);
+    // A matured filing not used within 7 days is void: setting it again re-files.
+    env.ledger()
+        .set_timestamp(t0 + 48 * 3600 + 30 * 24 * 3600 + 8 * 24 * 3600);
+    r.set_upgrade_delay(&0);
+    assert_eq!(r.upgrade_delay(), 30 * 24 * 3600);
+    // cancel_upgrade voids a filed lowering too.
+    r.cancel_upgrade();
+    assert_eq!(r.pending_delay(), None);
+    // Never above 30 days, so the contract can always be upgraded again.
+    assert_eq!(
+        r.try_set_upgrade_delay(&(30 * 24 * 3600 + 1)),
+        Err(Ok(Error::BadDelay))
+    );
+    // A new filing replaces the old one; nothing applies at once.
+    let now = env.ledger().timestamp();
+    r.upgrade(&BytesN::from_array(&env, &[1; 32]));
+    r.upgrade(&BytesN::from_array(&env, &[2; 32]));
+    let p = r.pending_upgrade().unwrap();
+    assert_eq!(p.wasm_hash, BytesN::from_array(&env, &[2; 32]));
+    assert_eq!(p.eta, now + 30 * 24 * 3600);
 }

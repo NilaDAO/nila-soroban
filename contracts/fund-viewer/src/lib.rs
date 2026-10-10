@@ -21,6 +21,8 @@ pub enum Error {
     NotFound = 3,
     AlreadyExists = 4,
     UpgradeNotReady = 5,
+    /// Above the 30-day maximum.
+    BadDelay = 6,
 }
 
 #[contracttype]
@@ -114,12 +116,19 @@ impl FundViewerContract {
 
     // ---------- upgrade (admin, 48-hour timelock, nila_common::upgrade) ----------
 
-    /// Raising applies at once; lowering applies only when set again after the current delay.
+    /// Raising applies at once and voids a filed lowering; lowering applies only when set again
+    /// after the current delay, within 7 days; at most 30 days.
     pub fn set_upgrade_delay(env: Env, delay_seconds: u64) -> Result<(), Error> {
         require_admin(&env)?;
-        upgrade::set_delay(&env, delay_seconds);
+        if !upgrade::set_delay(&env, delay_seconds) {
+            return Err(Error::BadDelay);
+        }
         bump_instance(&env);
         Ok(())
+    }
+
+    pub fn admin(env: Env) -> Address {
+        env.storage().instance().get(&DataKey::Admin).unwrap()
     }
 
     pub fn upgrade_delay(env: Env) -> u64 {
@@ -128,6 +137,11 @@ impl FundViewerContract {
 
     pub fn pending_upgrade(env: Env) -> Option<upgrade::PendingUpgrade> {
         upgrade::pending(&env)
+    }
+
+    /// A filed lowering of the delay, if any.
+    pub fn pending_delay(env: Env) -> Option<upgrade::PendingDelay> {
+        upgrade::pending_delay(&env)
     }
 
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
