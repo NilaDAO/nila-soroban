@@ -188,7 +188,10 @@ TX_UNBOND=$(tx stellar contract invoke --id "$CORE" --source ${P}-member2 -- \
 wait_until $(($(ledger_now) + 16))
 TX_CLAIM=$(tx stellar contract invoke --id "$CORE" --source ${P}-member2 -- \
   claim_junior --union "$UNION" --member ${P}-member2 --max_shares 0)
-expect "member2 wallet" "$(view "$NIN_SAC" balance --id ${P}-member2)" "\"$((400 * NIN))\""
+# 400 shares are worth a little more than 400 nIN: the repay's interest raised the index.
+W2=$(view "$NIN_SAC" balance --id ${P}-member2 | tr -d '"')
+((W2 >= 400 * NIN)) || { echo "member2 claim paid $W2" >&2; exit 1; }
+log "ok: member2 wallet = $W2"
 expect "member2 trustline authorised" "$(view "$NIN_SAC" authorized --id ${P}-member2)" "false"
 must_fail "member2 sending nIN to member herself (R10, C2)" stellar contract invoke --id "$NIN_SAC" \
   --source ${P}-member2 -- transfer --from ${P}-member2 --to ${P}-member --amount $NIN
@@ -227,7 +230,7 @@ must_fail "reclaim before expiry" stellar contract invoke --id "$FX" --source ${
 wait_until $((NOW + 21))
 TX_RECLAIM=$(tx stellar contract invoke --id "$FX" --source ${P}-anyone -- \
   reclaim_cash_out --code_hash "$CODE2_HASH")
-expect "member2 wallet after reclaim" "$(view "$NIN_SAC" balance --id ${P}-member2)" "\"$((150 * NIN))\""
+expect "member2 wallet after reclaim" "$(view "$NIN_SAC" balance --id ${P}-member2)" "\"$((W2 - 250 * NIN))\""
 
 log "escrow 2 (member2's invest) left unsettled: after 7 short days anyone burns it from the treasury"
 TREASURY_BEFORE=$(view "$CORE" union_treasury --union "$UNION" | tr -d '"')
