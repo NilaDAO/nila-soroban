@@ -11,9 +11,13 @@
 //! - nIN SAC admin (R8): member trustlines stay deauthorised and are authorised only inside
 //!   the call that moves her nIN (R10), and only for a title holder or leader of the union.
 //!
-//! USDC, LP offers and Reflector (R18–R24, R46, R77) are T2.
+//! - Senior route (Nov 7): an LP the trust accepted deposits USDC; nIN is minted at the
+//!   attester's INR/USD fix into fund_core's senior pool; every deposit is tagged offshore or
+//!   domestic (R24, R46, R77). No USDC goes out yet: senior payouts are T2 (X15).
+//!
+//! LP offers, Reflector and the anchor (R18–R23) are T2.
 
-use nila_common::{bump_instance, upgrade, FundCoreClient, LandTitleClient, RolesClient};
+use nila_common::{bump_instance, upgrade, FundCoreClient, LandTitleClient, Role, RolesClient};
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
     contract, contracterror, contractevent, contractimpl, contractmeta, contracttype,
@@ -46,6 +50,10 @@ pub const MAX_CASH_OUT_TERM: u64 = 7 * DAY;
 pub const DEFAULT_MAX_SCAN: i128 = 10_000 * 10_000_000;
 /// Open escrows per union: the leader settles before scanning more.
 pub const MAX_OPEN_ESCROWS: u32 = 64;
+/// One unit of the INR/USD fix: 7 decimals, like nIN and USDC.
+pub const RATE_ONE: i128 = 10_000_000;
+/// The attester's fix is valid at most 2 days (R77).
+pub const MAX_RATE_AGE: u64 = 2 * DAY;
 /// Upgrade timelock at deploy: 48 hours (R75, C15); short builds rehearse it in seconds.
 pub const UPGRADE_DELAY: u64 = 2 * DAY;
 
@@ -77,6 +85,35 @@ pub enum Error {
     UpgradeNotReady = 20,
     /// Above the 30-day maximum.
     BadDelay = 21,
+    /// The INR/USD fix is zero, negative or valid too long.
+    BadRate = 22,
+}
+
+/// Where an LP's USDC comes from (R24, D1): kept per deposit so the pools can be split later.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum Tag {
+    Offshore = 0,
+    Domestic = 1,
+}
+
+/// The trust's (later the anchor's) acceptance of an LP (R20). `kyc_ref` points at the KYC
+/// record kept off-chain; no personal data on-chain (C17).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Lp {
+    pub accepted: bool,
+    pub kyc_ref: BytesN<32>,
+}
+
+/// INR per USD, 7 decimals (nIN per USDC), set by the attester from the FBIL fix (R77).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RateFix {
+    pub inr_per_usd: i128,
+    pub valid_until: u64,
+    pub set_by: Address,
 }
 
 /// What the rupees at the desk are for.
@@ -115,6 +152,10 @@ pub enum DataKey {
     CashOut(BytesN<32>),
     /// A code paid out or reclaimed: never accepted again (its preimage is public).
     CodeUsed(BytesN<32>),
+    Lp(Address),
+    Rate,
+    /// USDC taken in per union and tag (R24).
+    SeniorUsdc(Address, Tag),
 }
 
 /// Rupees a leader took in, not yet lent out or settled (R15).
@@ -220,6 +261,33 @@ pub struct DailyCapSet {
 #[contractevent]
 pub struct Activated {
     pub fund_core: Address,
+}
+
+#[contractevent]
+pub struct LpSet {
+    #[topic]
+    pub lp: Address,
+    pub accepted: bool,
+    pub kyc_ref: BytesN<32>,
+}
+
+#[contractevent]
+pub struct RateSet {
+    pub inr_per_usd: i128,
+    pub valid_until: u64,
+    pub set_by: Address,
+}
+
+#[contractevent]
+pub struct SeniorMinted {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub lp: Address,
+    pub tag: Tag,
+    pub usdc: i128,
+    pub nin: i128,
+    pub inr_per_usd: i128,
 }
 
 #[contractevent]
@@ -634,6 +702,144 @@ impl FxPoolContract {
         .publish(&env);
         bump_instance(&env);
         Ok(covered)
+    }
+
+    // ---------- senior route (R20, R24, R46, R77) ----------
+
+    /// The trust accepts or drops an LP (R20). The anchor key takes this over with SEP-12.
+    pub fn set_lp(env: Env, lp: Address, accepted: bool, kyc_ref: BytesN<32>) -> Result<(), Error> {
+        require_admin(&env)?;
+        let k = DataKey::Lp(lp.clone());
+        env.storage().persistent().set(
+            &k,
+            &Lp {
+                accepted,
+                kyc_ref: kyc_ref.clone(),
+            },
+        );
+        bump(&env, &k);
+        LpSet {
+            lp,
+            accepted,
+            kyc_ref,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// The attester posts the day's INR/USD fix (FBIL), valid at most 2 days (R77). Reflector
+    /// replaces it later; this stays as the evented override.
+    pub fn set_rate(
+        env: Env,
+        attester: Address,
+        inr_per_usd: i128,
+        valid_until: u64,
+    ) -> Result<(), Error> {
+        attester.require_auth();
+        if !RolesClient::new(&env, &get(&env, &DataKey::Roles)).has_role(&attester, &Role::Attester)
+        {
+            return Err(Error::Unauthorized);
+        }
+        let now = env.ledger().timestamp();
+        if inr_per_usd <= 0 || valid_until <= now || valid_until > now + MAX_RATE_AGE {
+            return Err(Error::BadRate);
+        }
+        env.storage().instance().set(
+            &DataKey::Rate,
+            &RateFix {
+                inr_per_usd,
+                valid_until,
+                set_by: attester.clone(),
+            },
+        );
+        RateSet {
+            inr_per_usd,
+            valid_until,
+            set_by: attester,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// An accepted LP deposits USDC; the same value in nIN goes into the union's senior pool in
+    /// her name (R46). Members cannot be LPs here: fund_core refuses title holders. Returns the
+    /// nIN minted.
+    pub fn mint_senior(
+        env: Env,
+        lp: Address,
+        union: Address,
+        usdc: i128,
+        tag: Tag,
+    ) -> Result<i128, Error> {
+        require_not_paused(&env)?;
+        lp.require_auth();
+        if usdc <= 0 {
+            return Err(Error::AmountZero);
+        }
+        let ok = env
+            .storage()
+            .persistent()
+            .get::<_, Lp>(&DataKey::Lp(lp.clone()))
+            .map(|l| l.accepted)
+            .unwrap_or(false);
+        if !ok {
+            return Err(Error::Unauthorized);
+        }
+        let rate: RateFix = env
+            .storage()
+            .instance()
+            .get(&DataKey::Rate)
+            .ok_or(Error::StaleOracle)?;
+        if env.ledger().timestamp() > rate.valid_until {
+            return Err(Error::StaleOracle);
+        }
+        let nin = usdc
+            .checked_mul(rate.inr_per_usd)
+            .map(|v| v / RATE_ONE)
+            .ok_or(Error::CapExceeded)?;
+        if nin <= 0 {
+            return Err(Error::AmountZero);
+        }
+        let me = env.current_contract_address();
+        let usdc_addr: Address = get(&env, &DataKey::Usdc);
+        TokenClient::new(&env, &usdc_addr).transfer(&lp, &me, &usdc);
+        StellarAssetClient::new(&env, &nin_addr(&env)).mint(&me, &nin);
+        let core = core_addr(&env)?;
+        authorize_pull(&env, &core, nin);
+        FundCoreClient::new(&env, &core).deposit_senior(&union, &lp, &nin);
+        let k = DataKey::SeniorUsdc(union.clone(), tag);
+        let held: i128 = env.storage().persistent().get(&k).unwrap_or(0);
+        env.storage().persistent().set(&k, &(held + usdc));
+        bump(&env, &k);
+        SeniorMinted {
+            union,
+            lp,
+            tag,
+            usdc,
+            nin,
+            inr_per_usd: rate.inr_per_usd,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(nin)
+    }
+
+    pub fn lp(env: Env, lp: Address) -> Option<Lp> {
+        env.storage().persistent().get(&DataKey::Lp(lp))
+    }
+
+    pub fn rate(env: Env) -> Option<RateFix> {
+        env.storage().instance().get(&DataKey::Rate)
+    }
+
+    /// USDC taken in for a union under one tag (R24).
+    pub fn senior_usdc(env: Env, union: Address, tag: Tag) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::SeniorUsdc(union, tag))
+            .unwrap_or(0)
     }
 
     // ---------- calls from fund_core ----------

@@ -112,6 +112,8 @@ pub trait FxPoolTrait {
 #[contractclient(name = "FundCoreClient")]
 pub trait FundCoreTrait {
     fn deposit_junior(union: Address, member: Address, amount: i128);
+    /// mint_senior: an LP's USDC, as nIN, into the union's senior pool (R46).
+    fn deposit_senior(union: Address, lp: Address, amount: i128);
     fn repay_loan(union: Address, loan_id: BytesN<32>, amount: i128) -> bool;
     fn credit_recovery(union: Address, loan_id: BytesN<32>, amount: i128);
     fn deposit_union_treasury(union: Address, amount: i128);

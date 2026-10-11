@@ -152,6 +152,26 @@ fn storage_layout_is_frozen() {
     v.push_back(DataKey::Scan(h.clone()).into_val(&env));
     v.push_back(DataKey::CashOut(h.clone()).into_val(&env));
     v.push_back(DataKey::CodeUsed(h.clone()).into_val(&env));
+    v.push_back(DataKey::Lp(a.clone()).into_val(&env));
+    v.push_back(DataKey::Rate.into_val(&env));
+    for t in [Tag::Offshore, Tag::Domestic] {
+        v.push_back(DataKey::SeniorUsdc(a.clone(), t).into_val(&env));
+    }
+    v.push_back(
+        Lp {
+            accepted: true,
+            kyc_ref: h.clone(),
+        }
+        .into_val(&env),
+    );
+    v.push_back(
+        RateFix {
+            inr_per_usd: 1,
+            valid_until: 2,
+            set_by: a.clone(),
+        }
+        .into_val(&env),
+    );
     for pu in [
         Purpose::Invest,
         Purpose::Repay,
@@ -202,7 +222,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "388c1e8e004d13d9acf44a21881bb953c31b6814c306f39d5f111cb7afb7e724",
+        hex, "8c2fce77e13922e5575ca38284108f17fd06fc81fe389264339114cc7486f941",
         "fx_pool storage layout changed"
     );
 }

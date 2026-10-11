@@ -26,6 +26,7 @@ struct Fx {
     fx_id: Address,
     nin: Address,
     titles_id: Address,
+    usdc: Address,
     attester: Address,
     next_title: core::cell::Cell<u64>,
 }
@@ -150,7 +151,9 @@ fn setup() -> Fx {
             nin.clone(),
         ),
     );
-    let usdc = Address::generate(&env);
+    let usdc = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
     let fx_id = env.register(
         FxPoolContract,
         (
@@ -158,7 +161,7 @@ fn setup() -> Fx {
             roles_id,
             titles_id.clone(),
             nin.clone(),
-            usdc,
+            usdc.clone(),
             25_000 * NIN,
         ),
     );
@@ -178,6 +181,7 @@ fn setup() -> Fx {
         fx_id,
         nin,
         titles_id,
+        usdc,
         attester,
         next_title: core::cell::Cell::new(1),
     };
@@ -1350,4 +1354,99 @@ fn the_rate_never_exceeds_the_cap_in_code() {
     uc.rate_bp = MAX_RATE_BP - 300;
     c.set_union_config(&fx.union, &uc);
     assert_eq!(MAX_RATE_BP, 1250);
+}
+
+// ---------- C5a: senior route (USDC in, nIN into the senior pool) ----------
+
+use nila_fx_pool::Tag;
+
+#[test]
+fn senior_route_usdc_in_nin_into_the_senior_pool() {
+    let fx = setup();
+    let c = fx.core();
+    let f = fx.fx();
+    let lp = Address::generate(&fx.env);
+    let usdc = StellarAssetClient::new(&fx.env, &fx.usdc);
+    usdc.mint(&lp, &(1_000 * NIN));
+    let kyc = loan_id(&fx.env, 0x4B);
+
+    // Not accepted yet; no rate yet.
+    assert_eq!(
+        f.try_mint_senior(&lp, &fx.union, &(100 * NIN), &Tag::Offshore),
+        Err(Ok(FxError::Unauthorized))
+    );
+    f.set_lp(&lp, &true, &kyc);
+    assert_eq!(
+        f.try_mint_senior(&lp, &fx.union, &(100 * NIN), &Tag::Offshore),
+        Err(Ok(FxError::StaleOracle))
+    );
+    // Only the attester posts the fix, valid at most 2 days.
+    let rate = 95 * NIN; // ₹95 per USD
+    assert_eq!(
+        f.try_set_rate(&fx.oracle, &rate, &(T0 + 86_400)),
+        Err(Ok(FxError::Unauthorized))
+    );
+    assert_eq!(
+        f.try_set_rate(&fx.attester, &rate, &(T0 + 3 * 86_400)),
+        Err(Ok(FxError::BadRate))
+    );
+    f.set_rate(&fx.attester, &rate, &(T0 + 86_400));
+
+    // Only the LP signs: her USDC transfer, fx_pool's own pull into fund_core.
+    let args = (lp.clone(), fx.union.clone(), 100 * NIN, Tag::Offshore);
+    fx.env.mock_auths(&[MockAuth {
+        address: &lp,
+        invoke: &MockAuthInvoke {
+            contract: &fx.fx_id,
+            fn_name: "mint_senior",
+            args: args.into_val(&fx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &fx.usdc,
+                fn_name: "transfer",
+                args: (lp.clone(), fx.fx_id.clone(), 100 * NIN).into_val(&fx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+    assert_eq!(
+        f.mint_senior(&lp, &fx.union, &(100 * NIN), &Tag::Offshore),
+        9_500 * NIN
+    );
+    fx.env.mock_all_auths();
+    assert_eq!(c.get_senior_market(&fx.union).cash, 9_500 * NIN);
+    assert_eq!(
+        TokenClient::new(&fx.env, &fx.usdc).balance(&fx.fx_id),
+        100 * NIN
+    );
+    assert_eq!(f.senior_usdc(&fx.union, &Tag::Offshore), 100 * NIN);
+    assert_eq!(f.senior_usdc(&fx.union, &Tag::Domestic), 0);
+    // The LP never holds nIN.
+    assert_eq!(fx.token().balance(&lp), 0);
+    fx.assert_fx_empty();
+    fx.assert_conserved();
+
+    // A member cannot be an LP: fund_core refuses title holders, nothing moves.
+    f.set_lp(&fx.borrower, &true, &kyc);
+    usdc.mint(&fx.borrower, &(10 * NIN));
+    assert!(f
+        .try_mint_senior(&fx.borrower, &fx.union, &(10 * NIN), &Tag::Domestic)
+        .is_err());
+    // A dropped LP, a stale fix, a paused desk.
+    f.set_lp(&lp, &false, &kyc);
+    assert_eq!(
+        f.try_mint_senior(&lp, &fx.union, &NIN, &Tag::Domestic),
+        Err(Ok(FxError::Unauthorized))
+    );
+    f.set_lp(&lp, &true, &kyc);
+    fx.at(T0 + 86_400 + 1);
+    assert_eq!(
+        f.try_mint_senior(&lp, &fx.union, &NIN, &Tag::Domestic),
+        Err(Ok(FxError::StaleOracle))
+    );
+    f.set_rate(&fx.attester, &rate, &(T0 + 2 * 86_400));
+    f.pause();
+    assert_eq!(
+        f.try_mint_senior(&lp, &fx.union, &NIN, &Tag::Domestic),
+        Err(Ok(FxError::Paused))
+    );
 }
