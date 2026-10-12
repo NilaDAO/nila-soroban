@@ -665,7 +665,7 @@ impl FxPoolContract {
         member: Address,
         amount: i128,
         scan_hash: BytesN<32>,
-        loan_id: Option<BytesN<32>>,
+        token_id: Option<BytesN<32>>,
     ) -> Result<u64, Error> {
         require_not_paused(&env)?;
         require_leader(&env, &union, &leader)?;
@@ -703,7 +703,7 @@ impl FxPoolContract {
                 fc.deposit_union_treasury(&union, &amount);
             }
             Purpose::Repay => {
-                let id = loan_id.ok_or(Error::NoLoan)?;
+                let id = token_id.ok_or(Error::NoLoan)?;
                 // fund_core sends back whatever exceeds what she owes: burn it.
                 let before = token.balance(&me);
                 authorize_pull(&env, &core, amount);
@@ -715,7 +715,7 @@ impl FxPoolContract {
                 }
             }
             Purpose::Recovery => {
-                let id = loan_id.ok_or(Error::NoLoan)?;
+                let id = token_id.ok_or(Error::NoLoan)?;
                 authorize_pull(&env, &core, amount);
                 fc.credit_recovery(&union, &id, &amount);
             }

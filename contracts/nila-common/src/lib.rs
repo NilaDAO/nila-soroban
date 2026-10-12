@@ -39,13 +39,13 @@ pub struct MarketLite {
     pub claimable_principal: i128,
 }
 
-/// One crop-share cash loan (T1: cash part only, junior money only, D5).
+/// A loan as read by the app (`get_loan`). Not stored this way: since C6 the loan lives inside
+/// its food token entry (one loan per token, the token id is the loan id), without copies of the
+/// borrower or token, and with its flags packed (fund_core `LoanState`).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Loan {
     pub borrower: Address,
-    /// The attested food token the loan was drawn against.
-    pub token_id: BytesN<32>,
     /// Cash part handed out by the leader (D9).
     pub principal: i128,
     pub rate_bp: u32,
@@ -59,9 +59,6 @@ pub struct Loan {
     pub overdue: bool,
     pub defaulted: bool,
     pub closed: bool,
-    pub milestone: u32,
-    pub milestone_digest: BytesN<32>,
-    pub digest_ts: u64,
 }
 
 /// Membership is holding a land title the union minted (land_title contract).
@@ -116,8 +113,8 @@ pub trait FundCoreTrait {
     fn deposit_junior(union: Address, member: Address, amount: i128);
     /// mint_senior: a senior investor's USDC, as nIN, into the union's senior pool (R46).
     fn deposit_senior(union: Address, investor: Address, amount: i128);
-    fn repay_loan(union: Address, loan_id: BytesN<32>, amount: i128) -> bool;
-    fn credit_recovery(union: Address, loan_id: BytesN<32>, amount: i128);
+    fn repay_loan(union: Address, token_id: BytesN<32>, amount: i128) -> bool;
+    fn credit_recovery(union: Address, token_id: BytesN<32>, amount: i128);
     fn deposit_union_treasury(union: Address, amount: i128);
     /// An escrow expired unsettled: the union keeps the rupees, so its treasury nIN burns.
     fn cover_expired_escrow(union: Address, amount: i128) -> i128;
@@ -128,7 +125,7 @@ pub trait FundCoreTrait {
     /// book the rest as the owner's pending dues (D17, D18, R85).
     fn pay_voucher(
         union: Address,
-        loan_id: BytesN<32>,
+        token_id: BytesN<32>,
         owner: Address,
         hours: u32,
         prepay: i128,
@@ -142,7 +139,7 @@ pub trait MachineryTrait {
     /// The most senior money one machine hour can need at the job, across the union's types.
     fn max_prepay_per_hour(union: Address) -> i128;
     /// A drawn loan's voucher part: hours of machinery for her (R36, R51).
-    fn grant(union: Address, member: Address, loan_id: BytesN<32>, hours: u32);
+    fn grant(union: Address, member: Address, token_id: BytesN<32>, hours: u32);
     /// The loan closed or defaulted: unclaimed hours lapse.
-    fn void(union: Address, loan_id: BytesN<32>);
+    fn void(union: Address, token_id: BytesN<32>);
 }

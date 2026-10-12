@@ -173,7 +173,7 @@ pub struct VoucherGranted {
     #[topic]
     pub union: Address,
     #[topic]
-    pub loan_id: BytesN<32>,
+    pub token_id: BytesN<32>,
     pub member: Address,
     pub hours: u32,
 }
@@ -183,7 +183,7 @@ pub struct CodeOpened {
     #[topic]
     pub union: Address,
     #[topic]
-    pub loan_id: BytesN<32>,
+    pub token_id: BytesN<32>,
     pub max_hours: u32,
     pub expires: u64,
 }
@@ -193,7 +193,7 @@ pub struct VoucherClaimed {
     #[topic]
     pub union: Address,
     #[topic]
-    pub loan_id: BytesN<32>,
+    pub token_id: BytesN<32>,
     pub machine_id: u64,
     pub owner: Address,
     pub hours: u32,
@@ -206,7 +206,7 @@ pub struct VoucherVoided {
     #[topic]
     pub union: Address,
     #[topic]
-    pub loan_id: BytesN<32>,
+    pub token_id: BytesN<32>,
     pub unused_hours: u32,
 }
 
@@ -310,15 +310,15 @@ fn save_machine(env: &Env, id: u64, m: &Machine) {
     .publish(env);
 }
 
-fn load_voucher(env: &Env, union: &Address, loan_id: &BytesN<32>) -> Result<Voucher, Error> {
+fn load_voucher(env: &Env, union: &Address, token_id: &BytesN<32>) -> Result<Voucher, Error> {
     env.storage()
         .persistent()
-        .get(&DataKey::Voucher(union.clone(), loan_id.clone()))
+        .get(&DataKey::Voucher(union.clone(), token_id.clone()))
         .ok_or(Error::NotFound)
 }
 
-fn save_voucher(env: &Env, union: &Address, loan_id: &BytesN<32>, v: &Voucher) {
-    let k = DataKey::Voucher(union.clone(), loan_id.clone());
+fn save_voucher(env: &Env, union: &Address, token_id: &BytesN<32>, v: &Voucher) {
+    let k = DataKey::Voucher(union.clone(), token_id.clone());
     env.storage().persistent().set(&k, v);
     bump(env, &k);
 }
@@ -517,18 +517,18 @@ impl MachineryContract {
         env: Env,
         union: Address,
         member: Address,
-        loan_id: BytesN<32>,
+        token_id: BytesN<32>,
         hours: u32,
     ) -> Result<(), Error> {
         require_core(&env)?;
-        let k = DataKey::Voucher(union.clone(), loan_id.clone());
+        let k = DataKey::Voucher(union.clone(), token_id.clone());
         if env.storage().persistent().has(&k) {
             return Err(Error::VoucherExists);
         }
         save_voucher(
             &env,
             &union,
-            &loan_id,
+            &token_id,
             &Voucher {
                 member: member.clone(),
                 hours,
@@ -541,7 +541,7 @@ impl MachineryContract {
         );
         VoucherGranted {
             union,
-            loan_id,
+            token_id,
             member,
             hours,
         }
@@ -550,16 +550,16 @@ impl MachineryContract {
     }
 
     /// fund_core when the loan closes or defaults: the unclaimed hours lapse.
-    pub fn void(env: Env, union: Address, loan_id: BytesN<32>) -> Result<(), Error> {
+    pub fn void(env: Env, union: Address, token_id: BytesN<32>) -> Result<(), Error> {
         require_core(&env)?;
-        if let Ok(mut v) = load_voucher(&env, &union, &loan_id) {
+        if let Ok(mut v) = load_voucher(&env, &union, &token_id) {
             if !v.void {
                 v.void = true;
                 v.code_hash = None;
-                save_voucher(&env, &union, &loan_id, &v);
+                save_voucher(&env, &union, &token_id, &v);
                 VoucherVoided {
                     union,
-                    loan_id,
+                    token_id,
                     unused_hours: v.hours - v.used,
                 }
                 .publish(&env);
@@ -573,13 +573,13 @@ impl MachineryContract {
         env: Env,
         member: Address,
         union: Address,
-        loan_id: BytesN<32>,
+        token_id: BytesN<32>,
         max_hours: u32,
         code_hash: BytesN<32>,
     ) -> Result<u64, Error> {
         require_not_paused(&env)?;
         member.require_auth();
-        let mut v = load_voucher(&env, &union, &loan_id)?;
+        let mut v = load_voucher(&env, &union, &token_id)?;
         if v.member != member || v.void {
             return Err(Error::NotFound);
         }
@@ -594,10 +594,10 @@ impl MachineryContract {
         v.code_hash = Some(code_hash);
         v.code_max = max_hours;
         v.code_expires = expires;
-        save_voucher(&env, &union, &loan_id, &v);
+        save_voucher(&env, &union, &token_id, &v);
         CodeOpened {
             union,
-            loan_id,
+            token_id,
             max_hours,
             expires,
         }
@@ -610,15 +610,15 @@ impl MachineryContract {
         env: Env,
         member: Address,
         union: Address,
-        loan_id: BytesN<32>,
+        token_id: BytesN<32>,
     ) -> Result<(), Error> {
         member.require_auth();
-        let mut v = load_voucher(&env, &union, &loan_id)?;
+        let mut v = load_voucher(&env, &union, &token_id)?;
         if v.member != member {
             return Err(Error::NotFound);
         }
         v.code_hash = None;
-        save_voucher(&env, &union, &loan_id, &v);
+        save_voucher(&env, &union, &token_id, &v);
         Ok(())
     }
 
@@ -630,7 +630,7 @@ impl MachineryContract {
         owner: Address,
         machine_id: u64,
         union: Address,
-        loan_id: BytesN<32>,
+        token_id: BytesN<32>,
         code: Bytes,
         hours: u32,
     ) -> Result<(i128, i128), Error> {
@@ -643,7 +643,7 @@ impl MachineryContract {
         if m.union != union || !m.confirmed || m.on_hold {
             return Err(Error::Unavailable);
         }
-        let mut v = load_voucher(&env, &union, &loan_id)?;
+        let mut v = load_voucher(&env, &union, &token_id)?;
         if v.member == owner {
             return Err(Error::SelfClaim);
         }
@@ -672,12 +672,12 @@ impl MachineryContract {
         // One claim per code; the rest of her hours stay with her (R55).
         v.used += hours;
         v.code_hash = None;
-        save_voucher(&env, &union, &loan_id, &v);
+        save_voucher(&env, &union, &token_id, &v);
         FundCoreClient::new(&env, &core_addr(&env)?)
-            .pay_voucher(&union, &loan_id, &owner, &hours, &prepay, &pending);
+            .pay_voucher(&union, &token_id, &owner, &hours, &prepay, &pending);
         VoucherClaimed {
             union,
-            loan_id,
+            token_id,
             machine_id,
             owner,
             hours,
@@ -722,10 +722,10 @@ impl MachineryContract {
             .get(&DataKey::Machine(machine_id))
     }
 
-    pub fn voucher(env: Env, union: Address, loan_id: BytesN<32>) -> Option<Voucher> {
+    pub fn voucher(env: Env, union: Address, token_id: BytesN<32>) -> Option<Voucher> {
         env.storage()
             .persistent()
-            .get(&DataKey::Voucher(union, loan_id))
+            .get(&DataKey::Voucher(union, token_id))
     }
 
     pub fn hours_this_week(env: Env, machine_id: u64) -> u32 {

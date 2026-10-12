@@ -15,7 +15,9 @@ use soroban_sdk::{
     contract, contractimpl, contractmeta, contracttype, token::TokenClient, vec, Address, BytesN,
     Env, Vec,
 };
-use types::Market;
+use types::{
+    LoanState, Market, Milestone, UnionBook, FLAG_CLOSED, FLAG_DEFAULTED, FLAG_DRAWN, FLAG_OVERDUE,
+};
 
 pub use types::{Config, Due, Error, FoodToken, Investor, Position, UnionConfig, VoucherBook};
 
@@ -43,6 +45,8 @@ pub const MIN_TERM: u64 = 90 * DAY;
 /// maximum notified under TN Money-Lenders Act s.7 is not yet sourced; once counsel confirms
 /// it, this is raised by a timelocked upgrade, never by a parameter.
 pub const MAX_RATE_BP: u32 = 1250;
+/// Share valuation rounds down; this much is forgiven at the gate (stroops).
+const GATE_ROUNDING: i128 = 10;
 /// Upgrade timelock at deploy: 48 hours (C15); short builds rehearse it in seconds.
 pub const UPGRADE_DELAY: u64 = 2 * DAY;
 /// Unbond request to claim (R28).
@@ -62,19 +66,15 @@ pub enum DataKey {
     JuniorMarket(Address),
     SeniorInv(Address, Address),
     JuniorInv(Address, Address),
-    Loan(Address, BytesN<32>),
+    /// The oracle's last milestone for a loan (union, token id), written only when reported.
+    Milestone(Address, BytesN<32>),
     LoansOf(Address, Address),
-    UnionBorrows(Address),
-    UnionTreasury(Address),
-    UnionRainy(Address),
-    /// Loans of the union flagged overdue and not yet repaid or defaulted (R34).
-    OnHold(Address),
+    /// The union's counters in one entry (C6): borrows, treasury, rainy day, earmark, on hold.
+    Union(Address),
     /// Attested food token (union, Polygon token id) that a loan may be drawn against.
     FoodToken(Address, BytesN<32>),
     /// A loan's voucher part (C5).
     Vouchers(Address, BytesN<32>),
-    /// Senior cash held back for unclaimed voucher hours, per union (R36).
-    SeniorEarmark(Address),
     /// An owner's settled pending parts, ready to collect (union, owner).
     OwnerBalance(Address, Address),
 }
@@ -167,21 +167,70 @@ fn save_inv(env: &Env, junior: bool, union: &Address, who: &Address, inv: &Inves
     bump_key(env, &key);
 }
 
-fn load_loan(env: &Env, union: &Address, loan_id: &BytesN<32>) -> Result<Loan, Error> {
-    let key = DataKey::Loan(union.clone(), loan_id.clone());
-    let ln: Loan = env
+fn flag(on: bool, f: u32) -> u32 {
+    if on {
+        f
+    } else {
+        0
+    }
+}
+
+fn to_state(ln: &Loan) -> LoanState {
+    LoanState {
+        principal: ln.principal,
+        rate_bp: ln.rate_bp,
+        drawdown_ts: ln.drawdown_ts,
+        maturity_ts: ln.maturity_ts,
+        principal_paid: ln.principal_paid,
+        interest_paid: ln.interest_paid,
+        interest_accrued: ln.interest_accrued,
+        last_accrual_ts: ln.last_accrual_ts,
+        flags: FLAG_DRAWN
+            | flag(ln.overdue, FLAG_OVERDUE)
+            | flag(ln.defaulted, FLAG_DEFAULTED)
+            | flag(ln.closed, FLAG_CLOSED),
+    }
+}
+
+fn to_view(member: &Address, st: &LoanState) -> Loan {
+    Loan {
+        borrower: member.clone(),
+        principal: st.principal,
+        rate_bp: st.rate_bp,
+        drawdown_ts: st.drawdown_ts,
+        maturity_ts: st.maturity_ts,
+        principal_paid: st.principal_paid,
+        interest_paid: st.interest_paid,
+        interest_accrued: st.interest_accrued,
+        last_accrual_ts: st.last_accrual_ts,
+        overdue: st.flags & FLAG_OVERDUE != 0,
+        defaulted: st.flags & FLAG_DEFAULTED != 0,
+        closed: st.flags & FLAG_CLOSED != 0,
+    }
+}
+
+/// The loan drawn against a food token: read from inside the token's entry (C6).
+fn load_loan(env: &Env, union: &Address, token_id: &BytesN<32>) -> Result<Loan, Error> {
+    let key = DataKey::FoodToken(union.clone(), token_id.clone());
+    let ft: FoodToken = env
         .storage()
         .persistent()
         .get(&key)
         .ok_or(Error::LoanNotExist)?;
+    if !ft.loan.drawn() {
+        return Err(Error::LoanNotExist);
+    }
     bump_key(env, &key);
-    Ok(ln)
+    Ok(to_view(&ft.member, &ft.loan))
 }
 
-fn save_loan(env: &Env, union: &Address, loan_id: &BytesN<32>, ln: &Loan) {
-    let key = DataKey::Loan(union.clone(), loan_id.clone());
-    env.storage().persistent().set(&key, ln);
-    bump_key(env, &key);
+fn save_loan(env: &Env, union: &Address, token_id: &BytesN<32>, ln: &Loan) {
+    let key = DataKey::FoodToken(union.clone(), token_id.clone());
+    if let Some(mut ft) = env.storage().persistent().get::<_, FoodToken>(&key) {
+        ft.loan = to_state(ln);
+        env.storage().persistent().set(&key, &ft);
+        bump_key(env, &key);
+    }
 }
 
 fn loans_of(env: &Env, union: &Address, member: &Address) -> Vec<BytesN<32>> {
@@ -191,12 +240,71 @@ fn loans_of(env: &Env, union: &Address, member: &Address) -> Vec<BytesN<32>> {
         .unwrap_or(vec![env])
 }
 
-fn i_get(env: &Env, key: &DataKey) -> i128 {
+/// A field of the union's one counters entry (`UnionBook`, C6: one entry, not five).
+enum Counter {
+    Borrows(Address),
+    Treasury(Address),
+    Rainy(Address),
+    Earmark(Address),
+}
+
+fn load_union(env: &Env, union: &Address) -> UnionBook {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Union(union.clone()))
+        .unwrap_or(UnionBook {
+            borrows: 0,
+            treasury: 0,
+            rainy: 0,
+            earmark: 0,
+            on_hold: 0,
+        })
+}
+
+fn save_union(env: &Env, union: &Address, b: &UnionBook) {
+    let key = DataKey::Union(union.clone());
+    env.storage().persistent().set(&key, b);
+    bump_key(env, &key);
+}
+
+fn i_get(env: &Env, c: &Counter) -> i128 {
+    match c {
+        Counter::Borrows(u) => load_union(env, u).borrows,
+        Counter::Treasury(u) => load_union(env, u).treasury,
+        Counter::Rainy(u) => load_union(env, u).rainy,
+        Counter::Earmark(u) => load_union(env, u).earmark,
+    }
+}
+
+fn i_add(env: &Env, c: &Counter, delta: i128) -> Result<(), Error> {
+    let (u, field) = match c {
+        Counter::Borrows(u) => (u, 0),
+        Counter::Treasury(u) => (u, 1),
+        Counter::Rainy(u) => (u, 2),
+        Counter::Earmark(u) => (u, 3),
+    };
+    let mut b = load_union(env, u);
+    let slot = match field {
+        0 => &mut b.borrows,
+        1 => &mut b.treasury,
+        2 => &mut b.rainy,
+        _ => &mut b.earmark,
+    };
+    let next = slot.checked_add(delta).ok_or(Error::Overflow)?;
+    if next < 0 {
+        return Err(Error::Overflow);
+    }
+    *slot = next;
+    save_union(env, u, &b);
+    Ok(())
+}
+
+fn p_get(env: &Env, key: &DataKey) -> i128 {
     env.storage().persistent().get(key).unwrap_or(0)
 }
 
-fn i_add(env: &Env, key: &DataKey, delta: i128) -> Result<(), Error> {
-    let next = i_get(env, key).checked_add(delta).ok_or(Error::Overflow)?;
+fn p_add(env: &Env, key: &DataKey, delta: i128) -> Result<(), Error> {
+    let next = p_get(env, key).checked_add(delta).ok_or(Error::Overflow)?;
     if next < 0 {
         return Err(Error::Overflow);
     }
@@ -206,22 +314,17 @@ fn i_add(env: &Env, key: &DataKey, delta: i128) -> Result<(), Error> {
 }
 
 fn on_hold_add(env: &Env, union: &Address, delta: i32) {
-    let key = DataKey::OnHold(union.clone());
-    let n: u32 = env.storage().persistent().get(&key).unwrap_or(0);
-    let next = if delta > 0 {
-        n + 1
+    let mut b = load_union(env, union);
+    b.on_hold = if delta > 0 {
+        b.on_hold + 1
     } else {
-        n.saturating_sub(1)
+        b.on_hold.saturating_sub(1)
     };
-    env.storage().persistent().set(&key, &next);
-    bump_key(env, &key);
+    save_union(env, union, &b);
 }
 
 fn on_hold(env: &Env, union: &Address) -> u32 {
-    env.storage()
-        .persistent()
-        .get(&DataKey::OnHold(union.clone()))
-        .unwrap_or(0)
+    load_union(env, union).on_hold
 }
 
 fn nin(env: &Env) -> TokenClient<'_> {
@@ -393,8 +496,8 @@ fn distribute_interest(
         .ok_or(Error::Overflow)?;
     let rainy = nila_math::mul_div(env, interest, i128::from(uc.rainy_fee_bp), BPS)
         .ok_or(Error::Overflow)?;
-    i_add(env, &DataKey::UnionTreasury(union.clone()), fee)?;
-    i_add(env, &DataKey::UnionRainy(union.clone()), rainy)?;
+    i_add(env, &Counter::Treasury(union.clone()), fee)?;
+    i_add(env, &Counter::Rainy(union.clone()), rainy)?;
     let net = interest - fee - rainy;
     let mut jm = load_market(env, true, union);
     jm.cash += net;
@@ -403,7 +506,7 @@ fn distribute_interest(
     } else {
         // No shareholders to earn it: it stays with the union.
         jm.cash -= net;
-        i_add(env, &DataKey::UnionTreasury(union.clone()), net)?;
+        i_add(env, &Counter::Treasury(union.clone()), net)?;
     }
     save_market(env, true, union, &jm);
     Ok(())
@@ -501,7 +604,7 @@ fn claim(
     let held = if junior {
         0
     } else {
-        i_get(env, &DataKey::SeniorEarmark(union.clone()))
+        i_get(env, &Counter::Earmark(union.clone()))
     };
     if m.cash - held < amount {
         return Err(Error::InsufficientCash);
@@ -540,12 +643,12 @@ fn pay_member(env: &Env, union: &Address, who: &Address, amount: i128) -> Result
 }
 
 /// A closed loan lifts its hold and leaves her open-loan list (the events keep the history).
-fn close_loan(env: &Env, union: &Address, loan_id: &BytesN<32>, ln: &Loan) {
+fn close_loan(env: &Env, union: &Address, token_id: &BytesN<32>, ln: &Loan) {
     if ln.overdue {
         on_hold_add(env, union, -1);
     }
     let mut ids = loans_of(env, union, &ln.borrower);
-    if let Some(i) = ids.first_index_of(loan_id) {
+    if let Some(i) = ids.first_index_of(token_id) {
         ids.remove(i);
         let key = DataKey::LoansOf(union.clone(), ln.borrower.clone());
         env.storage().persistent().set(&key, &ids);
@@ -556,14 +659,14 @@ fn close_loan(env: &Env, union: &Address, loan_id: &BytesN<32>, ln: &Loan) {
 /// Owners per loan's voucher book.
 const MAX_OWNERS_PER_LOAN: u32 = 8;
 
-fn load_book(env: &Env, union: &Address, loan_id: &BytesN<32>) -> Option<VoucherBook> {
+fn load_book(env: &Env, union: &Address, token_id: &BytesN<32>) -> Option<VoucherBook> {
     env.storage()
         .persistent()
-        .get(&DataKey::Vouchers(union.clone(), loan_id.clone()))
+        .get(&DataKey::Vouchers(union.clone(), token_id.clone()))
 }
 
-fn save_book(env: &Env, union: &Address, loan_id: &BytesN<32>, b: &VoucherBook) {
-    let k = DataKey::Vouchers(union.clone(), loan_id.clone());
+fn save_book(env: &Env, union: &Address, token_id: &BytesN<32>, b: &VoucherBook) {
+    let k = DataKey::Vouchers(union.clone(), token_id.clone());
     env.storage().persistent().set(&k, b);
     bump_key(env, &k);
 }
@@ -586,7 +689,7 @@ fn pay_dues(env: &Env, union: &Address, b: &mut VoucherBook, amount: i128) -> Re
     for d in b.dues.iter() {
         let x = core::cmp::min(left, d.amount);
         if x > 0 {
-            i_add(
+            p_add(
                 env,
                 &DataKey::OwnerBalance(union.clone(), d.owner.clone()),
                 x,
@@ -605,15 +708,15 @@ fn pay_dues(env: &Env, union: &Address, b: &mut VoucherBook, amount: i128) -> Re
 }
 
 /// The loan is over: unclaimed hours lapse and their senior earmark is released.
-fn end_vouchers(env: &Env, union: &Address, loan_id: &BytesN<32>) -> Result<(), Error> {
-    if let Some(mut b) = load_book(env, union, loan_id) {
+fn end_vouchers(env: &Env, union: &Address, token_id: &BytesN<32>) -> Result<(), Error> {
+    if let Some(mut b) = load_book(env, union, token_id) {
         if b.earmark > 0 {
-            i_add(env, &DataKey::SeniorEarmark(union.clone()), -b.earmark)?;
+            i_add(env, &Counter::Earmark(union.clone()), -b.earmark)?;
             b.earmark = 0;
-            save_book(env, union, loan_id, &b);
+            save_book(env, union, token_id, &b);
         }
         if let Some(m) = cfg(env).machinery {
-            MachineryClient::new(env, &m).void(union, loan_id);
+            MachineryClient::new(env, &m).void(union, token_id);
         }
     }
     Ok(())
@@ -736,9 +839,9 @@ impl FundCore {
         require_leader(&env, &union, &leader)?;
         require_positive(amount)?;
         let key = if from_rainy {
-            DataKey::UnionRainy(union.clone())
+            Counter::Rainy(union.clone())
         } else {
-            DataKey::UnionTreasury(union.clone())
+            Counter::Treasury(union.clone())
         };
         if amount > i_get(&env, &key) {
             return Err(Error::InsufficientCash);
@@ -769,7 +872,7 @@ impl FundCore {
         require_positive(amount)?;
         union_cfg(&env, &union)?;
         nin(&env).transfer(&fx, env.current_contract_address(), &amount);
-        i_add(&env, &DataKey::UnionTreasury(union.clone()), amount)?;
+        i_add(&env, &Counter::Treasury(union.clone()), amount)?;
         TreasuryMoved {
             union,
             amount,
@@ -791,8 +894,8 @@ impl FundCore {
         }
         let mut left = amount;
         for key in [
-            DataKey::UnionTreasury(union.clone()),
-            DataKey::UnionRainy(union.clone()),
+            Counter::Treasury(union.clone()),
+            Counter::Rainy(union.clone()),
         ] {
             let take = core::cmp::min(left, i_get(&env, &key));
             if take > 0 {
@@ -973,7 +1076,7 @@ impl FundCore {
         }
         let key = DataKey::FoodToken(union.clone(), token_id.clone());
         if let Some(old) = env.storage().persistent().get::<_, FoodToken>(&key) {
-            if old.loan_id.is_some() {
+            if old.loan.drawn() {
                 return Err(Error::FoodTokenUsed);
             }
         }
@@ -982,7 +1085,7 @@ impl FundCore {
             amount,
             hours,
             from_date,
-            loan_id: None,
+            loan: LoanState::none(),
         };
         env.storage().persistent().set(&key, &ft);
         bump_key(&env, &key);
@@ -1010,7 +1113,6 @@ impl FundCore {
         union: Address,
         member: Address,
         token_id: BytesN<32>,
-        loan_id: BytesN<32>,
         cash: i128,
         hours: u32,
     ) -> Result<(), Error> {
@@ -1031,7 +1133,7 @@ impl FundCore {
         if ft.member != member {
             return Err(Error::NoFoodToken);
         }
-        if ft.loan_id.is_some() {
+        if ft.loan.drawn() {
             return Err(Error::FoodTokenUsed);
         }
         if env.ledger().timestamp() < ft.from_date {
@@ -1050,11 +1152,9 @@ impl FundCore {
         if uc.enforce_token_amount && (cash > ft.amount || hours > ft.hours) {
             return Err(Error::AboveFoodToken);
         }
-        let key = DataKey::Loan(union.clone(), loan_id.clone());
-        if env.storage().persistent().has(&key) {
-            return Err(Error::LoanExists);
-        }
-        if position(&env, &union, &member)?.invested < uc.gate {
+        // Her shares are valued down to the stroop: allow that rounding, so exactly the gate
+        // invested passes (R26; found by the oracle lane's O1 rehearsal).
+        if position(&env, &union, &member)?.invested + GATE_ROUNDING < uc.gate {
             return Err(Error::BelowGate);
         }
         let mut ids = loans_of(&env, &union, &member);
@@ -1078,7 +1178,7 @@ impl FundCore {
             let earmark = per_hour
                 .checked_mul(i128::from(hours))
                 .ok_or(Error::Overflow)?;
-            let ek = DataKey::SeniorEarmark(union.clone());
+            let ek = Counter::Earmark(union.clone());
             if load_market(&env, false, &union).cash - i_get(&env, &ek) < earmark {
                 return Err(Error::NoSeniorBacking);
             }
@@ -1086,7 +1186,7 @@ impl FundCore {
             save_book(
                 &env,
                 &union,
-                &loan_id,
+                &token_id,
                 &VoucherBook {
                     hours,
                     earmark,
@@ -1095,17 +1195,16 @@ impl FundCore {
                     dues: Vec::new(&env),
                 },
             );
-            mc.grant(&union, &member, &loan_id, &hours);
+            mc.grant(&union, &member, &token_id, &hours);
         }
         jm.cash -= cash;
         jm.total_borrows += cash;
         save_market(&env, true, &union, &jm);
-        i_add(&env, &DataKey::UnionBorrows(union.clone()), cash)?;
+        i_add(&env, &Counter::Borrows(union.clone()), cash)?;
 
         let now = env.ledger().timestamp();
-        let ln = Loan {
-            borrower: member.clone(),
-            token_id: token_id.clone(),
+        // The loan lives inside its food token entry: one write, no copies (C6).
+        ft.loan = LoanState {
             principal: cash,
             rate_bp: uc.rate_bp,
             drawdown_ts: now,
@@ -1114,18 +1213,11 @@ impl FundCore {
             interest_paid: 0,
             interest_accrued: 0,
             last_accrual_ts: now,
-            overdue: false,
-            defaulted: false,
-            closed: false,
-            milestone: 0,
-            milestone_digest: BytesN::from_array(&env, &[0u8; 32]),
-            digest_ts: 0,
+            flags: FLAG_DRAWN,
         };
-        save_loan(&env, &union, &loan_id, &ln);
-        ft.loan_id = Some(loan_id.clone());
         env.storage().persistent().set(&ft_key, &ft);
         bump_key(&env, &ft_key);
-        ids.push_back(loan_id.clone());
+        ids.push_back(token_id.clone());
         let lk = DataKey::LoansOf(union.clone(), member.clone());
         env.storage().persistent().set(&lk, &ids);
         bump_key(&env, &lk);
@@ -1139,9 +1231,8 @@ impl FundCore {
 
         LoanDrawn {
             union,
-            loan_id,
-            borrower: member,
             token_id,
+            borrower: member,
             cash,
             hours,
             rate_bp: uc.rate_bp,
@@ -1159,19 +1250,19 @@ impl FundCore {
     pub fn repay_loan(
         env: Env,
         union: Address,
-        loan_id: BytesN<32>,
+        token_id: BytesN<32>,
         amount: i128,
     ) -> Result<bool, Error> {
         require_not_paused(&env)?;
         let fx = require_fx_pool(&env)?;
         require_positive(amount)?;
         let uc = union_cfg(&env, &union)?;
-        let mut ln = load_loan(&env, &union, &loan_id)?;
+        let mut ln = load_loan(&env, &union, &token_id)?;
         if ln.closed {
             return Err(Error::LoanClosed);
         }
         accrue(&env, &mut ln, env.ledger().timestamp())?;
-        let mut book = load_book(&env, &union, &loan_id);
+        let mut book = load_book(&env, &union, &token_id);
         let owed_d = book.as_ref().map(dues_total).unwrap_or(0);
         let owed_s = book.as_ref().map(|b| b.senior_out).unwrap_or(0);
         let owed_i = ln.interest_accrued - ln.interest_paid;
@@ -1220,7 +1311,7 @@ impl FundCore {
                     .1;
             }
             save_market(&env, true, &union, &jm);
-            let ub = DataKey::UnionBorrows(union.clone());
+            let ub = Counter::Borrows(union.clone());
             i_add(
                 &env,
                 &ub,
@@ -1245,17 +1336,17 @@ impl FundCore {
             }
             b.senior_out -= off_s;
             save_market(&env, false, &union, &sm);
-            save_book(&env, &union, &loan_id, b);
+            save_book(&env, &union, &token_id, b);
         }
         if closed {
             ln.closed = true;
-            close_loan(&env, &union, &loan_id, &ln);
-            end_vouchers(&env, &union, &loan_id)?;
+            close_loan(&env, &union, &token_id, &ln);
+            end_vouchers(&env, &union, &token_id)?;
         }
-        save_loan(&env, &union, &loan_id, &ln);
+        save_loan(&env, &union, &token_id, &ln);
         LoanRepaid {
             union,
-            loan_id,
+            token_id,
             interest_paid: pay_i,
             principal_paid: pay_p,
             dues_paid: pay_d,
@@ -1273,11 +1364,11 @@ impl FundCore {
         env: Env,
         member: Address,
         union: Address,
-        loan_id: BytesN<32>,
+        token_id: BytesN<32>,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         member.require_auth();
-        let mut ln = load_loan(&env, &union, &loan_id)?;
+        let mut ln = load_loan(&env, &union, &token_id)?;
         if ln.borrower != member {
             return Err(Error::NotBorrower);
         }
@@ -1285,7 +1376,7 @@ impl FundCore {
             return Err(Error::LoanClosed);
         }
         accrue(&env, &mut ln, env.ledger().timestamp())?;
-        let b = load_book(&env, &union, &loan_id);
+        let b = load_book(&env, &union, &token_id);
         let owed = ln.principal - ln.principal_paid + ln.interest_accrued - ln.interest_paid
             + b.as_ref()
                 .map(|b| dues_total(b) + b.senior_out)
@@ -1294,10 +1385,10 @@ impl FundCore {
             return Err(Error::BadState);
         }
         ln.closed = true;
-        close_loan(&env, &union, &loan_id, &ln);
-        save_loan(&env, &union, &loan_id, &ln);
-        end_vouchers(&env, &union, &loan_id)?;
-        LoanReleased { union, loan_id }.publish(&env);
+        close_loan(&env, &union, &token_id, &ln);
+        save_loan(&env, &union, &token_id, &ln);
+        end_vouchers(&env, &union, &token_id)?;
+        LoanReleased { union, token_id }.publish(&env);
         bump_instance(&env);
         Ok(())
     }
@@ -1308,11 +1399,11 @@ impl FundCore {
         require_not_paused(&env)?;
         owner.require_auth();
         let k = DataKey::OwnerBalance(union.clone(), owner.clone());
-        let amount = i_get(&env, &k);
+        let amount = p_get(&env, &k);
         if amount <= 0 {
             return Err(Error::NothingToClaim);
         }
-        i_add(&env, &k, -amount)?;
+        p_add(&env, &k, -amount)?;
         pay_member(&env, &union, &owner, amount)?;
         DuesCollected {
             union,
@@ -1331,7 +1422,7 @@ impl FundCore {
     pub fn pay_voucher(
         env: Env,
         union: Address,
-        loan_id: BytesN<32>,
+        token_id: BytesN<32>,
         owner: Address,
         hours: u32,
         prepay: i128,
@@ -1345,11 +1436,11 @@ impl FundCore {
         if prepay < 0 || pending < 0 {
             return Err(Error::NegativeAmount);
         }
-        let ln = load_loan(&env, &union, &loan_id)?;
+        let ln = load_loan(&env, &union, &token_id)?;
         if ln.closed {
             return Err(Error::LoanClosed);
         }
-        let mut b = load_book(&env, &union, &loan_id).ok_or(Error::NotExists)?;
+        let mut b = load_book(&env, &union, &token_id).ok_or(Error::NotExists)?;
         // Release this many hours' earmark; the prepay itself comes out of senior cash.
         let release = core::cmp::min(
             b.earmark,
@@ -1358,7 +1449,7 @@ impl FundCore {
                 .ok_or(Error::Overflow)?,
         );
         b.earmark -= release;
-        let ek = DataKey::SeniorEarmark(union.clone());
+        let ek = Counter::Earmark(union.clone());
         i_add(&env, &ek, -release)?;
         let mut sm = load_market(&env, false, &union);
         // Paid from this loan's released earmark and free senior cash, never from what other
@@ -1395,13 +1486,13 @@ impl FundCore {
             }
             b.dues = dues;
         }
-        save_book(&env, &union, &loan_id, &b);
+        save_book(&env, &union, &token_id, &b);
         if prepay > 0 {
             pay_member(&env, &union, &owner, prepay)?;
         }
         VoucherPaid {
             union,
-            loan_id,
+            token_id,
             owner,
             hours,
             prepay,
@@ -1418,11 +1509,11 @@ impl FundCore {
         env: Env,
         oracle: Address,
         union: Address,
-        loan_id: BytesN<32>,
+        token_id: BytesN<32>,
         maturity_ts: u64,
     ) -> Result<(), Error> {
         require_oracle(&env, &oracle)?;
-        let mut ln = load_loan(&env, &union, &loan_id)?;
+        let mut ln = load_loan(&env, &union, &token_id)?;
         if ln.closed {
             return Err(Error::LoanClosed);
         }
@@ -1433,10 +1524,10 @@ impl FundCore {
             return Err(Error::BadMaturity);
         }
         ln.maturity_ts = maturity_ts;
-        save_loan(&env, &union, &loan_id, &ln);
+        save_loan(&env, &union, &token_id, &ln);
         MaturityReported {
             union,
-            loan_id,
+            token_id,
             maturity_ts,
         }
         .publish(&env);
@@ -1445,10 +1536,10 @@ impl FundCore {
 
     /// Anyone, once the payback date has passed: lending in the union stops until the
     /// loan is repaid or defaulted (R34, R44). No end of season reported, no flag.
-    pub fn flag_overdue(env: Env, union: Address, loan_id: BytesN<32>) -> Result<(), Error> {
+    pub fn flag_overdue(env: Env, union: Address, token_id: BytesN<32>) -> Result<(), Error> {
         // A freeze stops repayment, so it stops the clock's consequences too.
         require_not_paused(&env)?;
-        let mut ln = load_loan(&env, &union, &loan_id)?;
+        let mut ln = load_loan(&env, &union, &token_id)?;
         if ln.closed {
             return Err(Error::LoanClosed);
         }
@@ -1460,11 +1551,11 @@ impl FundCore {
             return Err(Error::NotDue);
         }
         ln.overdue = true;
-        save_loan(&env, &union, &loan_id, &ln);
+        save_loan(&env, &union, &token_id, &ln);
         on_hold_add(&env, &union, 1);
         LoanOverdue {
             union,
-            loan_id,
+            token_id,
             due_ts: due,
         }
         .publish(&env);
@@ -1475,9 +1566,9 @@ impl FundCore {
     /// `maturityTs + 21 days`. Without a reported end of season there is no default.
     /// Writes off all she owes, principal and interest. Loss order (D10): her own junior
     /// investment first (principal and interest), then the junior pool, then senior.
-    pub fn mark_default(env: Env, union: Address, loan_id: BytesN<32>) -> Result<(), Error> {
+    pub fn mark_default(env: Env, union: Address, token_id: BytesN<32>) -> Result<(), Error> {
         require_not_paused(&env)?;
-        let mut ln = load_loan(&env, &union, &loan_id)?;
+        let mut ln = load_loan(&env, &union, &token_id)?;
         if ln.closed {
             return Err(Error::LoanClosed);
         }
@@ -1490,7 +1581,7 @@ impl FundCore {
         accrue(&env, &mut ln, env.ledger().timestamp())?;
         let loss = ln.principal - ln.principal_paid;
         let interest = ln.interest_accrued - ln.interest_paid;
-        let mut book = load_book(&env, &union, &loan_id);
+        let mut book = load_book(&env, &union, &token_id);
         let dues = book.as_ref().map(dues_total).unwrap_or(0);
         let senior_out = book.as_ref().map(|b| b.senior_out).unwrap_or(0);
 
@@ -1531,7 +1622,7 @@ impl FundCore {
                     index_bump(&env, jm.index, jm.total_shares, m_i).ok_or(Error::Overflow)?;
             } else {
                 jm.cash -= m_i;
-                i_add(&env, &DataKey::UnionTreasury(union.clone()), m_i)?;
+                i_add(&env, &Counter::Treasury(union.clone()), m_i)?;
             }
         }
         let mut sm = load_market(&env, false, &union);
@@ -1553,7 +1644,7 @@ impl FundCore {
             jm.index = haircut_index(&env, jm.index, under, paid_j)
                 .ok_or(Error::Overflow)?
                 .1;
-            let held = i_get(&env, &DataKey::SeniorEarmark(union.clone())) - book_earmark(b);
+            let held = i_get(&env, &Counter::Earmark(union.clone())) - book_earmark(b);
             let from_senior = core::cmp::min(short - paid_j, core::cmp::max(0, sm.cash - held));
             let paid_s = pay_dues(&env, &union, b, from_senior)?;
             sm.cash -= paid_s;
@@ -1600,19 +1691,19 @@ impl FundCore {
         save_market(&env, false, &union, &sm);
         if let Some(b) = book.as_mut() {
             b.senior_out = 0;
-            save_book(&env, &union, &loan_id, b);
+            save_book(&env, &union, &token_id, b);
         }
-        let ub = DataKey::UnionBorrows(union.clone());
+        let ub = Counter::Borrows(union.clone());
         i_add(&env, &ub, -core::cmp::min(i_get(&env, &ub), loss))?;
 
         ln.defaulted = true;
         ln.closed = true;
-        close_loan(&env, &union, &loan_id, &ln);
-        save_loan(&env, &union, &loan_id, &ln);
-        end_vouchers(&env, &union, &loan_id)?;
+        close_loan(&env, &union, &token_id, &ln);
+        save_loan(&env, &union, &token_id, &ln);
+        end_vouchers(&env, &union, &token_id)?;
         LoanDefaulted {
             union,
-            loan_id,
+            token_id,
             member_applied,
             junior_applied,
             senior_applied,
@@ -1632,12 +1723,12 @@ impl FundCore {
     pub fn credit_recovery(
         env: Env,
         union: Address,
-        loan_id: BytesN<32>,
+        token_id: BytesN<32>,
         amount: i128,
     ) -> Result<(), Error> {
         let fx = require_fx_pool(&env)?;
         require_positive(amount)?;
-        let mut ln = load_loan(&env, &union, &loan_id)?;
+        let mut ln = load_loan(&env, &union, &token_id)?;
         if !ln.defaulted {
             return Err(Error::NotDefaulted);
         }
@@ -1646,7 +1737,7 @@ impl FundCore {
             return Err(Error::CapExceeded);
         }
         ln.principal_paid += amount;
-        save_loan(&env, &union, &loan_id, &ln);
+        save_loan(&env, &union, &token_id, &ln);
         nin(&env).transfer(&fx, env.current_contract_address(), &amount);
         let mut jm = load_market(&env, true, &union);
         if jm.total_shares > 0 {
@@ -1655,11 +1746,11 @@ impl FundCore {
                 index_bump(&env, jm.index, jm.total_shares, amount).ok_or(Error::Overflow)?;
             save_market(&env, true, &union, &jm);
         } else {
-            i_add(&env, &DataKey::UnionTreasury(union.clone()), amount)?;
+            i_add(&env, &Counter::Treasury(union.clone()), amount)?;
         }
         RecoveryCredited {
             union,
-            loan_id,
+            token_id,
             recovered: amount,
         }
         .publish(&env);
@@ -1671,22 +1762,28 @@ impl FundCore {
         env: Env,
         oracle: Address,
         union: Address,
-        loan_id: BytesN<32>,
+        token_id: BytesN<32>,
         milestone: u32,
         milestone_digest: BytesN<32>,
     ) -> Result<(), Error> {
         require_oracle(&env, &oracle)?;
-        let mut ln = load_loan(&env, &union, &loan_id)?;
+        let ln = load_loan(&env, &union, &token_id)?;
         if ln.closed {
             return Err(Error::LoanClosed);
         }
-        ln.milestone = milestone;
-        ln.digest_ts = env.ledger().timestamp();
-        ln.milestone_digest = milestone_digest.clone();
-        save_loan(&env, &union, &loan_id, &ln);
+        let mk = DataKey::Milestone(union.clone(), token_id.clone());
+        env.storage().persistent().set(
+            &mk,
+            &Milestone {
+                milestone,
+                digest: milestone_digest.clone(),
+                ts: env.ledger().timestamp(),
+            },
+        );
+        bump_key(&env, &mk);
         MilestoneReported {
             union,
-            loan_id,
+            token_id,
             milestone,
             milestone_digest,
         }
@@ -1770,8 +1867,8 @@ impl FundCore {
         load_inv(&env, false, &union, &investor)
     }
 
-    pub fn get_loan(env: Env, union: Address, loan_id: BytesN<32>) -> Option<Loan> {
-        load_loan(&env, &union, &loan_id).ok()
+    pub fn get_loan(env: Env, union: Address, token_id: BytesN<32>) -> Option<Loan> {
+        load_loan(&env, &union, &token_id).ok()
     }
 
     pub fn food_token(env: Env, union: Address, token_id: BytesN<32>) -> Option<FoodToken> {
@@ -1786,8 +1883,8 @@ impl FundCore {
     }
 
     /// Payback due date, or None while the end of season is not reported (R39).
-    pub fn due_date(env: Env, union: Address, loan_id: BytesN<32>) -> Option<u64> {
-        load_loan(&env, &union, &loan_id)
+    pub fn due_date(env: Env, union: Address, token_id: BytesN<32>) -> Option<u64> {
+        load_loan(&env, &union, &token_id)
             .ok()
             .and_then(|ln| due_ts(&ln))
     }
@@ -1798,30 +1895,30 @@ impl FundCore {
     }
 
     pub fn union_treasury(env: Env, union: Address) -> i128 {
-        i_get(&env, &DataKey::UnionTreasury(union))
+        i_get(&env, &Counter::Treasury(union))
     }
 
     pub fn union_rainy_day(env: Env, union: Address) -> i128 {
-        i_get(&env, &DataKey::UnionRainy(union))
+        i_get(&env, &Counter::Rainy(union))
     }
 
     /// An owner's settled pending parts, ready to collect.
     pub fn owner_balance(env: Env, union: Address, owner: Address) -> i128 {
-        i_get(&env, &DataKey::OwnerBalance(union, owner))
+        p_get(&env, &DataKey::OwnerBalance(union, owner))
     }
 
     /// Her loan's voucher part: hours, earmark, senior prepay out, owners' pending parts.
-    pub fn voucher_book(env: Env, union: Address, loan_id: BytesN<32>) -> Option<VoucherBook> {
-        load_book(&env, &union, &loan_id)
+    pub fn voucher_book(env: Env, union: Address, token_id: BytesN<32>) -> Option<VoucherBook> {
+        load_book(&env, &union, &token_id)
     }
 
     /// Senior cash held back for unclaimed voucher hours.
     pub fn senior_earmark(env: Env, union: Address) -> i128 {
-        i_get(&env, &DataKey::SeniorEarmark(union))
+        i_get(&env, &Counter::Earmark(union))
     }
 
     pub fn union_borrows(env: Env, union: Address) -> i128 {
-        i_get(&env, &DataKey::UnionBorrows(union))
+        i_get(&env, &Counter::Borrows(union))
     }
 
     pub fn is_paused(env: Env) -> bool {

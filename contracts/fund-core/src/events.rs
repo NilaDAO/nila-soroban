@@ -65,9 +65,8 @@ pub struct LoanDrawn {
     #[topic]
     pub union: Address,
     #[topic]
-    pub loan_id: BytesN<32>,
-    pub borrower: Address,
     pub token_id: BytesN<32>,
+    pub borrower: Address,
     pub cash: i128,
     pub hours: u32,
     pub rate_bp: u32,
@@ -80,7 +79,7 @@ pub struct LoanRepaid {
     #[topic]
     pub union: Address,
     #[topic]
-    pub loan_id: BytesN<32>,
+    pub token_id: BytesN<32>,
     pub interest_paid: i128,
     pub principal_paid: i128,
     /// To machine owners' pending parts (paid first).
@@ -95,7 +94,7 @@ pub struct LoanOverdue {
     #[topic]
     pub union: Address,
     #[topic]
-    pub loan_id: BytesN<32>,
+    pub token_id: BytesN<32>,
     pub due_ts: u64,
 }
 
@@ -104,7 +103,7 @@ pub struct LoanDefaulted {
     #[topic]
     pub union: Address,
     #[topic]
-    pub loan_id: BytesN<32>,
+    pub token_id: BytesN<32>,
     pub member_applied: i128,
     pub junior_applied: i128,
     pub senior_applied: i128,
@@ -123,7 +122,7 @@ pub struct RecoveryCredited {
     #[topic]
     pub union: Address,
     #[topic]
-    pub loan_id: BytesN<32>,
+    pub token_id: BytesN<32>,
     pub recovered: i128,
 }
 
@@ -132,7 +131,7 @@ pub struct MaturityReported {
     #[topic]
     pub union: Address,
     #[topic]
-    pub loan_id: BytesN<32>,
+    pub token_id: BytesN<32>,
     pub maturity_ts: u64,
 }
 
@@ -141,7 +140,7 @@ pub struct MilestoneReported {
     #[topic]
     pub union: Address,
     #[topic]
-    pub loan_id: BytesN<32>,
+    pub token_id: BytesN<32>,
     pub milestone: u32,
     pub milestone_digest: BytesN<32>,
 }
@@ -180,7 +179,7 @@ pub struct VoucherPaid {
     #[topic]
     pub union: Address,
     #[topic]
-    pub loan_id: BytesN<32>,
+    pub token_id: BytesN<32>,
     pub owner: Address,
     pub hours: u32,
     pub prepay: i128,
@@ -202,5 +201,5 @@ pub struct LoanReleased {
     #[topic]
     pub union: Address,
     #[topic]
-    pub loan_id: BytesN<32>,
+    pub token_id: BytesN<32>,
 }

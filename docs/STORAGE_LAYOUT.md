@@ -68,13 +68,11 @@ storage:
 | `UnionCfg(union)` | persistent | `UnionConfig{max_loan, gate, rate_bp, treasury_fee_bp, rainy_fee_bp, safety_bp, safety_floor, hard_stop, enforce_token_amount}` |
 | `JuniorMarket(union)`, `SeniorMarket(union)` | persistent | `Market{cash, index, total_shares, total_borrows, claimable_principal, exists}` |
 | `JuniorInv(union, who)`, `SeniorInv(union, who)` | persistent | `Investor{shares, pending, claimable, request_ts, cost, pending_principal_snap}` |
-| `Loan(union, loan_id)` | persistent | `Loan` (nila_common): borrower, token_id, principal, rate_bp, drawdown_ts, maturity_ts, principal_paid, interest_paid, interest_accrued, last_accrual_ts, overdue, defaulted, closed, milestone, milestone_digest, digest_ts |
+| `Milestone(union, token_id)` | persistent | `Milestone{milestone, digest, ts}`: written only when the oracle reports one |
 | `LoansOf(union, member)` | persistent | Vec of open loan ids (max 32) |
-| `UnionBorrows`, `UnionTreasury`, `UnionRainy` (union) | persistent | i128 |
-| `OnHold(union)` | persistent | u32 overdue loans |
-| `FoodToken(union, token_id)` | persistent | `FoodToken{member, amount, hours, from_date, loan_id: Option}`: amount and hours are the plan's recommendations, from_date the season's SOS (N5) |
+| `Union(union)` | persistent | `UnionBook{borrows, treasury, rainy, earmark, on_hold}`: one entry for the union's counters (C6) |
+| `FoodToken(union, token_id)` | persistent | `FoodToken{member, amount, hours, from_date, loan: LoanState}`. Amount and hours are the plan's recommendations; from_date is the season's SOS (N5). **The loan lives here** (C6): `LoanState{principal, rate_bp, drawdown_ts, maturity_ts, principal_paid, interest_paid, interest_accrued, last_accrual_ts, flags}`, flags = overdue 1, defaulted 2, closed 4, drawn 8. The token id is the loan id. |
 | `Vouchers(union, loan_id)` | persistent | `VoucherBook{hours, earmark, earmark_per_hour, senior_out, dues: Vec<Due{owner, amount}>}` (C5) |
-| `SeniorEarmark(union)` | persistent | i128 senior cash held back for unclaimed voucher hours |
 | `OwnerBalance(union, owner)` | persistent | i128 owner's settled pending parts, ready to collect |
 
 ## machinery
@@ -127,3 +125,7 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
   fund_core, land_title (`AnyCount`, no back-fill) and the new machinery contract gained keys. C4
   testnet deployments cannot be upgraded to C5; **redeploy all of them**. An in-place land_title upgrade
   would read every existing holder as holding no title anywhere, which would let members in as senior.
+- **C6 (12 Oct, executive decision):** less rent per call. The loan moved into its food token entry: no separate
+  `Loan(union, loan_id)`, no copy of the borrower or token id, three flags packed into one number, and
+  the token id is the loan id. Five union counters became one `Union` entry. Milestones moved to their
+  own entry, written only when reported. Redeploy; no upgrade from C5.

@@ -105,6 +105,50 @@ pub struct UnionConfig {
     pub enforce_token_amount: bool,
 }
 
+pub const FLAG_OVERDUE: u32 = 1;
+pub const FLAG_DEFAULTED: u32 = 2;
+pub const FLAG_CLOSED: u32 = 4;
+/// A loan was drawn against the token.
+pub const FLAG_DRAWN: u32 = 8;
+
+impl LoanState {
+    pub fn none() -> Self {
+        LoanState {
+            principal: 0,
+            rate_bp: 0,
+            drawdown_ts: 0,
+            maturity_ts: 0,
+            principal_paid: 0,
+            interest_paid: 0,
+            interest_accrued: 0,
+            last_accrual_ts: 0,
+            flags: 0,
+        }
+    }
+
+    pub fn drawn(&self) -> bool {
+        self.flags & FLAG_DRAWN != 0
+    }
+}
+
+/// A loan's money state, stored inside its food token entry (C6).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoanState {
+    /// Cash part handed out by the leader (D9).
+    pub principal: i128,
+    pub rate_bp: u32,
+    pub drawdown_ts: u64,
+    /// Detected end of season reported by the oracle; 0 until reported (no EOS, no default).
+    pub maturity_ts: u64,
+    pub principal_paid: i128,
+    pub interest_paid: i128,
+    pub interest_accrued: i128,
+    pub last_accrual_ts: u64,
+    /// FLAG_OVERDUE | FLAG_DEFAULTED | FLAG_CLOSED | FLAG_DRAWN.
+    pub flags: u32,
+}
+
 /// Food token fact written by the attester (F2): copied from the Polygon FoodToken of a crop
 /// plan. Until T3's plan engine, the attestation is how a loan is approved.
 #[contracttype]
@@ -117,8 +161,18 @@ pub struct FoodToken {
     pub hours: u32,
     /// Loans accepted from this date: the season's SOS from the plan (N5).
     pub from_date: u64,
-    /// The loan drawn against it; one loan per token.
-    pub loan_id: Option<BytesN<32>>,
+    /// The loan drawn against it (C6: the loan lives here; the token id is the loan id).
+    /// All zero until drawn; `FLAG_DRAWN` says a loan exists (one per token).
+    pub loan: LoanState,
+}
+
+/// The oracle's last crop milestone for a loan: its own entry, written only when reported.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Milestone {
+    pub milestone: u32,
+    pub digest: BytesN<32>,
+    pub ts: u64,
 }
 
 /// A member's junior position (R26, R27, R29), in nIN.
@@ -183,4 +237,18 @@ pub struct VoucherBook {
     pub senior_out: i128,
     /// Owners' pending parts, paid from her repayments first.
     pub dues: soroban_sdk::Vec<Due>,
+}
+
+/// One union's counters in one entry (C6): fewer entries, less rent per call.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnionBook {
+    /// Cash lent out and not yet repaid or written off.
+    pub borrows: i128,
+    pub treasury: i128,
+    pub rainy: i128,
+    /// Senior cash held back for unclaimed voucher hours (R36).
+    pub earmark: i128,
+    /// Loans past their payback date and not repaid or defaulted (R34).
+    pub on_hold: u32,
 }
