@@ -2236,7 +2236,7 @@ fn exactly_the_gate_passes_after_interest_raised_the_share_price() {
     let her = Address::generate(&fx.env);
     fx.give_title(&her);
     fx.invest(&her, 600 * NIN);
-    assert!(c.position(&fx.union, &her).invested <= 600 * NIN);
+    assert!(c.position(&fx.union, &her).invested < 600 * NIN);
     let tok = loan_id(&fx.env, 2);
     fx.attest(&her, &tok, 100 * NIN);
     c.draw_loan(&fx.union, &her, &tok, &(100 * NIN), &0);

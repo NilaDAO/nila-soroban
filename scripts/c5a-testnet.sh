@@ -7,6 +7,9 @@
 # USDC here is a throwaway classic asset "USDC" from a test issuer, so the run needs no faucet;
 # mainnet uses Circle's USDC SAC. Identities live in the stellar CLI config, never in this repo;
 # only public addresses and tx hashes are printed.
+#
+# Kept as a record of its step. From C6 on, loans are keyed by the food token id (`token_id`, no
+# separate `loan_id`): this script no longer runs unchanged. The current flow is scripts/c5-testnet.sh.
 set -euo pipefail
 
 NETWORK="${NETWORK:-testnet}"

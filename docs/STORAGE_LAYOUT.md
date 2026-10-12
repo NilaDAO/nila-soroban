@@ -69,10 +69,10 @@ storage:
 | `JuniorMarket(union)`, `SeniorMarket(union)` | persistent | `Market{cash, index, total_shares, total_borrows, claimable_principal, exists}` |
 | `JuniorInv(union, who)`, `SeniorInv(union, who)` | persistent | `Investor{shares, pending, claimable, request_ts, cost, pending_principal_snap}` |
 | `Milestone(union, token_id)` | persistent | `Milestone{milestone, digest, ts}`: written only when the oracle reports one |
-| `LoansOf(union, member)` | persistent | Vec of open loan ids (max 32) |
+| `LoansOf(union, member)` | persistent | Vec of open loans' token ids (max 32) |
 | `Union(union)` | persistent | `UnionBook{borrows, treasury, rainy, earmark, on_hold}`: one entry for the union's counters (C6) |
 | `FoodToken(union, token_id)` | persistent | `FoodToken{member, amount, hours, from_date, loan: LoanState}`. Amount and hours are the plan's recommendations; from_date is the season's SOS (N5). **The loan lives here** (C6): `LoanState{principal, rate_bp, drawdown_ts, maturity_ts, principal_paid, interest_paid, interest_accrued, last_accrual_ts, flags}`, flags = overdue 1, defaulted 2, closed 4, drawn 8. The token id is the loan id. |
-| `Vouchers(union, loan_id)` | persistent | `VoucherBook{hours, earmark, earmark_per_hour, senior_out, dues: Vec<Due{owner, amount}>}` (C5) |
+| `Vouchers(union, token_id)` | persistent | `VoucherBook{hours, earmark, earmark_per_hour, senior_out, dues: Vec<Due{owner, amount}>}` (C5) |
 | `OwnerBalance(union, owner)` | persistent | i128 owner's settled pending parts, ready to collect |
 
 ## machinery
@@ -84,7 +84,7 @@ storage:
 | `Types(union)` | persistent | Vec<u32> machine types with a rate (max 16) |
 | `PrepayDriverBp(union)` | persistent | u32 share of the driver part paid at the job (X32) |
 | `Machine(id)` | persistent | `Machine{union, owner, machine_type, hours_per_week, photos_hash, confirmed, on_hold, hold_reason}` |
-| `Voucher(union, loan_id)` | persistent | `Voucher{member, hours, used, void, code_hash: Option, code_max, code_expires}` |
+| `Voucher(union, token_id)` | persistent | `Voucher{member, hours, used, void, code_hash: Option, code_max, code_expires}` |
 | `WeekUse(machine_id, week)` | persistent | u32 hours worked that week |
 
 ## fx_pool

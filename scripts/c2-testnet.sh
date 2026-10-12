@@ -15,6 +15,7 @@
 #
 # Identities live in the stellar CLI config (~/.config/stellar), never in this repo, and are
 # never printed — only public addresses are. The nIN issuer is a throwaway testnet key (D7, X14).
+# From C6 on, loans are keyed by the food token id: this record no longer runs unchanged.
 set -euo pipefail
 
 NETWORK="${NETWORK:-testnet}"
