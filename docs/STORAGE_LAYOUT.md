@@ -50,6 +50,7 @@ storage:
 | `Admin`, `Roles`, `Paused` | instance | Address, Address, bool |
 | `Title(u64 polygon_token_id)` | persistent | `Title{holder, union, polygon_holder: BytesN<20>, record_hash, metadata_hash, updated_ts}` |
 | `Count(union, holder)` | persistent | u32 titles held from that union (membership) |
+| `AnyCount(holder)` | persistent | u32 titles held in any union (a member somewhere: never a senior investor) |
 
 ## fund_viewer
 
@@ -81,9 +82,7 @@ storage:
 | Key | Tier | Value |
 |---|---|---|
 | `Admin`, `Roles`, `LandTitle`, `FundCore`, `Paused`, `NextMachine` | instance | Address ×4, bool, u64 |
-| `BaseRate(machine_type)` | persistent | `RateParts` set by the trust, depreciation included (D20) |
-| `Factor(union, machine_type)` | persistent | u32 the union's factor in bp (5,000–15,000, R57) |
-| `Rate(union, machine_type)` | persistent | `RateParts{driver, diesel, maintenance, insurance, depreciation, margin}` per hour = base × factor (depreciation not scaled) |
+| `Rate(union, machine_type)` | persistent | `RateParts{driver, diesel, maintenance, insurance, depreciation, margin}` per hour, set by the union account (R57) |
 | `Types(union)` | persistent | Vec<u32> machine types with a rate (max 16) |
 | `PrepayDriverBp(union)` | persistent | u32 share of the driver part paid at the job (X32) |
 | `Machine(id)` | persistent | `Machine{union, owner, machine_type, hours_per_week, photos_hash, confirmed, on_hold, hold_reason}` |
@@ -115,6 +114,7 @@ storage:
 | `Offer(id)` | persistent | `Offer{union, kind, inr, expires, state, lp, usdc, inr_per_usd, sep24_id, quote_id, from_lp, from_domestic, from_offshore}` |
 | `OffersOf(union)` | persistent | Vec of open offer ids (max 64) |
 | `DayOut(day)` | **temporary** | i128 USDC paid out that day, against the daily cap |
+| `RateBandBp` | instance | u32 how far the attester's fix may move (default 500 = 5%) |
 
 ## Layout changes before the freeze
 

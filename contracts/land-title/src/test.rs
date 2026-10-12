@@ -254,6 +254,7 @@ fn storage_layout_is_frozen() {
     v.push_back(DataKey::Paused.into_val(&env));
     v.push_back(DataKey::Title(1).into_val(&env));
     v.push_back(DataKey::Count(a.clone(), a.clone()).into_val(&env));
+    v.push_back(DataKey::AnyCount(a.clone()).into_val(&env));
     v.push_back(
         Title {
             holder: a.clone(),
@@ -287,7 +288,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "9aa64739c5be8a905deff1081a679f26044cc223449ee13fd4778e75cd974b96",
+        hex, "a02619a0ebff2dc3a6f2683d083ce9d7d38a4a9d6626b9a3ddd6dcc3c6cfc62e",
         "land_title storage layout changed"
     );
 }

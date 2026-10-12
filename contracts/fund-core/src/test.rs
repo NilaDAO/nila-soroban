@@ -1756,6 +1756,18 @@ fn collect_accept_needs_only_the_lp_signature() {
 use nila_machinery::{MachineryContract, MachineryContractClient, RateParts};
 
 const PRE: i128 = 700 * NIN; // diesel 500 + half the driver part 400
+
+/// A tractor hour: ₹1,450 in parts, scaled by `k` (NIN = as set, 15_000_000 = +50%).
+fn tractor(k: i128) -> RateParts {
+    RateParts {
+        driver: 400 * k,
+        diesel: 500 * k,
+        maintenance: 200 * k,
+        insurance: 100 * k,
+        depreciation: 250 * k,
+        margin: 0,
+    }
+}
 const PEND: i128 = 750 * NIN; // the other half of driver, maintenance, insurance, depreciation
 
 struct Vx {
@@ -1794,19 +1806,8 @@ fn vsetup() -> Vx {
     let mc = MachineryContractClient::new(env, &m);
     mc.set_fund_core(&fx.core_id);
     fx.core().set_machinery(&m);
-    // The trust's base rate (depreciation included, D20); the union takes it at factor 100%.
-    mc.set_base_rate(
-        &1,
-        &RateParts {
-            driver: 400 * NIN,
-            diesel: 500 * NIN,
-            maintenance: 200 * NIN,
-            insurance: 100 * NIN,
-            depreciation: 250 * NIN,
-            margin: 0,
-        },
-    );
-    mc.set_rate(&fx.union, &1, &10_000);
+    // The union account (its leaders) sets the price of a tractor hour in parts (R57).
+    mc.set_rate(&fx.union, &1, &tractor(NIN));
     let owner = fx.neighbour.clone();
     let machine = mc.register_machine(&fx.leader, &fx.union, &owner, &1, &40, &loan_id(env, 0x50));
     mc.confirm_machine(&owner, &machine);
@@ -2044,7 +2045,7 @@ fn default_beyond_her_investment_owner_still_paid_senior_takes_its_loss() {
 }
 
 #[test]
-fn review_fixes_self_claim_rate_factor_earmarks_close_unused() {
+fn review_fixes_self_claim_rate_rise_earmarks_close_unused() {
     let v = vsetup();
     let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
     use nila_machinery::Error as ME;
@@ -2068,24 +2069,18 @@ fn review_fixes_self_claim_rate_factor_earmarks_close_unused() {
         mc.try_claim(&fx.borrower, &mine, &fx.union, &id, &code, &1),
         Err(Ok(ME::SelfClaim))
     );
-    // The union's factor stays within the trust's bounds.
-    assert_eq!(
-        mc.try_set_rate(&fx.union, &1, &15_001),
-        Err(Ok(ME::BadFactor))
-    );
-
     // Another loan holds back 10 hours: 14 × ₹700 of the 10,000 senior nIN are earmarked.
     let id2 = loan_id(&fx.env, 2);
     c.attest_food_token(&fx.attester, &fx.union, &id2, &fx.borrower, &0, &10, &T0);
     c.draw_loan(&fx.union, &fx.borrower, &id2, &id2, &0, &10);
     assert_eq!(c.senior_earmark(&fx.union), 14 * PRE);
-    // The union raises its factor to 150% after the draw: the higher prepay would eat the other
-    // loan's earmark, so the claim is refused.
-    mc.set_rate(&fx.union, &1, &15_000);
+    // The union raises its tractor rate 50% after the draw: the higher prepay would eat the
+    // other loan's earmark, so the claim is refused.
+    mc.set_rate(&fx.union, &1, &tractor(15_000_000));
     assert!(mc
         .try_claim(&v.owner, &v.machine, &fx.union, &id, &code, &4)
         .is_err());
-    mc.set_rate(&fx.union, &1, &10_000);
+    mc.set_rate(&fx.union, &1, &tractor(NIN));
     mc.claim(&v.owner, &v.machine, &fx.union, &id, &code, &4);
 
     // She releases the voucher she no longer needs: nothing owed, the earmark goes back.
@@ -2142,4 +2137,35 @@ fn bring_respects_the_daily_cap_and_the_voucher_earmark() {
     );
     f.set_daily_cap(&(2_500 * NIN));
     f.confirm(&fx.leader, &ok);
+}
+
+#[test]
+fn a_title_in_any_union_makes_her_junior_never_senior() {
+    let fx = setup();
+    let f = fx.fx();
+    // A member of another union: she holds a title there, not here.
+    let other_union = Address::generate(&fx.env);
+    let her = Address::generate(&fx.env);
+    LandTitleContractClient::new(&fx.env, &fx.titles_id).set_title(
+        &900,
+        &fx.attester,
+        &her,
+        &other_union,
+        &BytesN::from_array(&fx.env, &[0xAB; 20]),
+        &BytesN::from_array(&fx.env, &[1; 32]),
+        &BytesN::from_array(&fx.env, &[2; 32]),
+    );
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&her, &(10 * NIN));
+    f.set_senior_investor(&her, &true, &loan_id(&fx.env, 1));
+    f.override_rate(&(95 * NIN), &(T0 + 86_400));
+    assert!(f
+        .try_mint_senior(&her, &fx.union, &(10 * NIN), &Tag::Domestic)
+        .is_err());
+    // The attester's band is adjustable by the trust.
+    f.set_rate_band(&1_000);
+    f.set_rate(&fx.attester, &(104 * NIN), &(T0 + 86_400));
+    assert_eq!(
+        f.try_set_rate(&fx.attester, &(120 * NIN), &(T0 + 86_400)),
+        Err(Ok(FxError::BadRate))
+    );
 }

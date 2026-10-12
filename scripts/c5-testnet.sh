@@ -97,15 +97,11 @@ for pair in "301 member" "302 owner"; do
     --union "$UNION" --polygon_holder aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --record_hash "$H" --metadata_hash "$H"
 done
 
-log "rate table: the trust's base for a tractor ₹1,450/h (driver 400, diesel 500, maint 200, ins 100, depr 250);"
-log "the union account takes it at factor 100% (R57, D20)"
-inv "$MACH" ${P}-admin set_base_rate --machine_type 1 --parts "{\"driver\": \"$((400 * NIN))\", \"diesel\": \"$((500 * NIN))\",
-    \"maintenance\": \"$((200 * NIN))\", \"insurance\": \"$((100 * NIN))\",
-    \"depreciation\": \"$((250 * NIN))\", \"margin\": \"0\"}"
+log "rate table (union account, R57): tractor ₹1,450/h = driver 400, diesel 500, maint 200, ins 100, depr 250"
 TX_RATE_TABLE=$(tx stellar contract invoke --id "$MACH" --source ${P}-union -- set_rate --union "$UNION" \
-  --machine_type 1 --factor_bp 10000)
-must_fail "a union factor above 150%" stellar contract invoke --id "$MACH" --source ${P}-union -- \
-  set_rate --union "$UNION" --machine_type 1 --factor_bp 15001
+  --machine_type 1 --parts "{\"driver\": \"$((400 * NIN))\", \"diesel\": \"$((500 * NIN))\",
+    \"maintenance\": \"$((200 * NIN))\", \"insurance\": \"$((100 * NIN))\",
+    \"depreciation\": \"$((250 * NIN))\", \"margin\": \"0\"}")
 # (Only the union account sets rates: a unit test checks it with no signatures; on testnet the
 # CLI holds the union's key locally and would sign for it, so the refusal cannot be shown here.)
 

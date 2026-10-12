@@ -884,7 +884,8 @@ impl FundCore {
 
     // ---------- senior (T2: LPs who are not members) ----------
 
-    /// fx_pool only (mint_senior): a senior investor, never a member; title holders refused (R46).
+    /// fx_pool only (mint_senior): a senior investor holds no land title in any union (executive decision,
+    /// 12 Oct: junior vs senior is simply holding a title or not; R46).
     pub fn deposit_senior(
         env: Env,
         union: Address,
@@ -892,7 +893,7 @@ impl FundCore {
         amount: i128,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
-        if holds_title(&env, &union, &investor) {
+        if LandTitleClient::new(&env, &cfg(&env).land_title).holds_any_title(&investor) {
             return Err(Error::NftForbidden);
         }
         let shares = deposit(&env, false, &union, &investor, amount)?;
@@ -1151,10 +1152,10 @@ impl FundCore {
         Ok(())
     }
 
-    /// Cash-scan REPAY: fx_pool pays the nIN in (R14). The order: machine owners' pending parts
-    /// first (they carry no risk, D17), then interest, then principal back to the junior pool,
-    /// then the senior voucher prepay back to the senior pool (no interest on vouchers, D6). At
-    /// most what is owed is taken. Closes inside 0.1 nIN (R40). Returns true when closed.
+    /// Cash-scan REPAY: fx_pool pays the nIN in (R14). The order (executive decision, 12 Oct): machine owners'
+    /// pending parts (they carry no risk, D17), then the senior voucher prepay (no interest, D6),
+    /// then junior: interest, then principal. At most what is owed is taken. Closes inside 0.1
+    /// nIN (R40). Returns true when closed.
     pub fn repay_loan(
         env: Env,
         union: Address,
@@ -1194,11 +1195,11 @@ impl FundCore {
             pay_d = pay_dues(&env, &union, b, core::cmp::min(left_pay, owed_d))?;
             left_pay -= pay_d;
         }
+        let pay_s = core::cmp::min(left_pay, owed_s);
+        left_pay -= pay_s;
         let pay_i = core::cmp::min(left_pay, owed_i);
         left_pay -= pay_i;
         let mut pay_p = core::cmp::min(left_pay, owed_p);
-        left_pay -= pay_p;
-        let pay_s = core::cmp::min(left_pay, owed_s);
         // Always run, even for zero interest: interest moves with the ledger clock, and the
         // simulated footprint must hold the treasury and rainy-day keys either way.
         ln.interest_paid += pay_i;
@@ -1482,20 +1483,18 @@ impl FundCore {
         let dues = book.as_ref().map(dues_total).unwrap_or(0);
         let senior_out = book.as_ref().map(|b| b.senior_out).unwrap_or(0);
 
-        // 1. Her investment pays first (R27, D10), in this order: owners (D17), principal,
-        //    interest, senior prepay. Owners and senior are paid in cash, so those parts are
-        //    capped by the junior pool's idle cash; what cannot move stays her investment.
+        // 1. Her investment pays first (R27, D10), in this order (executive decision, 12 Oct): owners (D17),
+        //    senior prepay, then junior principal and interest. Owners and senior are paid in
+        //    cash, so those parts are capped by the junior pool's idle cash; what cannot move
+        //    stays her investment.
         let mut jm = load_market(&env, true, &union);
         let mut inv = load_inv(&env, true, &union, &ln.borrower);
         let avail = active_shares(&inv);
         let avail_value = to_underlying(&env, avail, jm.index).ok_or(Error::Overflow)?;
         let m_d = core::cmp::min(core::cmp::min(avail_value, dues), jm.cash);
-        let m_p = core::cmp::min(avail_value - m_d, loss);
-        let m_i = core::cmp::min(avail_value - m_d - m_p, interest);
-        let m_s = core::cmp::min(
-            core::cmp::min(avail_value - m_d - m_p - m_i, senior_out),
-            jm.cash - m_d,
-        );
+        let m_s = core::cmp::min(core::cmp::min(avail_value - m_d, senior_out), jm.cash - m_d);
+        let m_p = core::cmp::min(avail_value - m_d - m_s, loss);
+        let m_i = core::cmp::min(avail_value - m_d - m_s - m_p, interest);
         let member_applied = m_d + m_p + m_i + m_s;
         let burn = if member_applied >= avail_value {
             avail

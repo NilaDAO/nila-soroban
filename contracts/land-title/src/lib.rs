@@ -44,6 +44,8 @@ pub enum DataKey {
     Paused,
     Title(u64),              // Polygon token id -> title
     Count(Address, Address), // (union, holder) -> titles held from that union
+    /// Titles held in any union: a holder is a member somewhere, so never a senior investor.
+    AnyCount(Address),
 }
 
 /// One land title as minted on Polygon, public (X23).
@@ -147,6 +149,14 @@ fn add_count(env: &Env, union: &Address, holder: &Address, up: bool) {
         env.storage().persistent().remove(&key);
     } else {
         save(env, &key, &next);
+    }
+    let any = DataKey::AnyCount(holder.clone());
+    let m: u32 = env.storage().persistent().get(&any).unwrap_or(0);
+    let mnext = if up { m + 1 } else { m.saturating_sub(1) };
+    if mnext == 0 {
+        env.storage().persistent().remove(&any);
+    } else {
+        save(env, &any, &mnext);
     }
 }
 
@@ -254,6 +264,11 @@ impl LandTitleContract {
             .persistent()
             .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
         true
+    }
+
+    /// Holds a title in any union: a member, so junior only, never senior (executive decision, 12 Oct).
+    pub fn holds_any_title(env: Env, account: Address) -> bool {
+        env.storage().persistent().has(&DataKey::AnyCount(account))
     }
 
     pub fn title_count(env: Env, union: Address, account: Address) -> u32 {

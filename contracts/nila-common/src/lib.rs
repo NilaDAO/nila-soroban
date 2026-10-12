@@ -68,6 +68,8 @@ pub struct Loan {
 #[contractclient(name = "LandTitleClient")]
 pub trait LandTitleTrait {
     fn holds_title(union: Address, account: Address) -> bool;
+    /// A title in any union: a member somewhere, so never a senior investor.
+    fn holds_any_title(account: Address) -> bool;
 }
 
 /// Trust-wide roles in the roles contract, set by the admin (the trust's multisig, R75).

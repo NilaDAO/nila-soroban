@@ -55,8 +55,9 @@ pub const MAX_OPEN_ESCROWS: u32 = 64;
 pub const RATE_ONE: i128 = 10_000_000;
 /// The attester's fix is valid at most 2 days (R77).
 pub const MAX_RATE_AGE: u64 = 2 * DAY;
-/// The attester's fix may move at most 5% from the last one (R77); beyond, the trust overrides.
-pub const MAX_RATE_MOVE_BP: u32 = 500;
+/// Default band for the attester's fix: at most 5% from the last one (R77); beyond, the trust
+/// overrides. Open and adjustable (executive decision, 12 Oct): `set_rate_band`.
+pub const DEFAULT_RATE_BAND_BP: u32 = 500;
 /// The LP's fee: 1% (R21).
 pub const DEFAULT_LP_FEE_BP: u32 = 100;
 /// Upgrade timelock at deploy: 48 hours (R75, C15); short builds rehearse it in seconds.
@@ -186,6 +187,8 @@ pub enum DataKey {
     OffersOf(Address),
     /// USDC paid out on a day (day index), against the daily cap (R76, C15).
     DayOut(u64),
+    /// How far the attester's fix may move from the last one, in bp.
+    RateBandBp,
 }
 
 /// Rupees a leader took in, not yet lent out or settled (R15).
@@ -306,6 +309,11 @@ pub struct RateSet {
     pub inr_per_usd: i128,
     pub valid_until: u64,
     pub set_by: Address,
+}
+
+#[contractevent]
+pub struct RateBandSet {
+    pub band_bp: u32,
 }
 
 #[contractevent]
@@ -780,14 +788,19 @@ impl FxPoolContract {
         if inr_per_usd <= 0 || valid_until <= now || valid_until > now + MAX_RATE_AGE {
             return Err(Error::BadRate);
         }
-        // The attester only follows the market: at most 5% from the last fix. The first fix, or
-        // a bigger move, is the trust's (`override_rate`).
+        // The attester only follows the market: within the band of the last fix (default 5%).
+        // The first fix, or a bigger move, is the trust's (`override_rate`).
         let last: RateFix = env
             .storage()
             .instance()
             .get(&DataKey::Rate)
             .ok_or(Error::BadRate)?;
-        let band = last.inr_per_usd * i128::from(MAX_RATE_MOVE_BP) / 10_000;
+        let band_bp: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RateBandBp)
+            .unwrap_or(DEFAULT_RATE_BAND_BP);
+        let band = last.inr_per_usd * i128::from(band_bp) / 10_000;
         if (inr_per_usd - last.inr_per_usd).abs() > band {
             return Err(Error::BadRate);
         }
@@ -809,7 +822,19 @@ impl FxPoolContract {
         Ok(())
     }
 
-    /// The trust sets the first fix, or one beyond the attester's 5% band (evented, R77).
+    /// The attester's band (default 5%), evented; the trust adjusts it.
+    pub fn set_rate_band(env: Env, band_bp: u32) -> Result<(), Error> {
+        require_admin(&env)?;
+        if band_bp > 10_000 {
+            return Err(Error::BadRate);
+        }
+        env.storage().instance().set(&DataKey::RateBandBp, &band_bp);
+        RateBandSet { band_bp }.publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// The trust sets the first fix, or one beyond the attester's band (evented, R77).
     pub fn override_rate(env: Env, inr_per_usd: i128, valid_until: u64) -> Result<(), Error> {
         require_admin(&env)?;
         let now = env.ledger().timestamp();

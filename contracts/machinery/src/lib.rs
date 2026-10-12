@@ -1,9 +1,9 @@
 #![no_std]
 //! machinery: machinery vouchers on Stellar (C5, Nov 7; executive decision 11 Oct, N2).
 //!
-//! - **Rate table** per machine type, in parts per hour: driver, diesel, maintenance, insurance,
-//!   depreciation, margin. The trust sets the base (depreciation is the trust's, D20); the union
-//!   account (3 of 5) sets its factor within bounds (R57, D16).
+//! - **Rate table** per union and machine type, in parts per hour: driver, diesel, maintenance,
+//!   insurance, depreciation, margin (D16, D20, R57). Set by the union account (its leaders,
+//!   3 of 5); open and adjustable, like the prepay share (executive decision, 12 Oct).
 //! - **Machines** (D15, R82, R83): a leader registers a member's machine (L13); the owner
 //!   confirms (N9) and can put it on hold with a reason.
 //! - **Vouchers** (R51–R55): a loan's voucher part is hours of machinery, granted by fund_core at
@@ -41,9 +41,6 @@ pub const CODE_TERM: u64 = 2 * DAY;
 pub const WEEK: u64 = 7 * DAY;
 /// Machine types per union in the rate table.
 pub const MAX_TYPES: u32 = 16;
-/// The union's factor on the base rate (R57): within these bounds, 100% = the base.
-pub const MIN_FACTOR_BP: u32 = 5_000;
-pub const MAX_FACTOR_BP: u32 = 15_000;
 /// Default share of the driver part paid at the job (X32 open; the union changes it).
 pub const DEFAULT_PREPAY_DRIVER_BP: u32 = 5_000;
 pub const UPGRADE_DELAY: u64 = 2 * DAY;
@@ -75,8 +72,6 @@ pub enum Error {
     CoreAlreadySet = 19,
     /// An owner cannot claim on her own voucher.
     SelfClaim = 20,
-    /// The union's factor is outside the bounds the trust set.
-    BadFactor = 21,
 }
 
 /// One machine hour, in nIN (7 decimals), by part (D16, D20).
@@ -127,10 +122,6 @@ pub enum DataKey {
     LandTitle,
     FundCore,
     Paused,
-    /// The trust's base rate per machine type (D16, D20).
-    BaseRate(u32),
-    /// The union's factor per machine type, in bp of the base (R57).
-    Factor(Address, u32),
     Rate(Address, u32),
     Types(Address),
     PrepayDriverBp(Address),
@@ -145,13 +136,6 @@ pub enum DataKey {
 pub struct RateSet {
     #[topic]
     pub union: Address,
-    #[topic]
-    pub machine_type: u32,
-    pub parts: RateParts,
-}
-
-#[contractevent]
-pub struct BaseRateSet {
     #[topic]
     pub machine_type: u32,
     pub parts: RateParts,
@@ -375,11 +359,17 @@ impl MachineryContract {
         Ok(())
     }
 
-    // ---------- the rate table: the trust's base, the union's factor (R57, D16, D20) ----------
+    // ---------- the union's rate table (R57, D16, D20) ----------
 
-    /// The trust sets the base rate per machine type in parts, depreciation included (D20).
-    pub fn set_base_rate(env: Env, machine_type: u32, parts: RateParts) -> Result<(), Error> {
-        require_admin(&env)?;
+    /// The union account (its leaders, 3 of 5) sets the price of a machine hour in parts. The
+    /// amounts are open and stay adjustable by the union (executive decision, 12 Oct), like the prepay share.
+    pub fn set_rate(
+        env: Env,
+        union: Address,
+        machine_type: u32,
+        parts: RateParts,
+    ) -> Result<(), Error> {
+        union.require_auth();
         if parts.driver < 0
             || parts.diesel < 0
             || parts.maintenance < 0
@@ -390,45 +380,6 @@ impl MachineryContract {
         {
             return Err(Error::BadArg);
         }
-        let k = DataKey::BaseRate(machine_type);
-        env.storage().persistent().set(&k, &parts);
-        bump(&env, &k);
-        BaseRateSet {
-            machine_type,
-            parts,
-        }
-        .publish(&env);
-        bump_instance(&env);
-        Ok(())
-    }
-
-    /// The union account (3 of 5) sets its factor for a machine type, within the trust's
-    /// bounds. Every part but depreciation (the trust's) scales with it. This is the union's
-    /// rate table entry.
-    pub fn set_rate(
-        env: Env,
-        union: Address,
-        machine_type: u32,
-        factor_bp: u32,
-    ) -> Result<(), Error> {
-        union.require_auth();
-        if !(MIN_FACTOR_BP..=MAX_FACTOR_BP).contains(&factor_bp) {
-            return Err(Error::BadFactor);
-        }
-        let base: RateParts = env
-            .storage()
-            .persistent()
-            .get(&DataKey::BaseRate(machine_type))
-            .ok_or(Error::NoRate)?;
-        let f = |x: i128| x * i128::from(factor_bp) / 10_000;
-        let parts = RateParts {
-            driver: f(base.driver),
-            diesel: f(base.diesel),
-            maintenance: f(base.maintenance),
-            insurance: f(base.insurance),
-            depreciation: base.depreciation,
-            margin: f(base.margin),
-        };
         let tk = DataKey::Types(union.clone());
         let mut types: Vec<u32> = env.storage().persistent().get(&tk).unwrap_or(vec![&env]);
         if !types.contains(machine_type) {
@@ -439,9 +390,6 @@ impl MachineryContract {
             env.storage().persistent().set(&tk, &types);
         }
         bump(&env, &tk);
-        let fk = DataKey::Factor(union.clone(), machine_type);
-        env.storage().persistent().set(&fk, &factor_bp);
-        bump(&env, &fk);
         let k = DataKey::Rate(union.clone(), machine_type);
         env.storage().persistent().set(&k, &parts);
         bump(&env, &k);
