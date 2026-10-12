@@ -154,6 +154,51 @@ fn storage_layout_is_frozen() {
     v.push_back(DataKey::CodeUsed(h.clone()).into_val(&env));
     v.push_back(DataKey::SeniorInvestor(a.clone()).into_val(&env));
     v.push_back(DataKey::Rate.into_val(&env));
+    v.push_back(DataKey::VoucherFloor(a.clone()).into_val(&env));
+    v.push_back(DataKey::Anchor.into_val(&env));
+    v.push_back(DataKey::LpOf(a.clone(), a.clone()).into_val(&env));
+    v.push_back(DataKey::LpUsdc(a.clone()).into_val(&env));
+    v.push_back(DataKey::LpFeeBp.into_val(&env));
+    v.push_back(DataKey::NextOffer.into_val(&env));
+    v.push_back(DataKey::Offer(1).into_val(&env));
+    v.push_back(DataKey::OffersOf(a.clone()).into_val(&env));
+    v.push_back(
+        LpMember {
+            accepted: true,
+            kyc_ref: h.clone(),
+        }
+        .into_val(&env),
+    );
+    for k in [OfferKind::Bring, OfferKind::Collect] {
+        v.push_back(k.into_val(&env));
+    }
+    for st in [
+        OfferState::Open,
+        OfferState::Accepted,
+        OfferState::Done,
+        OfferState::Cancelled,
+        OfferState::Expired,
+    ] {
+        v.push_back(st.into_val(&env));
+    }
+    v.push_back(
+        Offer {
+            union: a.clone(),
+            kind: OfferKind::Bring,
+            inr: 1,
+            expires: 2,
+            state: OfferState::Accepted,
+            lp: Some(a.clone()),
+            usdc: 3,
+            inr_per_usd: 4,
+            sep24_id: soroban_sdk::String::from_str(&env, "s"),
+            quote_id: soroban_sdk::String::from_str(&env, "q"),
+            from_lp: 5,
+            from_domestic: 6,
+            from_offshore: 7,
+        }
+        .into_val(&env),
+    );
     for t in [Tag::Offshore, Tag::Domestic] {
         v.push_back(DataKey::SeniorUsdc(a.clone(), t).into_val(&env));
     }
@@ -222,7 +267,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "640868e0d076cc9d99a3490ca84278a34f45ff7b45b5e82d3cf1dc577595f2f6",
+        hex, "c57dea7074ef8891c633f74e6e46bdc15b5bfc4d8de5669aa32f28cf8c484f21",
         "fx_pool storage layout changed"
     );
 }

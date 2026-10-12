@@ -5,7 +5,7 @@ so the new code must decode every key and value below exactly as stored.
 
 **The guard.** Each contract has a `storage_layout_is_frozen` test. It hashes the XDR of one
 sample of every stored key, every stored struct, and every variant of the stored enums
-(`Role`, `UnionRole`, `Purpose`, `Tranche`). It does **not** see a change in the type of a
+(`Role`, `UnionRole`, `Purpose`, `Tranche`, `Tag`, `OfferKind`, `OfferState`). It does **not** see a change in the type of a
 plain stored value (an `i128` becoming a `u64`, a `Vec`'s element type, a `bool` flag). Treat
 the value columns below as frozen too, and review them by hand in any upgrade. Renaming, reordering, adding or removing a field or a
 `DataKey` variant changes the hash and fails CI. When it fails, do one of two things:
@@ -89,6 +89,13 @@ storage:
 | `SeniorInvestor(investor)` | persistent | `SeniorInvestor{accepted, kyc_ref}`: a senior investor the trust accepted (never a member; not an LP) |
 | `Rate` | instance | `RateFix{inr_per_usd, valid_until, set_by}` (R77) |
 | `SeniorUsdc(union, Tag)` | persistent | i128 USDC taken in, per tag offshore / domestic (R24) |
+| `VoucherFloor(union)` | persistent | i128 senior USDC kept back as the voucher guarantee |
+| `Anchor` | instance | Address (the trust's anchor account) |
+| `LpOf(union, lp)` | persistent | `LpMember{accepted, kyc_ref}`: a member LP the anchor accepted (R20) |
+| `LpUsdc(union)` | persistent | i128 USDC LPs brought in through Collect offers |
+| `LpFeeBp`, `NextOffer` | instance | u32, u64 |
+| `Offer(id)` | persistent | `Offer{union, kind, inr, expires, state, lp, usdc, inr_per_usd, sep24_id, quote_id, from_lp, from_domestic, from_offshore}` |
+| `OffersOf(union)` | persistent | Vec of open offer ids (max 64) |
 
 ## Layout changes before the freeze
 

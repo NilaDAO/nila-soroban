@@ -55,6 +55,8 @@ pub const MAX_OPEN_ESCROWS: u32 = 64;
 pub const RATE_ONE: i128 = 10_000_000;
 /// The attester's fix is valid at most 2 days (R77).
 pub const MAX_RATE_AGE: u64 = 2 * DAY;
+/// The LP's fee: 1% (R21).
+pub const DEFAULT_LP_FEE_BP: u32 = 100;
 /// Upgrade timelock at deploy: 48 hours (R75, C15); short builds rehearse it in seconds.
 pub const UPGRADE_DELAY: u64 = 2 * DAY;
 
@@ -88,6 +90,15 @@ pub enum Error {
     BadDelay = 21,
     /// The INR/USD fix is zero, negative or valid too long.
     BadRate = 22,
+    /// Senior USDC may not fall below the union's voucher floor.
+    BelowVoucherFloor = 23,
+    NotAnchor = 24,
+    NotLp = 25,
+    /// The offer is not in the state this call needs.
+    OfferState = 26,
+    TooManyOffers = 27,
+    /// The union's USDC (LP-collected plus senior above the floor) does not cover it.
+    NoUsdc = 28,
 }
 
 /// Where a senior investor's USDC comes from (R24, D1): kept per deposit so the pools can be split later.
@@ -158,6 +169,19 @@ pub enum DataKey {
     Rate,
     /// USDC taken in per union and tag (R24).
     SeniorUsdc(Address, Tag),
+    /// Senior USDC kept back per union as the voucher guarantee (executive decision, 12 Oct).
+    VoucherFloor(Address),
+    /// The trust's anchor account: it accepts LPs after SEP-12 (R20).
+    Anchor,
+    /// A member LP of a union (R20).
+    LpOf(Address, Address),
+    /// USDC LPs brought into the union through Collect offers (domestic).
+    LpUsdc(Address),
+    LpFeeBp,
+    NextOffer,
+    Offer(u64),
+    /// Open offer ids of a union.
+    OffersOf(Address),
 }
 
 /// Rupees a leader took in, not yet lent out or settled (R15).
@@ -817,6 +841,7 @@ impl FxPoolContract {
         authorize_pull(&env, &core, nin);
         FundCoreClient::new(&env, &core).deposit_senior(&union, &investor, &nin);
         let k = DataKey::SeniorUsdc(union.clone(), tag);
+        // The guarantee is held, never spent: only what is above the floor can pay a Bring.
         let held: i128 = env.storage().persistent().get(&k).unwrap_or(0);
         env.storage().persistent().set(&k, &(held + usdc));
         bump(&env, &k);
@@ -1086,6 +1111,9 @@ impl FxPoolContract {
             .unwrap_or(false)
     }
 }
+
+mod lp;
+pub use lp::{LpMember, Offer, OfferKind, OfferState};
 
 #[cfg(test)]
 mod test;

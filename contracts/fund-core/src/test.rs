@@ -1450,3 +1450,260 @@ fn senior_route_usdc_in_nin_into_the_senior_pool() {
         Err(Ok(FxError::Paused))
     );
 }
+
+// ---------- C5b: LP offers (member LPs swap cash and USDC; they never lend) ----------
+
+use nila_fx_pool::{OfferKind, OfferState};
+use soroban_sdk::String as SString;
+
+impl Fx {
+    /// Anchor accepts the neighbour as LP; ₹95 fix; the union has cash at hand.
+    fn lp_ready(&self) -> (Address, Address) {
+        let f = self.fx();
+        let anchor = Address::generate(&self.env);
+        f.set_anchor(&anchor);
+        f.set_lp(
+            &self.union,
+            &self.neighbour,
+            &true,
+            &loan_id(&self.env, 0x4C),
+        );
+        f.set_rate(&self.attester, &(95 * NIN), &(T0 + 86_400));
+        self.scan(Purpose::Treasury, &self.leader, 5_000 * NIN, 1, None)
+            .unwrap();
+        self.scan(Purpose::Invest, &self.borrower, 2_000 * NIN, 2, None)
+            .unwrap();
+        (anchor, self.neighbour.clone())
+    }
+
+    fn ids(&self) -> (SString, SString) {
+        (
+            SString::from_str(&self.env, "sep24-tx-1"),
+            SString::from_str(&self.env, "sep38-q-1"),
+        )
+    }
+}
+
+#[test]
+fn collect_then_bring_through_an_lp() {
+    let fx = setup();
+    let f = fx.fx();
+    let (_anchor, lp) = fx.lp_ready();
+    let usdc = TokenClient::new(&fx.env, &fx.usdc);
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&lp, &(50 * NIN));
+    let (s24, q) = fx.ids();
+
+    // C4: ₹950 spare cash; she pays 10 USDC less her 1% fee and takes the rupees.
+    let c = f.post_offer(
+        &fx.leader,
+        &fx.union,
+        &OfferKind::Collect,
+        &(950 * NIN),
+        &(T0 + 3_600),
+    );
+    assert_eq!(f.accept(&lp, &c, &s24, &q), 99_000_000);
+    let hand = f.cash_at_hand(&fx.union);
+    assert_eq!(f.confirm(&fx.leader, &c), 99_000_000);
+    assert_eq!(usdc.balance(&lp), 50 * NIN - 99_000_000);
+    assert_eq!(f.lp_usdc(&fx.union), 99_000_000);
+    assert_eq!(f.cash_at_hand(&fx.union), hand - 950 * NIN);
+    assert_eq!(f.offer(&c).unwrap().state, OfferState::Done);
+
+    // L11 #short: ₹475 needed; she brings it and gets 5 USDC plus 1%, from LP-collected USDC.
+    let b = f.post_offer(
+        &fx.leader,
+        &fx.union,
+        &OfferKind::Bring,
+        &(475 * NIN),
+        &(T0 + 3_600),
+    );
+    assert_eq!(f.accept(&lp, &b, &s24, &q), 50_500_000);
+    assert_eq!(f.lp_usdc(&fx.union), 99_000_000 - 50_500_000);
+    f.confirm(&fx.leader, &b);
+    assert_eq!(usdc.balance(&lp), 50 * NIN - 99_000_000 + 50_500_000);
+    assert_eq!(usdc.balance(&fx.fx_id), 99_000_000 - 50_500_000);
+    assert_eq!(f.offers_of(&fx.union).len(), 0);
+    // The LP never holds nIN; nIN books are untouched by swaps.
+    assert_eq!(fx.token().balance(&lp), 0);
+    fx.assert_fx_empty();
+    fx.assert_conserved();
+}
+
+#[test]
+fn bring_draws_senior_usdc_only_above_the_voucher_floor() {
+    let fx = setup();
+    let f = fx.fx();
+    let (_anchor, lp) = fx.lp_ready();
+    let (s24, q) = fx.ids();
+    // A senior investor's 100 USDC, offshore; 90 of it kept back for vouchers.
+    let investor = Address::generate(&fx.env);
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&investor, &(100 * NIN));
+    f.set_senior_investor(&investor, &true, &loan_id(&fx.env, 0x49));
+    f.mint_senior(&investor, &fx.union, &(100 * NIN), &Tag::Offshore);
+    f.set_voucher_floor(&fx.union, &(90 * NIN));
+
+    // ₹1,900 → 20.2 USDC: would cut into the floor.
+    let big = f.post_offer(
+        &fx.leader,
+        &fx.union,
+        &OfferKind::Bring,
+        &(1_900 * NIN),
+        &(T0 + 3_600),
+    );
+    assert_eq!(
+        f.try_accept(&lp, &big, &s24, &q),
+        Err(Ok(FxError::BelowVoucherFloor))
+    );
+    // Only 10 USDC are free above the floor: ₹950 (10.1 USDC with the fee) is refused, ₹900 fits.
+    let mid = f.post_offer(
+        &fx.leader,
+        &fx.union,
+        &OfferKind::Bring,
+        &(950 * NIN),
+        &(T0 + 3_600),
+    );
+    assert_eq!(
+        f.try_accept(&lp, &mid, &s24, &q),
+        Err(Ok(FxError::BelowVoucherFloor))
+    );
+    let ok = f.post_offer(
+        &fx.leader,
+        &fx.union,
+        &OfferKind::Bring,
+        &(900 * NIN),
+        &(T0 + 3_600),
+    );
+    let paid = f.accept(&lp, &ok, &s24, &q);
+    let o = f.offer(&ok).unwrap();
+    assert_eq!((o.from_lp, o.from_domestic, o.from_offshore), (0, 0, paid));
+    assert_eq!(f.senior_usdc(&fx.union, &Tag::Offshore), 100 * NIN - paid);
+    // Cancelling hands the reservation back; expiry does the same.
+    f.cancel_offer(&fx.leader, &ok);
+    assert_eq!(f.senior_usdc(&fx.union, &Tag::Offshore), 100 * NIN);
+    let again = f.post_offer(
+        &fx.leader,
+        &fx.union,
+        &OfferKind::Bring,
+        &(900 * NIN),
+        &(T0 + 3_600),
+    );
+    f.accept(&lp, &again, &s24, &q);
+    assert_eq!(f.try_expire_offer(&again), Err(Ok(FxError::NotExpired)));
+    fx.at(T0 + 3_600);
+    assert_eq!(
+        f.try_confirm(&fx.leader, &again),
+        Err(Ok(FxError::OfferState))
+    );
+    fx.env.set_auths(&[]);
+    f.expire_offer(&again);
+    fx.env.mock_all_auths();
+    assert_eq!(f.senior_usdc(&fx.union, &Tag::Offshore), 100 * NIN);
+    assert_eq!(f.offer(&again).unwrap().state, OfferState::Expired);
+}
+
+#[test]
+fn only_member_lps_accepted_by_the_anchor() {
+    let fx = setup();
+    let f = fx.fx();
+    let (anchor, lp) = fx.lp_ready();
+    let (s24, q) = fx.ids();
+    let stranger = Address::generate(&fx.env);
+    // R20: a member with a title the union minted.
+    assert_eq!(
+        f.try_set_lp(&fx.union, &stranger, &true, &loan_id(&fx.env, 1)),
+        Err(Ok(FxError::NotMember))
+    );
+    // Only the anchor accepts LPs.
+    fx.env.set_auths(&[]);
+    assert!(f
+        .try_set_lp(&fx.union, &fx.borrower, &true, &loan_id(&fx.env, 1))
+        .is_err());
+    fx.env.mock_all_auths();
+    let _ = anchor;
+    let c = f.post_offer(
+        &fx.leader,
+        &fx.union,
+        &OfferKind::Collect,
+        &(95 * NIN),
+        &(T0 + 3_600),
+    );
+    assert_eq!(
+        f.try_accept(&fx.borrower, &c, &s24, &q),
+        Err(Ok(FxError::NotLp))
+    );
+    // Only a leader posts and confirms; offers are capped at ₹10,000 and 7 days.
+    assert_eq!(
+        f.try_post_offer(&lp, &fx.union, &OfferKind::Bring, &NIN, &(T0 + 3_600)),
+        Err(Ok(FxError::NotLeader))
+    );
+    assert_eq!(
+        f.try_post_offer(
+            &fx.leader,
+            &fx.union,
+            &OfferKind::Bring,
+            &(10_001 * NIN),
+            &(T0 + 3_600)
+        ),
+        Err(Ok(FxError::CapExceeded))
+    );
+    assert_eq!(
+        f.try_post_offer(
+            &fx.leader,
+            &fx.union,
+            &OfferKind::Bring,
+            &NIN,
+            &(T0 + 8 * 86_400)
+        ),
+        Err(Ok(FxError::BadExpiry))
+    );
+    // A Bring with no USDC in the union.
+    let b = f.post_offer(
+        &fx.leader,
+        &fx.union,
+        &OfferKind::Bring,
+        &(95 * NIN),
+        &(T0 + 3_600),
+    );
+    assert_eq!(f.try_accept(&lp, &b, &s24, &q), Err(Ok(FxError::NoUsdc)));
+    // A dropped LP cannot accept.
+    f.set_lp(&fx.union, &lp, &false, &loan_id(&fx.env, 1));
+    assert_eq!(f.try_accept(&lp, &c, &s24, &q), Err(Ok(FxError::NotLp)));
+}
+
+#[test]
+fn collect_accept_needs_only_the_lp_signature() {
+    let fx = setup();
+    let f = fx.fx();
+    let (_anchor, lp) = fx.lp_ready();
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&lp, &(50 * NIN));
+    let (s24, q) = fx.ids();
+    let c = f.post_offer(
+        &fx.leader,
+        &fx.union,
+        &OfferKind::Collect,
+        &(950 * NIN),
+        &(T0 + 3_600),
+    );
+    let expiry_ledger = fx.env.ledger().sequence() + (3_600 / 5 + 1) as u32;
+    fx.env.mock_auths(&[MockAuth {
+        address: &lp,
+        invoke: &MockAuthInvoke {
+            contract: &fx.fx_id,
+            fn_name: "accept",
+            args: (lp.clone(), c, s24.clone(), q.clone()).into_val(&fx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &fx.usdc,
+                fn_name: "approve",
+                args: (lp.clone(), fx.fx_id.clone(), 99_000_000i128, expiry_ledger)
+                    .into_val(&fx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+    f.accept(&lp, &c, &s24, &q);
+    fx.env.mock_all_auths();
+    assert_eq!(
+        TokenClient::new(&fx.env, &fx.usdc).allowance(&lp, &fx.fx_id),
+        99_000_000
+    );
+}
