@@ -152,13 +152,13 @@ fn storage_layout_is_frozen() {
     v.push_back(DataKey::Scan(h.clone()).into_val(&env));
     v.push_back(DataKey::CashOut(h.clone()).into_val(&env));
     v.push_back(DataKey::CodeUsed(h.clone()).into_val(&env));
-    v.push_back(DataKey::Lp(a.clone()).into_val(&env));
+    v.push_back(DataKey::SeniorInvestor(a.clone()).into_val(&env));
     v.push_back(DataKey::Rate.into_val(&env));
     for t in [Tag::Offshore, Tag::Domestic] {
         v.push_back(DataKey::SeniorUsdc(a.clone(), t).into_val(&env));
     }
     v.push_back(
-        Lp {
+        SeniorInvestor {
             accepted: true,
             kyc_ref: h.clone(),
         }
@@ -222,7 +222,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "8c2fce77e13922e5575ca38284108f17fd06fc81fe389264339114cc7486f941",
+        hex, "640868e0d076cc9d99a3490ca84278a34f45ff7b45b5e82d3cf1dc577595f2f6",
         "fx_pool storage layout changed"
     );
 }

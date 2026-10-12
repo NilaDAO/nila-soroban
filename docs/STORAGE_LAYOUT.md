@@ -86,7 +86,7 @@ storage:
 | `Scan(receipt_hash)` | persistent | bool (a receipt is used once) |
 | `CashOut(code_hash)` | persistent | `CashOut{member, union, amount, expires}` |
 | `CodeUsed(code_hash)` | persistent | bool (a code is closed for good) |
-| `Lp(lp)` | persistent | `Lp{accepted, kyc_ref}` (R20) |
+| `SeniorInvestor(investor)` | persistent | `SeniorInvestor{accepted, kyc_ref}`: a senior investor the trust accepted (never a member; not an LP) |
 | `Rate` | instance | `RateFix{inr_per_usd, valid_until, set_by}` (R77) |
 | `SeniorUsdc(union, Tag)` | persistent | i128 USDC taken in, per tag offshore / domestic (R24) |
 

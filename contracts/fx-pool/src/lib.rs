@@ -11,7 +11,8 @@
 //! - nIN SAC admin (R8): member trustlines stay deauthorised and are authorised only inside
 //!   the call that moves her nIN (R10), and only for a title holder or leader of the union.
 //!
-//! - Senior route (Nov 7): an LP the trust accepted deposits USDC; nIN is minted at the
+//! - Senior route (Nov 7): a senior investor the trust accepted deposits USDC, which stays
+//!   on-chain as the guarantee behind vouchers; nIN is minted at the
 //!   attester's INR/USD fix into fund_core's senior pool; every deposit is tagged offshore or
 //!   domestic (R24, R46, R77). No USDC goes out yet: senior payouts are T2 (X15).
 //!
@@ -89,7 +90,7 @@ pub enum Error {
     BadRate = 22,
 }
 
-/// Where an LP's USDC comes from (R24, D1): kept per deposit so the pools can be split later.
+/// Where a senior investor's USDC comes from (R24, D1): kept per deposit so the pools can be split later.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -98,11 +99,12 @@ pub enum Tag {
     Domestic = 1,
 }
 
-/// The trust's (later the anchor's) acceptance of an LP (R20). `kyc_ref` points at the KYC
-/// record kept off-chain; no personal data on-chain (C17).
+/// The trust's acceptance of a senior investor: global or domestic, never a member. `kyc_ref`
+/// points at the KYC record kept off-chain; no personal data on-chain (C17). Not an LP: an LP
+/// is a member who swaps cash for USDC for a fee and never lends (executive decision, 12 Oct; T2).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Lp {
+pub struct SeniorInvestor {
     pub accepted: bool,
     pub kyc_ref: BytesN<32>,
 }
@@ -152,7 +154,7 @@ pub enum DataKey {
     CashOut(BytesN<32>),
     /// A code paid out or reclaimed: never accepted again (its preimage is public).
     CodeUsed(BytesN<32>),
-    Lp(Address),
+    SeniorInvestor(Address),
     Rate,
     /// USDC taken in per union and tag (R24).
     SeniorUsdc(Address, Tag),
@@ -264,9 +266,9 @@ pub struct Activated {
 }
 
 #[contractevent]
-pub struct LpSet {
+pub struct SeniorInvestorSet {
     #[topic]
-    pub lp: Address,
+    pub investor: Address,
     pub accepted: bool,
     pub kyc_ref: BytesN<32>,
 }
@@ -283,7 +285,7 @@ pub struct SeniorMinted {
     #[topic]
     pub union: Address,
     #[topic]
-    pub lp: Address,
+    pub investor: Address,
     pub tag: Tag,
     pub usdc: i128,
     pub nin: i128,
@@ -704,22 +706,27 @@ impl FxPoolContract {
         Ok(covered)
     }
 
-    // ---------- senior route (R20, R24, R46, R77) ----------
+    // ---------- senior route (R24, R46, R77) ----------
 
-    /// The trust accepts or drops an LP (R20). The anchor key takes this over with SEP-12.
-    pub fn set_lp(env: Env, lp: Address, accepted: bool, kyc_ref: BytesN<32>) -> Result<(), Error> {
+    /// The trust accepts or drops a senior investor (KYC kept off-chain).
+    pub fn set_senior_investor(
+        env: Env,
+        investor: Address,
+        accepted: bool,
+        kyc_ref: BytesN<32>,
+    ) -> Result<(), Error> {
         require_admin(&env)?;
-        let k = DataKey::Lp(lp.clone());
+        let k = DataKey::SeniorInvestor(investor.clone());
         env.storage().persistent().set(
             &k,
-            &Lp {
+            &SeniorInvestor {
                 accepted,
                 kyc_ref: kyc_ref.clone(),
             },
         );
         bump(&env, &k);
-        LpSet {
-            lp,
+        SeniorInvestorSet {
+            investor,
             accepted,
             kyc_ref,
         }
@@ -763,25 +770,25 @@ impl FxPoolContract {
         Ok(())
     }
 
-    /// An accepted LP deposits USDC; the same value in nIN goes into the union's senior pool in
-    /// her name (R46). Members cannot be LPs here: fund_core refuses title holders. Returns the
-    /// nIN minted.
+    /// An accepted senior investor deposits USDC; it stays in fx_pool as the guarantee behind
+    /// vouchers, and the same value in nIN goes into the union's senior pool in their name (R46).
+    /// Members are refused: fund_core rejects title holders. Returns the nIN minted.
     pub fn mint_senior(
         env: Env,
-        lp: Address,
+        investor: Address,
         union: Address,
         usdc: i128,
         tag: Tag,
     ) -> Result<i128, Error> {
         require_not_paused(&env)?;
-        lp.require_auth();
+        investor.require_auth();
         if usdc <= 0 {
             return Err(Error::AmountZero);
         }
         let ok = env
             .storage()
             .persistent()
-            .get::<_, Lp>(&DataKey::Lp(lp.clone()))
+            .get::<_, SeniorInvestor>(&DataKey::SeniorInvestor(investor.clone()))
             .map(|l| l.accepted)
             .unwrap_or(false);
         if !ok {
@@ -804,18 +811,18 @@ impl FxPoolContract {
         }
         let me = env.current_contract_address();
         let usdc_addr: Address = get(&env, &DataKey::Usdc);
-        TokenClient::new(&env, &usdc_addr).transfer(&lp, &me, &usdc);
+        TokenClient::new(&env, &usdc_addr).transfer(&investor, &me, &usdc);
         StellarAssetClient::new(&env, &nin_addr(&env)).mint(&me, &nin);
         let core = core_addr(&env)?;
         authorize_pull(&env, &core, nin);
-        FundCoreClient::new(&env, &core).deposit_senior(&union, &lp, &nin);
+        FundCoreClient::new(&env, &core).deposit_senior(&union, &investor, &nin);
         let k = DataKey::SeniorUsdc(union.clone(), tag);
         let held: i128 = env.storage().persistent().get(&k).unwrap_or(0);
         env.storage().persistent().set(&k, &(held + usdc));
         bump(&env, &k);
         SeniorMinted {
             union,
-            lp,
+            investor,
             tag,
             usdc,
             nin,
@@ -826,8 +833,10 @@ impl FxPoolContract {
         Ok(nin)
     }
 
-    pub fn lp(env: Env, lp: Address) -> Option<Lp> {
-        env.storage().persistent().get(&DataKey::Lp(lp))
+    pub fn senior_investor(env: Env, investor: Address) -> Option<SeniorInvestor> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::SeniorInvestor(investor))
     }
 
     pub fn rate(env: Env) -> Option<RateFix> {

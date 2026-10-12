@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Step C5a on Stellar testnet: the senior route. An LP the trust accepted deposits USDC; the
+# Step C5a on Stellar testnet: the senior route. A senior investor (never a member; not an LP)
+# the trust accepted deposits USDC; the
 # attester's INR/USD fix sets the nIN minted into fund_core's senior pool; the deposit is tagged.
 # Usage: bash scripts/c5a-testnet.sh        (testnet only; refuses any other network)
 #
@@ -83,14 +84,14 @@ tx stellar contract invoke --id "$CORE" --source ${P}-admin -- \
 
 mint_senior() { # usdc tag
   stellar contract invoke --id "$FX" --source ${P}-lp -- \
-    mint_senior --lp ${P}-lp --union "$UNION" --usdc "$1" --tag "$2"
+    mint_senior --investor ${P}-lp --union "$UNION" --usdc "$1" --tag "$2"
 }
 KYC=$(printf '4b%.0s' {1..32})
 
 log "senior route: refused before the LP is accepted and before a fix exists"
-must_fail "an LP the trust has not accepted" mint_senior $((100 * NIN)) 0
+must_fail "a senior investor the trust has not accepted" mint_senior $((100 * NIN)) 0
 TX_LP=$(tx stellar contract invoke --id "$FX" --source ${P}-admin -- \
-  set_lp --lp ${P}-lp --accepted true --kyc_ref "$KYC")
+  set_senior_investor --investor ${P}-lp --accepted true --kyc_ref "$KYC")
 must_fail "a deposit with no INR/USD fix" mint_senior $((100 * NIN)) 0
 NOW=$(date +%s)
 must_fail "a fix posted by a non-attester" stellar contract invoke --id "$FX" --source ${P}-lp -- \
@@ -100,7 +101,7 @@ must_fail "a fix valid longer than 2 days" stellar contract invoke --id "$FX" --
 TX_RATE=$(tx stellar contract invoke --id "$FX" --source ${P}-attester -- \
   set_rate --attester ${P}-attester --inr_per_usd $((95 * NIN)) --valid_until $((NOW + 86400)))
 
-log "mint_senior: 100 USDC offshore at ₹95 → 9,500 nIN into the senior pool, the LP alone signs"
+log "mint_senior: 100 USDC offshore at ₹95 → 9,500 nIN into the senior pool, the investor alone signs"
 TX_MINT=$(tx mint_senior $((100 * NIN)) 0)
 expect "senior pool cash" \
   "$(view "$CORE" get_senior_market --union "$UNION" | python3 -c 'import json,sys; print(json.load(sys.stdin)["cash"])')" \
@@ -115,7 +116,7 @@ cat >"$OUT" <<EOF
 NIN_SAC=$NIN_SAC
 USDC_SAC=$USDC_SAC
 UNION=$UNION
-LP=$LP
+SENIOR_INVESTOR=$LP
 FUND_CORE=$CORE
 FX_POOL=$FX
 TX_LP=$TX_LP

@@ -788,20 +788,20 @@ impl FundCore {
 
     // ---------- senior (T2: LPs who are not members) ----------
 
-    /// fx_pool only (mint_senior); rejects title holders (R24, R46).
+    /// fx_pool only (mint_senior): a senior investor, never a member; title holders refused (R46).
     pub fn deposit_senior(
         env: Env,
         union: Address,
-        lp: Address,
+        investor: Address,
         amount: i128,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
-        if holds_title(&env, &union, &lp) {
+        if holds_title(&env, &union, &investor) {
             return Err(Error::NftForbidden);
         }
-        let shares = deposit(&env, false, &union, &lp, amount)?;
+        let shares = deposit(&env, false, &union, &investor, amount)?;
         Deposit {
-            investor: lp,
+            investor,
             union,
             tranche: Tranche::Senior,
             amount,
@@ -815,15 +815,15 @@ impl FundCore {
     pub fn request_unbond_senior(
         env: Env,
         union: Address,
-        lp: Address,
+        investor: Address,
         shares: i128,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
-        lp.require_auth();
+        investor.require_auth();
         require_positive(shares)?;
-        let snap = request_unbond(&env, false, &union, &lp, shares)?;
+        let snap = request_unbond(&env, false, &union, &investor, shares)?;
         UnbondRequested {
-            investor: lp,
+            investor,
             union,
             tranche: Tranche::Senior,
             shares,
@@ -836,14 +836,14 @@ impl FundCore {
     pub fn claim_senior(
         env: Env,
         union: Address,
-        lp: Address,
+        investor: Address,
         max_shares: i128,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
-        lp.require_auth();
-        let amount = claim(&env, false, &union, &lp, max_shares)?;
+        investor.require_auth();
+        let amount = claim(&env, false, &union, &investor, max_shares)?;
         Claimed {
-            investor: lp,
+            investor,
             union,
             tranche: tranche(false),
             amount,
@@ -1396,8 +1396,8 @@ impl FundCore {
         position(&env, &union, &member)
     }
 
-    pub fn get_investor_senior(env: Env, union: Address, lp: Address) -> Investor {
-        load_inv(&env, false, &union, &lp)
+    pub fn get_investor_senior(env: Env, union: Address, investor: Address) -> Investor {
+        load_inv(&env, false, &union, &investor)
     }
 
     pub fn get_loan(env: Env, union: Address, loan_id: BytesN<32>) -> Option<Loan> {
