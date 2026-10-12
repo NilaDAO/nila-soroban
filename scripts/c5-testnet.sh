@@ -119,7 +119,7 @@ inv "$FX" ${P}-investor mint_senior --investor ${P}-investor --union "$UNION" --
 log "the union's desk: treasury and her investment"
 scan() {
   tx stellar contract invoke --id "$FX" --source ${P}-leader -- cash_scan_mint --leader ${P}-leader \
-    --union "$UNION" --purpose "$1" --member "$2" --amount "$3" --scan_hash "$(receipt)" ${4:+--loan_id "\"$4\""}
+    --union "$UNION" --purpose "$1" --member "$2" --amount "$3" --scan_hash "$(receipt)" ${4:+--token_id "\"$4\""}
 }
 # Cash at hand may not exceed the treasury (R15): 2 × ₹10,000 covers her invest and the repay.
 scan 3 ${P}-leader $((10000 * NIN)) >/dev/null
@@ -133,26 +133,26 @@ TX_ATTEST=$(tx stellar contract invoke --id "$CORE" --source ${P}-attester -- at
   --amount $((400 * NIN)) --hours 10 --from_date 0)
 log "N10: she accepts the loan: 400 cash + 10 machine hours (senior earmarks 10 × ₹700)"
 TX_DRAW=$(tx stellar contract invoke --id "$CORE" --source ${P}-member -- draw_loan --union "$UNION" \
-  --member ${P}-member --token_id "$L" --loan_id "$L" --cash $((400 * NIN)) --hours 10)
+  --member ${P}-member --token_id "$L" --cash $((400 * NIN)) --hours 10)
 expect "senior earmark" "$(view "$CORE" senior_earmark --union "$UNION")" "\"$((7000 * NIN))\""
 
 log "A8a: she opens a code for up to 6 hours; the owner works 4 and scans it (D19)"
 CODE=$(openssl rand -hex 16)
 CODE_HASH=$(printf '%s' "$CODE" | xxd -r -p | shasum -a 256 | awk '{print $1}')
 TX_CODE=$(tx stellar contract invoke --id "$MACH" --source ${P}-member -- open_code --member ${P}-member \
-  --union "$UNION" --loan_id "$L" --max_hours 6 --code_hash "$CODE_HASH")
+  --union "$UNION" --token_id "$L" --max_hours 6 --code_hash "$CODE_HASH")
 must_fail "a claim above the code's hours" stellar contract invoke --id "$MACH" --source ${P}-owner -- \
-  claim --owner ${P}-owner --machine_id "$MACHINE" --union "$UNION" --loan_id "$L" --code "$CODE" --hours 7
+  claim --owner ${P}-owner --machine_id "$MACHINE" --union "$UNION" --token_id "$L" --code "$CODE" --hours 7
 TX_CLAIM=$(tx stellar contract invoke --id "$MACH" --source ${P}-owner -- claim --owner ${P}-owner \
-  --machine_id "$MACHINE" --union "$UNION" --loan_id "$L" --code "$CODE" --hours 4)
+  --machine_id "$MACHINE" --union "$UNION" --token_id "$L" --code "$CODE" --hours 4)
 expect "owner wallet after the job (prepay 4 × ₹700)" "$(view "$NIN_SAC" balance --id "$OWNER")" "\"$((2800 * NIN))\""
 expect "owner trustline after the payout" "$(view "$NIN_SAC" authorized --id "$OWNER")" "false"
 expect "owner's pending part (4 × ₹750)" \
-  "$(view "$CORE" voucher_book --union "$UNION" --loan_id "$L" | field '["dues"][0]["amount"]')" "$((3000 * NIN))"
+  "$(view "$CORE" voucher_book --union "$UNION" --token_id "$L" | field '["dues"][0]["amount"]')" "$((3000 * NIN))"
 
 log "she repays everything at the desk: owners first, interest, principal, senior prepay"
 TX_REPAY=$(scan 1 ${P}-member $((6400 * NIN)) "$L")
-expect "loan closed" "$(view "$CORE" get_loan --union "$UNION" --loan_id "$L" | field '["closed"]')" "True"
+expect "loan closed" "$(view "$CORE" get_loan --union "$UNION" --token_id "$L" | field '["closed"]')" "True"
 expect "senior earmark released" "$(view "$CORE" senior_earmark --union "$UNION")" '"0"'
 expect "senior pool cash back whole" \
   "$(view "$CORE" get_senior_market --union "$UNION" | field '["cash"]')" "$((10000 * NIN))"
