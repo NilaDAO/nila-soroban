@@ -114,8 +114,8 @@ must_fail "the admin accepting an LP instead of the anchor" stellar contract inv
 TX_LP=$(tx stellar contract invoke --id "$FX" --source ${P}-anchor -- \
   set_lp --union "$UNION" --lp ${P}-lp --accepted true --kyc_ref "$KYC")
 NOW=$(date +%s)
-TX_RATE=$(tx stellar contract invoke --id "$FX" --source ${P}-attester -- \
-  set_rate --attester ${P}-attester --inr_per_usd $((95 * NIN)) --valid_until $((NOW + 86400)))
+TX_RATE=$(tx stellar contract invoke --id "$FX" --source ${P}-admin -- \
+  override_rate --inr_per_usd $((95 * NIN)) --valid_until $((NOW + 86400)))
 
 post() { # kind inr -> offer id
   stellar contract invoke --id "$FX" --source ${P}-leader -- post_offer --leader ${P}-leader \

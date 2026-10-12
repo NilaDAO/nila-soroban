@@ -94,6 +94,12 @@ TX_LP=$(tx stellar contract invoke --id "$FX" --source ${P}-admin -- \
   set_senior_investor --investor ${P}-lp --accepted true --kyc_ref "$KYC")
 must_fail "a deposit with no INR/USD fix" mint_senior $((100 * NIN)) 0
 NOW=$(date +%s)
+must_fail "a first fix by the attester (the trust sets the first)" stellar contract invoke --id "$FX" \
+  --source ${P}-attester -- set_rate --attester ${P}-attester --inr_per_usd $((95 * NIN)) --valid_until $((NOW + 3600))
+TX_OVERRIDE=$(tx stellar contract invoke --id "$FX" --source ${P}-admin -- \
+  override_rate --inr_per_usd $((94 * NIN)) --valid_until $((NOW + 86400)))
+must_fail "an attester fix more than 5% from the last" stellar contract invoke --id "$FX" \
+  --source ${P}-attester -- set_rate --attester ${P}-attester --inr_per_usd $((80 * NIN)) --valid_until $((NOW + 3600))
 must_fail "a fix posted by a non-attester" stellar contract invoke --id "$FX" --source ${P}-lp -- \
   set_rate --attester ${P}-lp --inr_per_usd $((95 * NIN)) --valid_until $((NOW + 3600))
 must_fail "a fix valid longer than 2 days" stellar contract invoke --id "$FX" --source ${P}-attester -- \
@@ -120,6 +126,7 @@ SENIOR_INVESTOR=$LP
 FUND_CORE=$CORE
 FX_POOL=$FX
 TX_LP=$TX_LP
+TX_OVERRIDE=$TX_OVERRIDE
 TX_RATE=$TX_RATE
 TX_MINT=$TX_MINT
 EOF
