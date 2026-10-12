@@ -67,6 +67,7 @@ pub enum Error {
     MachineryAlreadySet = 55,
     /// Nothing is owed yet (a voucher-only loan before any claim).
     NothingOwed = 56,
+    NotBorrower = 57,
 }
 
 #[contracttype]

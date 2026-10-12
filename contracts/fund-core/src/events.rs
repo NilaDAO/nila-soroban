@@ -195,3 +195,12 @@ pub struct DuesCollected {
     pub owner: Address,
     pub amount: i128,
 }
+
+/// She released a voucher loan that owed nothing: closed, unclaimed hours lapse.
+#[contractevent]
+pub struct LoanReleased {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub loan_id: BytesN<32>,
+}

@@ -1205,7 +1205,8 @@ impl FundCore {
         ln.interest_paid += pay_i;
         distribute_interest(&env, &union, &uc, pay_i)?;
         let left = total - pay;
-        let closed = left <= DUST;
+        // Owners carry no risk (D17): a loan never closes with any of their part unpaid.
+        let closed = left <= DUST && pay_d == owed_d;
         // Dust principal left at close is written off with the borrow.
         let off_books = if closed { owed_p - pay_p } else { 0 };
         if pay_p > 0 || off_books > 0 {
@@ -1236,6 +1237,12 @@ impl FundCore {
             // principal's is by junior.
             let off_s = if closed { b.senior_out } else { 0 };
             sm.total_borrows -= core::cmp::min(sm.total_borrows, pay_s + off_s);
+            if off_s > 0 {
+                let under = to_underlying(&env, sm.total_shares, sm.index).unwrap_or(0);
+                sm.index = haircut_index(&env, sm.index, under, off_s)
+                    .ok_or(Error::Overflow)?
+                    .1;
+            }
             b.senior_out -= off_s;
             save_market(&env, false, &union, &sm);
             save_book(&env, &union, &loan_id, b);
@@ -1271,7 +1278,10 @@ impl FundCore {
         require_not_paused(&env)?;
         member.require_auth();
         let mut ln = load_loan(&env, &union, &loan_id)?;
-        if ln.borrower != member || ln.closed {
+        if ln.borrower != member {
+            return Err(Error::NotBorrower);
+        }
+        if ln.closed {
             return Err(Error::LoanClosed);
         }
         accrue(&env, &mut ln, env.ledger().timestamp())?;
@@ -1287,6 +1297,7 @@ impl FundCore {
         close_loan(&env, &union, &loan_id, &ln);
         save_loan(&env, &union, &loan_id, &ln);
         end_vouchers(&env, &union, &loan_id)?;
+        LoanReleased { union, loan_id }.publish(&env);
         bump_instance(&env);
         Ok(())
     }

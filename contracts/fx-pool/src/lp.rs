@@ -432,7 +432,8 @@ impl FxPoolContract {
                 // The floor is the admin's, but never below the USDC value of senior money
                 // fund_core holds back for unclaimed voucher hours.
                 let held = FundCoreClient::new(&env, &core_addr(&env)?).senior_earmark(&u);
-                let held_usdc = held * RATE_ONE / rate.inr_per_usd;
+                // Rounded up: the floor never sits below the earmark.
+                let held_usdc = (held * RATE_ONE + rate.inr_per_usd - 1) / rate.inr_per_usd;
                 let floor = core::cmp::max(voucher_floor(&env, &u), held_usdc);
                 let senior_free = core::cmp::max(0, senior_total(&env, &u) - floor);
                 check_day_out(&env, usdc)?;

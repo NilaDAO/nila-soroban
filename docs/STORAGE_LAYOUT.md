@@ -124,5 +124,6 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
 - **C4:** `Config.upgrade_delay` was removed. Each contract's own upgrade keys gave way to the
   shared `Upg*` keys.
 - **C5 (12 Oct):** `Config.machinery` and `FoodToken.hours` were added to stored structs, and fx_pool,
-  fund_core and the new machinery contract gained keys. C4 testnet deployments cannot be upgraded to
-  C5; redeploy.
+  fund_core, land_title (`AnyCount`, no back-fill) and the new machinery contract gained keys. C4
+  testnet deployments cannot be upgraded to C5; **redeploy all of them**. An in-place land_title upgrade
+  would read every existing holder as holding no title anywhere, which would let members in as senior.

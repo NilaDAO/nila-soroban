@@ -2169,3 +2169,22 @@ fn a_title_in_any_union_makes_her_junior_never_senior() {
         Err(Ok(FxError::BadRate))
     );
 }
+
+#[test]
+fn close_unused_is_hers_only_and_evented() {
+    let v = vsetup();
+    let (fx, c) = (&v.fx, v.fx.core());
+    let id = loan_id(&fx.env, 1);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &2, &T0);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &id, &0, &2);
+    assert_eq!(
+        c.try_close_unused(&fx.neighbour, &fx.union, &id),
+        Err(Ok(Error::NotBorrower))
+    );
+    c.close_unused(&fx.borrower, &fx.union, &id);
+    assert!(c.get_loan(&fx.union, &id).unwrap().closed);
+    assert_eq!(
+        c.try_close_unused(&fx.borrower, &fx.union, &id),
+        Err(Ok(Error::LoanClosed))
+    );
+}
