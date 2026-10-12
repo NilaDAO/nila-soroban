@@ -568,6 +568,11 @@ fn save_book(env: &Env, union: &Address, loan_id: &BytesN<32>, b: &VoucherBook) 
     bump_key(env, &k);
 }
 
+/// This loan's own earmark, released when it ends.
+fn book_earmark(b: &VoucherBook) -> i128 {
+    b.earmark
+}
+
 fn dues_total(b: &VoucherBook) -> i128 {
     b.dues.iter().map(|d| d.amount).sum()
 }
@@ -1223,13 +1228,15 @@ impl FundCore {
             pay_p += off_books;
         }
         if let Some(b) = book.as_mut() {
-            if pay_s > 0 {
-                let mut sm = load_market(&env, false, &union);
-                sm.cash += pay_s;
-                sm.total_borrows -= core::cmp::min(sm.total_borrows, pay_s);
-                save_market(&env, false, &union, &sm);
-                b.senior_out -= pay_s;
-            }
+            let mut sm = load_market(&env, false, &union);
+            sm.cash += pay_s;
+            b.senior_out -= pay_s;
+            // Closing inside dust: the prepay's last fraction is written off by senior, as the
+            // principal's is by junior.
+            let off_s = if closed { b.senior_out } else { 0 };
+            sm.total_borrows -= core::cmp::min(sm.total_borrows, pay_s + off_s);
+            b.senior_out -= off_s;
+            save_market(&env, false, &union, &sm);
             save_book(&env, &union, &loan_id, b);
         }
         if closed {
@@ -1250,6 +1257,37 @@ impl FundCore {
         .publish(&env);
         bump_instance(&env);
         Ok(closed)
+    }
+
+    /// She ends a loan that owes nothing (a voucher with no hours claimed): the hours lapse and
+    /// their senior earmark is released.
+    pub fn close_unused(
+        env: Env,
+        member: Address,
+        union: Address,
+        loan_id: BytesN<32>,
+    ) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        member.require_auth();
+        let mut ln = load_loan(&env, &union, &loan_id)?;
+        if ln.borrower != member || ln.closed {
+            return Err(Error::LoanClosed);
+        }
+        accrue(&env, &mut ln, env.ledger().timestamp())?;
+        let b = load_book(&env, &union, &loan_id);
+        let owed = ln.principal - ln.principal_paid + ln.interest_accrued - ln.interest_paid
+            + b.as_ref()
+                .map(|b| dues_total(b) + b.senior_out)
+                .unwrap_or(0);
+        if owed > 0 {
+            return Err(Error::BadState);
+        }
+        ln.closed = true;
+        close_loan(&env, &union, &loan_id, &ln);
+        save_loan(&env, &union, &loan_id, &ln);
+        end_vouchers(&env, &union, &loan_id)?;
+        bump_instance(&env);
+        Ok(())
     }
 
     /// A13: the owner collects her settled pending parts to her wallet (R85); cash at the
@@ -1308,9 +1346,12 @@ impl FundCore {
                 .ok_or(Error::Overflow)?,
         );
         b.earmark -= release;
-        i_add(&env, &DataKey::SeniorEarmark(union.clone()), -release)?;
+        let ek = DataKey::SeniorEarmark(union.clone());
+        i_add(&env, &ek, -release)?;
         let mut sm = load_market(&env, false, &union);
-        if sm.cash < prepay {
+        // Paid from this loan's released earmark and free senior cash, never from what other
+        // loans' unclaimed hours hold back (a rate may have risen since the draw).
+        if sm.cash - i_get(&env, &ek) < prepay {
             return Err(Error::NoSeniorBacking);
         }
         sm.cash -= prepay;
@@ -1502,7 +1543,8 @@ impl FundCore {
             jm.index = haircut_index(&env, jm.index, under, paid_j)
                 .ok_or(Error::Overflow)?
                 .1;
-            let from_senior = core::cmp::min(short - paid_j, sm.cash);
+            let held = i_get(&env, &DataKey::SeniorEarmark(union.clone())) - book_earmark(b);
+            let from_senior = core::cmp::min(short - paid_j, core::cmp::max(0, sm.cash - held));
             let paid_s = pay_dues(&env, &union, b, from_senior)?;
             sm.cash -= paid_s;
             let sunder = to_underlying(&env, sm.total_shares, sm.index).unwrap_or(0);

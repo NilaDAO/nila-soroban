@@ -34,25 +34,37 @@ fn setup() -> (Env, MachineryContractClient<'static>) {
 }
 
 #[test]
-fn rate_table_is_the_unions_and_sets_the_prepay() {
+fn rate_table_is_the_trusts_base_times_the_unions_factor() {
     let (env, c) = setup();
     let union = Address::generate(&env);
-    c.set_rate(&union, &1, &parts(400 * NIN));
-    c.set_rate(&union, &2, &parts(600 * NIN));
+    // No base rate for the type yet.
+    assert_eq!(c.try_set_rate(&union, &1, &10_000), Err(Ok(Error::NoRate)));
+    c.set_base_rate(&1, &parts(400 * NIN));
+    c.set_base_rate(&2, &parts(600 * NIN));
+    c.set_rate(&union, &1, &10_000);
+    c.set_rate(&union, &2, &10_000);
     // Diesel plus half the driver part by default (X32): the larger of the two types.
     assert_eq!(c.max_prepay_per_hour(&union), 800 * NIN);
+    // Factor 150%: every part scales but depreciation, which is the trust's (D20).
+    c.set_rate(&union, &1, &15_000);
+    let r = c.rate(&union, &1).unwrap();
+    assert_eq!((r.driver, r.depreciation), (600 * NIN, 250 * NIN));
+    assert_eq!(
+        c.try_set_rate(&union, &1, &4_999),
+        Err(Ok(Error::BadFactor))
+    );
     c.set_prepay_share(&union, &10_000);
-    assert_eq!(c.max_prepay_per_hour(&union), 1_100 * NIN);
     assert_eq!(
         c.try_set_prepay_share(&union, &10_001),
         Err(Ok(Error::BadArg))
     );
     let mut bad = parts(NIN);
     bad.diesel = -1;
-    assert_eq!(c.try_set_rate(&union, &3, &bad), Err(Ok(Error::BadArg)));
-    // Only the union account (3 of 5) sets its rates.
+    assert_eq!(c.try_set_base_rate(&3, &bad), Err(Ok(Error::BadArg)));
+    // Only the trust sets the base; only the union account (3 of 5) its factor.
     env.set_auths(&[]);
-    assert!(c.try_set_rate(&union, &1, &parts(NIN)).is_err());
+    assert!(c.try_set_base_rate(&1, &parts(NIN)).is_err());
+    assert!(c.try_set_rate(&union, &1, &10_000).is_err());
 }
 
 #[test]
@@ -104,6 +116,8 @@ fn storage_layout_is_frozen() {
         DataKey::LandTitle,
         DataKey::FundCore,
         DataKey::Paused,
+        DataKey::BaseRate(1),
+        DataKey::Factor(a.clone(), 1),
         DataKey::Rate(a.clone(), 1),
         DataKey::Types(a.clone()),
         DataKey::PrepayDriverBp(a.clone()),
@@ -154,7 +168,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "5b52a85e199e7518d1ae4aac82299ae67706a6d11b5f76beba6fadf131d2b57e",
+        hex, "3d91678842aad3f092fdb037003107511fc3bf11a6844b0a4740ffe0c0bfc141",
         "machinery storage layout changed"
     );
 }

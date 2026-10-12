@@ -30,8 +30,9 @@ storage:
 - An entry left idle beyond its TTL is **archived, not deleted**. Since Protocol 23, the next
   transaction that touches it restores it automatically; the restore costs a fee. See the
   checklist §E.
-- Nothing uses temporary storage. Escrows and cash-outs are persistent, because a lost escrow
-  would break the cash-at-hand books.
+- Temporary storage holds only fx_pool's USDC paid out per day (`DayOut`), which matters for one
+  day. Escrows and cash-outs are persistent, because a lost escrow would break the cash-at-hand
+  books.
 
 ## roles
 
@@ -80,7 +81,9 @@ storage:
 | Key | Tier | Value |
 |---|---|---|
 | `Admin`, `Roles`, `LandTitle`, `FundCore`, `Paused`, `NextMachine` | instance | Address ×4, bool, u64 |
-| `Rate(union, machine_type)` | persistent | `RateParts{driver, diesel, maintenance, insurance, depreciation, margin}` per hour |
+| `BaseRate(machine_type)` | persistent | `RateParts` set by the trust, depreciation included (D20) |
+| `Factor(union, machine_type)` | persistent | u32 the union's factor in bp (5,000–15,000, R57) |
+| `Rate(union, machine_type)` | persistent | `RateParts{driver, diesel, maintenance, insurance, depreciation, margin}` per hour = base × factor (depreciation not scaled) |
 | `Types(union)` | persistent | Vec<u32> machine types with a rate (max 16) |
 | `PrepayDriverBp(union)` | persistent | u32 share of the driver part paid at the job (X32) |
 | `Machine(id)` | persistent | `Machine{union, owner, machine_type, hours_per_week, photos_hash, confirmed, on_hold, hold_reason}` |
@@ -111,6 +114,7 @@ storage:
 | `LpFeeBp`, `NextOffer` | instance | u32, u64 |
 | `Offer(id)` | persistent | `Offer{union, kind, inr, expires, state, lp, usdc, inr_per_usd, sep24_id, quote_id, from_lp, from_domestic, from_offshore}` |
 | `OffersOf(union)` | persistent | Vec of open offer ids (max 64) |
+| `DayOut(day)` | **temporary** | i128 USDC paid out that day, against the daily cap |
 
 ## Layout changes before the freeze
 
@@ -119,3 +123,6 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
 - **C3:** `Loan.escrow_id` and `UnionConfig.escrow_duration` were removed.
 - **C4:** `Config.upgrade_delay` was removed. Each contract's own upgrade keys gave way to the
   shared `Upg*` keys.
+- **C5 (12 Oct):** `Config.machinery` and `FoodToken.hours` were added to stored structs, and fx_pool,
+  fund_core and the new machinery contract gained keys. C4 testnet deployments cannot be upgraded to
+  C5; redeploy.

@@ -55,6 +55,8 @@ pub const MAX_OPEN_ESCROWS: u32 = 64;
 pub const RATE_ONE: i128 = 10_000_000;
 /// The attester's fix is valid at most 2 days (R77).
 pub const MAX_RATE_AGE: u64 = 2 * DAY;
+/// The attester's fix may move at most 5% from the last one (R77); beyond, the trust overrides.
+pub const MAX_RATE_MOVE_BP: u32 = 500;
 /// The LP's fee: 1% (R21).
 pub const DEFAULT_LP_FEE_BP: u32 = 100;
 /// Upgrade timelock at deploy: 48 hours (R75, C15); short builds rehearse it in seconds.
@@ -182,6 +184,8 @@ pub enum DataKey {
     Offer(u64),
     /// Open offer ids of a union.
     OffersOf(Address),
+    /// USDC paid out on a day (day index), against the daily cap (R76, C15).
+    DayOut(u64),
 }
 
 /// Rupees a leader took in, not yet lent out or settled (R15).
@@ -776,6 +780,17 @@ impl FxPoolContract {
         if inr_per_usd <= 0 || valid_until <= now || valid_until > now + MAX_RATE_AGE {
             return Err(Error::BadRate);
         }
+        // The attester only follows the market: at most 5% from the last fix. The first fix, or
+        // a bigger move, is the trust's (`override_rate`).
+        let last: RateFix = env
+            .storage()
+            .instance()
+            .get(&DataKey::Rate)
+            .ok_or(Error::BadRate)?;
+        let band = last.inr_per_usd * i128::from(MAX_RATE_MOVE_BP) / 10_000;
+        if (inr_per_usd - last.inr_per_usd).abs() > band {
+            return Err(Error::BadRate);
+        }
         env.storage().instance().set(
             &DataKey::Rate,
             &RateFix {
@@ -788,6 +803,32 @@ impl FxPoolContract {
             inr_per_usd,
             valid_until,
             set_by: attester,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// The trust sets the first fix, or one beyond the attester's 5% band (evented, R77).
+    pub fn override_rate(env: Env, inr_per_usd: i128, valid_until: u64) -> Result<(), Error> {
+        require_admin(&env)?;
+        let now = env.ledger().timestamp();
+        if inr_per_usd <= 0 || valid_until <= now || valid_until > now + MAX_RATE_AGE {
+            return Err(Error::BadRate);
+        }
+        let admin: Address = get(&env, &DataKey::Admin);
+        env.storage().instance().set(
+            &DataKey::Rate,
+            &RateFix {
+                inr_per_usd,
+                valid_until,
+                set_by: admin.clone(),
+            },
+        );
+        RateSet {
+            inr_per_usd,
+            valid_until,
+            set_by: admin,
         }
         .publish(&env);
         bump_instance(&env);

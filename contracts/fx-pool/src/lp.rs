@@ -217,6 +217,27 @@ fn close(env: &Env, id: u64, o: &mut Offer, state: OfferState) {
     .publish(env);
 }
 
+/// USDC paid out today (temporary storage: it only matters for the day).
+fn day_out(env: &Env) -> i128 {
+    env.storage()
+        .temporary()
+        .get(&DataKey::DayOut(env.ledger().timestamp() / DAY))
+        .unwrap_or(0)
+}
+
+/// The daily cap on USDC out (R76, C15): 2,500 USDC at launch.
+fn check_day_out(env: &Env, usdc: i128) -> Result<(), Error> {
+    let cap: i128 = env
+        .storage()
+        .instance()
+        .get(&DataKey::DailyCap)
+        .unwrap_or(0);
+    if day_out(env) + usdc > cap {
+        return Err(Error::CapExceeded);
+    }
+    Ok(())
+}
+
 fn is_lp(env: &Env, union: &Address, lp: &Address) -> bool {
     env.storage()
         .persistent()
@@ -408,8 +429,13 @@ impl FxPoolContract {
                 let u = o.union.clone();
                 let lk = DataKey::LpUsdc(u.clone());
                 let from_lp = core::cmp::min(usdc, p_get(&env, &lk));
-                let senior_free =
-                    core::cmp::max(0, senior_total(&env, &u) - voucher_floor(&env, &u));
+                // The floor is the admin's, but never below the USDC value of senior money
+                // fund_core holds back for unclaimed voucher hours.
+                let held = FundCoreClient::new(&env, &core_addr(&env)?).senior_earmark(&u);
+                let held_usdc = held * RATE_ONE / rate.inr_per_usd;
+                let floor = core::cmp::max(voucher_floor(&env, &u), held_usdc);
+                let senior_free = core::cmp::max(0, senior_total(&env, &u) - floor);
+                check_day_out(&env, usdc)?;
                 let need = usdc - from_lp;
                 if need > senior_free {
                     return Err(if senior_total(&env, &u) >= need {
@@ -475,7 +501,17 @@ impl FxPoolContract {
         let me = env.current_contract_address();
         let usdc = TokenClient::new(&env, &get(&env, &DataKey::Usdc));
         match o.kind {
-            OfferKind::Bring => usdc.transfer(&me, &lp, &o.usdc),
+            OfferKind::Bring => {
+                check_day_out(&env, o.usdc)?;
+                let k = DataKey::DayOut(env.ledger().timestamp() / DAY);
+                env.storage().temporary().set(&k, &(day_out(&env) + o.usdc));
+                env.storage().temporary().extend_ttl(
+                    &k,
+                    nila_common::DAY_IN_LEDGERS,
+                    nila_common::DAY_IN_LEDGERS * 2,
+                );
+                usdc.transfer(&me, &lp, &o.usdc)
+            }
             OfferKind::Collect => {
                 usdc.transfer_from(&me, &lp, &me, &o.usdc);
                 let lk = DataKey::LpUsdc(o.union.clone());

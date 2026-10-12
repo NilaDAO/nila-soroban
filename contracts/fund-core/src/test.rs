@@ -1413,14 +1413,24 @@ fn senior_route_usdc_in_nin_into_the_senior_pool() {
         f.try_mint_senior(&investor, &fx.union, &(100 * NIN), &Tag::Offshore),
         Err(Ok(FxError::StaleOracle))
     );
-    // Only the attester posts the fix, valid at most 2 days.
+    // The trust sets the first fix; the attester then follows the market within 5%, valid at
+    // most 2 days. A bigger move is the trust's again.
     let rate = 95 * NIN; // ₹95 per USD
+    assert_eq!(
+        f.try_set_rate(&fx.attester, &rate, &(T0 + 86_400)),
+        Err(Ok(FxError::BadRate))
+    );
+    f.override_rate(&(94 * NIN), &(T0 + 86_400));
     assert_eq!(
         f.try_set_rate(&fx.oracle, &rate, &(T0 + 86_400)),
         Err(Ok(FxError::Unauthorized))
     );
     assert_eq!(
         f.try_set_rate(&fx.attester, &rate, &(T0 + 3 * 86_400)),
+        Err(Ok(FxError::BadRate))
+    );
+    assert_eq!(
+        f.try_set_rate(&fx.attester, &(50 * NIN), &(T0 + 86_400)),
         Err(Ok(FxError::BadRate))
     );
     f.set_rate(&fx.attester, &rate, &(T0 + 86_400));
@@ -1501,7 +1511,7 @@ impl Fx {
             &true,
             &loan_id(&self.env, 0x4C),
         );
-        f.set_rate(&self.attester, &(95 * NIN), &(T0 + 86_400));
+        f.override_rate(&(95 * NIN), &(T0 + 86_400));
         self.scan(Purpose::Treasury, &self.leader, 5_000 * NIN, 1, None)
             .unwrap();
         self.scan(Purpose::Invest, &self.borrower, 2_000 * NIN, 2, None)
@@ -1784,8 +1794,8 @@ fn vsetup() -> Vx {
     let mc = MachineryContractClient::new(env, &m);
     mc.set_fund_core(&fx.core_id);
     fx.core().set_machinery(&m);
-    mc.set_rate(
-        &fx.union,
+    // The trust's base rate (depreciation included, D20); the union takes it at factor 100%.
+    mc.set_base_rate(
         &1,
         &RateParts {
             driver: 400 * NIN,
@@ -1796,6 +1806,7 @@ fn vsetup() -> Vx {
             margin: 0,
         },
     );
+    mc.set_rate(&fx.union, &1, &10_000);
     let owner = fx.neighbour.clone();
     let machine = mc.register_machine(&fx.leader, &fx.union, &owner, &1, &40, &loan_id(env, 0x50));
     mc.confirm_machine(&owner, &machine);
@@ -1804,7 +1815,7 @@ fn vsetup() -> Vx {
     let investor = Address::generate(env);
     StellarAssetClient::new(env, &fx.usdc).mint(&investor, &(200 * NIN));
     f.set_senior_investor(&investor, &true, &loan_id(env, 0x49));
-    f.set_rate(&fx.attester, &(50 * NIN), &(T0 + 86_400));
+    f.override_rate(&(50 * NIN), &(T0 + 86_400));
     f.mint_senior(
         &investor,
         &fx.union,
@@ -2030,4 +2041,105 @@ fn default_beyond_her_investment_owner_still_paid_senior_takes_its_loss() {
     assert!(sm.cash < 10_000 * NIN);
     assert_eq!(c.position(&fx.union, &fx.borrower).invested, 0);
     v.assert_conserved();
+}
+
+#[test]
+fn review_fixes_self_claim_rate_factor_earmarks_close_unused() {
+    let v = vsetup();
+    let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
+    use nila_machinery::Error as ME;
+    // An owner cannot claim on her own voucher (here the borrower owns a machine too).
+    let mine = mc.register_machine(
+        &fx.leader,
+        &fx.union,
+        &fx.borrower,
+        &1,
+        &40,
+        &loan_id(&fx.env, 9),
+    );
+    mc.confirm_machine(&fx.borrower, &mine);
+    let id = loan_id(&fx.env, 1);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &4, &T0);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &id, &0, &4);
+    let code = Bytes::from_array(&fx.env, b"c1");
+    let h: BytesN<32> = fx.env.crypto().sha256(&code).into();
+    mc.open_code(&fx.borrower, &fx.union, &id, &4, &h);
+    assert_eq!(
+        mc.try_claim(&fx.borrower, &mine, &fx.union, &id, &code, &1),
+        Err(Ok(ME::SelfClaim))
+    );
+    // The union's factor stays within the trust's bounds.
+    assert_eq!(
+        mc.try_set_rate(&fx.union, &1, &15_001),
+        Err(Ok(ME::BadFactor))
+    );
+
+    // Another loan holds back 10 hours: 14 × ₹700 of the 10,000 senior nIN are earmarked.
+    let id2 = loan_id(&fx.env, 2);
+    c.attest_food_token(&fx.attester, &fx.union, &id2, &fx.borrower, &0, &10, &T0);
+    c.draw_loan(&fx.union, &fx.borrower, &id2, &id2, &0, &10);
+    assert_eq!(c.senior_earmark(&fx.union), 14 * PRE);
+    // The union raises its factor to 150% after the draw: the higher prepay would eat the other
+    // loan's earmark, so the claim is refused.
+    mc.set_rate(&fx.union, &1, &15_000);
+    assert!(mc
+        .try_claim(&v.owner, &v.machine, &fx.union, &id, &code, &4)
+        .is_err());
+    mc.set_rate(&fx.union, &1, &10_000);
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &code, &4);
+
+    // She releases the voucher she no longer needs: nothing owed, the earmark goes back.
+    assert_eq!(
+        c.try_close_unused(&fx.borrower, &fx.union, &id),
+        Err(Ok(Error::BadState))
+    );
+    c.close_unused(&fx.borrower, &fx.union, &id2);
+    assert_eq!(c.senior_earmark(&fx.union), 0);
+    assert!(mc.voucher(&fx.union, &id2).unwrap().void);
+    v.assert_conserved();
+}
+
+#[test]
+fn bring_respects_the_daily_cap_and_the_voucher_earmark() {
+    let v = vsetup();
+    let (fx, c, f) = (&v.fx, v.fx.core(), v.fx.fx());
+    let anchor = Address::generate(&fx.env);
+    f.set_anchor(&anchor);
+    f.set_lp(&fx.union, &v.owner, &true, &loan_id(&fx.env, 0x4C));
+    fx.scan(Purpose::Treasury, &fx.leader, 5_000 * NIN, 1, None)
+        .unwrap();
+    let (s24, q) = fx.ids();
+    // 200 senior USDC at ₹50; a voucher earmarks 14 × ₹700 = 9,800 nIN = 196 USDC.
+    let id = loan_id(&fx.env, 1);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &14, &T0);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &id, &0, &14);
+    // ₹250 → 5 USDC + 1% would cut into the 196 USDC held for the voucher.
+    let b = f.post_offer(
+        &fx.leader,
+        &fx.union,
+        &OfferKind::Bring,
+        &(250 * NIN),
+        &(T0 + 3_600),
+    );
+    assert_eq!(
+        f.try_accept(&v.owner, &b, &s24, &q),
+        Err(Ok(FxError::BelowVoucherFloor))
+    );
+    // ₹150 → 3.03 USDC fits in the 4 free.
+    let ok = f.post_offer(
+        &fx.leader,
+        &fx.union,
+        &OfferKind::Bring,
+        &(150 * NIN),
+        &(T0 + 3_600),
+    );
+    f.accept(&v.owner, &ok, &s24, &q);
+    // The daily cap: set it below the payout and the confirm is refused.
+    f.set_daily_cap(&NIN);
+    assert_eq!(
+        f.try_confirm(&fx.leader, &ok),
+        Err(Ok(FxError::CapExceeded))
+    );
+    f.set_daily_cap(&(2_500 * NIN));
+    f.confirm(&fx.leader, &ok);
 }

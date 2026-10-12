@@ -120,6 +120,8 @@ pub trait FundCoreTrait {
     /// An escrow expired unsettled: the union keeps the rupees, so its treasury nIN burns.
     fn cover_expired_escrow(union: Address, amount: i128) -> i128;
     fn union_treasury(union: Address) -> i128;
+    /// Senior cash held back for unclaimed voucher hours (the floor under Bring offers).
+    fn senior_earmark(union: Address) -> i128;
     /// machinery only: an owner claimed hours on her voucher; pay the prepay from senior and
     /// book the rest as the owner's pending dues (D17, D18, R85).
     fn pay_voucher(
