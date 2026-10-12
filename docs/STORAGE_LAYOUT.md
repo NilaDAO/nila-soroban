@@ -61,7 +61,7 @@ storage:
 
 | Key | Tier | Value |
 |---|---|---|
-| `Config` | instance | `Config{admin, roles, land_title, nin, fx_pool: Option}` |
+| `Config` | instance | `Config{admin, roles, land_title, nin, fx_pool: Option, machinery: Option}` |
 | `Paused` | instance | bool |
 | `UnionCfg(union)` | persistent | `UnionConfig{max_loan, gate, rate_bp, treasury_fee_bp, rainy_fee_bp, safety_bp, safety_floor, hard_stop, enforce_token_amount}` |
 | `JuniorMarket(union)`, `SeniorMarket(union)` | persistent | `Market{cash, index, total_shares, total_borrows, claimable_principal, exists}` |
@@ -70,7 +70,22 @@ storage:
 | `LoansOf(union, member)` | persistent | Vec of open loan ids (max 32) |
 | `UnionBorrows`, `UnionTreasury`, `UnionRainy` (union) | persistent | i128 |
 | `OnHold(union)` | persistent | u32 overdue loans |
-| `FoodToken(union, token_id)` | persistent | `FoodToken{member, amount, from_date, loan_id: Option}` |
+| `FoodToken(union, token_id)` | persistent | `FoodToken{member, amount, hours, from_date, loan_id: Option}`: amount and hours are the plan's recommendations, from_date the season's SOS (N5) |
+| `Vouchers(union, loan_id)` | persistent | `VoucherBook{hours, earmark, earmark_per_hour, senior_out, dues: Vec<Due{owner, amount}>}` (C5) |
+| `SeniorEarmark(union)` | persistent | i128 senior cash held back for unclaimed voucher hours |
+| `OwnerBalance(union, owner)` | persistent | i128 owner's settled pending parts, ready to collect |
+
+## machinery
+
+| Key | Tier | Value |
+|---|---|---|
+| `Admin`, `Roles`, `LandTitle`, `FundCore`, `Paused`, `NextMachine` | instance | Address ×4, bool, u64 |
+| `Rate(union, machine_type)` | persistent | `RateParts{driver, diesel, maintenance, insurance, depreciation, margin}` per hour |
+| `Types(union)` | persistent | Vec<u32> machine types with a rate (max 16) |
+| `PrepayDriverBp(union)` | persistent | u32 share of the driver part paid at the job (X32) |
+| `Machine(id)` | persistent | `Machine{union, owner, machine_type, hours_per_week, photos_hash, confirmed, on_hold, hold_reason}` |
+| `Voucher(union, loan_id)` | persistent | `Voucher{member, hours, used, void, code_hash: Option, code_max, code_expires}` |
+| `WeekUse(machine_id, week)` | persistent | u32 hours worked that week |
 
 ## fx_pool
 

@@ -20,6 +20,7 @@ soroban-sdk = { workspace = true, features = ["testutils"] }
 nila-roles = { path = "../roles" }
 nila-land-title = { path = "../land-title" }
 nila-fx-pool = { path = "../fx-pool" }
+nila-machinery = { path = "../machinery" }
 
 [features]
 # One day = one second, so a testnet rehearsal reaches the payback date. Never for mainnet.

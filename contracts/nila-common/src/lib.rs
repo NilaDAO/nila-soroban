@@ -120,4 +120,25 @@ pub trait FundCoreTrait {
     /// An escrow expired unsettled: the union keeps the rupees, so its treasury nIN burns.
     fn cover_expired_escrow(union: Address, amount: i128) -> i128;
     fn union_treasury(union: Address) -> i128;
+    /// machinery only: an owner claimed hours on her voucher; pay the prepay from senior and
+    /// book the rest as the owner's pending dues (D17, D18, R85).
+    fn pay_voucher(
+        union: Address,
+        loan_id: BytesN<32>,
+        owner: Address,
+        hours: u32,
+        prepay: i128,
+        pending: i128,
+    );
+}
+
+/// What fund_core asks of the machinery contract (C5).
+#[contractclient(name = "MachineryClient")]
+pub trait MachineryTrait {
+    /// The most senior money one machine hour can need at the job, across the union's types.
+    fn max_prepay_per_hour(union: Address) -> i128;
+    /// A drawn loan's voucher part: hours of machinery for her (R36, R51).
+    fn grant(union: Address, member: Address, loan_id: BytesN<32>, hours: u32);
+    /// The loan closed or defaulted: unclaimed hours lapse.
+    fn void(union: Address, loan_id: BytesN<32>);
 }

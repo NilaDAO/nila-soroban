@@ -59,6 +59,14 @@ pub enum Error {
     BadDelay = 50,
     /// Above the maximum loan rate in code (C14).
     AboveMaxRate = 51,
+    NotMachinery = 52,
+    /// Senior money not free to back the voucher prepay (R36, C8).
+    NoSeniorBacking = 53,
+    /// More machine owners on one loan than the book holds.
+    TooManyOwners = 54,
+    MachineryAlreadySet = 55,
+    /// Nothing is owed yet (a voucher-only loan before any claim).
+    NothingOwed = 56,
 }
 
 #[contracttype]
@@ -70,6 +78,8 @@ pub struct Config {
     pub nin: Address,
     /// fx_pool: the cash-scan entry point for all money coming in, and the nIN SAC admin.
     pub fx_pool: Option<Address>,
+    /// machinery: machine registry, vouchers and owner claims (C5).
+    pub machinery: Option<Address>,
 }
 
 /// Per-union lending terms, set by the admin (R26, R34, R37, R42, R76).
@@ -100,9 +110,11 @@ pub struct UnionConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FoodToken {
     pub member: Address,
-    /// Most cash that may be drawn against it.
+    /// The plan's recommended cash part; a cap only when the union's switch is on (9 Oct).
     pub amount: i128,
-    /// Loans accepted from this date.
+    /// The plan's recommended machinery hours; a cap only with the same switch.
+    pub hours: u32,
+    /// Loans accepted from this date: the season's SOS from the plan (N5).
     pub from_date: u64,
     /// The loan drawn against it; one loan per token.
     pub loan_id: Option<BytesN<32>>,
@@ -148,4 +160,26 @@ pub struct Investor {
     /// separately: it is in the share value and leaves with the shares.
     pub cost: i128,
     pub pending_principal_snap: i128,
+}
+
+/// An owner's pending part for work done on one loan (D18, R85).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Due {
+    pub owner: Address,
+    pub amount: i128,
+}
+
+/// A loan's voucher part (C5): no interest (D6). Senior money pays the prepay (N4, C8).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoucherBook {
+    pub hours: u32,
+    /// Senior cash still held back for hours not yet claimed.
+    pub earmark: i128,
+    pub earmark_per_hour: i128,
+    /// Senior prepay paid to owners and not yet repaid by her.
+    pub senior_out: i128,
+    /// Owners' pending parts, paid from her repayments first.
+    pub dues: soroban_sdk::Vec<Due>,
 }

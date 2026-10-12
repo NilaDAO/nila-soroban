@@ -55,6 +55,7 @@ pub struct FoodTokenAttested {
     pub token_id: BytesN<32>,
     pub member: Address,
     pub amount: i128,
+    pub hours: u32,
     pub from_date: u64,
 }
 
@@ -68,6 +69,7 @@ pub struct LoanDrawn {
     pub borrower: Address,
     pub token_id: BytesN<32>,
     pub cash: i128,
+    pub hours: u32,
     pub rate_bp: u32,
     /// How much of the union's cash at hand in fx_pool the draw settled (D9).
     pub cash_settled: i128,
@@ -81,6 +83,10 @@ pub struct LoanRepaid {
     pub loan_id: BytesN<32>,
     pub interest_paid: i128,
     pub principal_paid: i128,
+    /// To machine owners' pending parts (paid first).
+    pub dues_paid: i128,
+    /// Back to the senior pool for the voucher prepay.
+    pub senior_paid: i128,
     pub closed: bool,
 }
 
@@ -104,6 +110,12 @@ pub struct LoanDefaulted {
     pub senior_applied: i128,
     /// Interest accrued and unpaid at the default, written off with the principal.
     pub interest_written_off: i128,
+    /// Owners' pending parts paid at the default (D17), and any left unpaid for lack of cash.
+    pub dues_paid: i128,
+    pub dues_unpaid: i128,
+    /// Senior voucher prepay her investment covered, and the senior loss on the rest.
+    pub senior_prepay_covered: i128,
+    pub senior_prepay_lost: i128,
 }
 
 #[contractevent]
@@ -155,4 +167,31 @@ pub struct EscrowCovered {
     pub union: Address,
     pub amount: i128,
     pub covered: i128,
+}
+
+#[contractevent]
+pub struct MachinerySet {
+    pub machinery: Address,
+}
+
+/// An owner claimed hours on her voucher: prepay paid from senior, the rest pending (R85).
+#[contractevent]
+pub struct VoucherPaid {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub loan_id: BytesN<32>,
+    pub owner: Address,
+    pub hours: u32,
+    pub prepay: i128,
+    pub pending: i128,
+}
+
+#[contractevent]
+pub struct DuesCollected {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub owner: Address,
+    pub amount: i128,
 }
