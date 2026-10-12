@@ -2,11 +2,13 @@
 //!
 //! - An **LP** is a member of the union with a land title, accepted by the trust's anchor after
 //!   SEP-12 (R20). She never lends or guarantees.
-//! - **Bring** (cash short, R18, R21): the leader posts the rupees needed. An LP accepts at the
-//!   quote (the rate is fixed at accept), brings the rupees, and on the leader's scan the union pays
-//!   her the USDC plus her fee. The USDC comes from the union's pool: first LP-collected USDC, then
+//! - **Bring** (a member wants a loan and the drawer has no cash, R18, R21): the leader posts the
+//!   rupees needed. An LP accepts at the quote (the rate is fixed at accept), brings the rupees, and
+//!   on the leader's scan the union pays her the USDC plus her fee. Her rupees join the union's cash
+//!   at hand (a 7-day escrow) until the draw hands them out (executive decision, 12 Oct). The USDC comes from the union's pool: first LP-collected USDC, then
 //!   senior USDC above the **voucher floor**, domestic before offshore (D1, R24).
-//! - **Collect** (spare cash, R19, R22): the leader posts the spare rupees. An LP accepts and signs a
+//! - **Collect** (a member repaid in cash and no other borrower takes it, R19, R22): the leader
+//!   posts the spare rupees. An LP accepts and signs a
 //!   USDC approve that lapses at the offer's expiry (R23). On the scan the union takes her USDC
 //!   (less her fee) and she takes the rupees, which leave the union's cash at hand.
 //! - Each accepted offer stores the anchor's SEP-24 transaction id and the SEP-38 quote id (R23).
@@ -504,6 +506,8 @@ impl FxPoolContract {
         match o.kind {
             OfferKind::Bring => {
                 check_day_out(&env, o.usdc)?;
+                check_room(&env, &o.union, o.inr)?;
+                open_escrow(&env, &o.union, &lp, Purpose::Bring, o.inr);
                 let k = DataKey::DayOut(env.ledger().timestamp() / DAY);
                 env.storage().temporary().set(&k, &(day_out(&env) + o.usdc));
                 env.storage().temporary().extend_ttl(

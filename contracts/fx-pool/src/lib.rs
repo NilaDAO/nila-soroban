@@ -145,6 +145,9 @@ pub enum Purpose {
     Recovery = 2,
     /// The union's own cash into its treasury (R17); no escrow.
     Treasury = 3,
+    /// Rupees an LP brought for a loan the drawer could not pay (Bring, R18): cash at hand
+    /// until the draw hands them out (executive decision, 12 Oct). Opened by `confirm`, never by a scan.
+    Bring = 4,
 }
 
 #[contracttype]
@@ -431,6 +434,55 @@ fn set_cash_at_hand(env: &Env, union: &Address, v: i128) {
     bump(env, &k);
 }
 
+/// Rupees came into the union's drawer: a 7-day escrow on its cash at hand (R15). The caller
+/// checks the treasury cap and the open-escrow limit.
+fn open_escrow(
+    env: &Env,
+    union: &Address,
+    member: &Address,
+    purpose: Purpose,
+    amount: i128,
+) -> u64 {
+    let id = env
+        .storage()
+        .instance()
+        .get(&DataKey::NextEscrow)
+        .unwrap_or(0u64)
+        + 1;
+    env.storage().instance().set(&DataKey::NextEscrow, &id);
+    let k = DataKey::Escrow(id);
+    env.storage().persistent().set(
+        &k,
+        &Escrow {
+            union: union.clone(),
+            member: member.clone(),
+            purpose,
+            amount,
+            remaining: amount,
+            expires: env.ledger().timestamp() + ESCROW_TERM,
+        },
+    );
+    bump(env, &k);
+    let mut ids = escrows_of(env, union);
+    ids.push_back(id);
+    save_escrows_of(env, union, &ids);
+    set_cash_at_hand(env, union, cash_at_hand(env, union) + amount);
+    id
+}
+
+/// Cash at hand may not exceed the union's treasury (R15), nor the open escrows the limit.
+fn check_room(env: &Env, union: &Address, amount: i128) -> Result<(), Error> {
+    if escrows_of(env, union).len() >= MAX_OPEN_ESCROWS {
+        return Err(Error::TooManyEscrows);
+    }
+    if cash_at_hand(env, union) + amount
+        > FundCoreClient::new(env, &core_addr(env)?).union_treasury(union)
+    {
+        return Err(Error::AboveTreasury);
+    }
+    Ok(())
+}
+
 fn escrows_of(env: &Env, union: &Address) -> Vec<u64> {
     env.storage()
         .persistent()
@@ -628,14 +680,11 @@ impl FxPoolContract {
         let core = core_addr(&env)?;
         let fc = FundCoreClient::new(&env, &core);
         let escrowed = purpose != Purpose::Treasury;
-        let mut ids = escrows_of(&env, &union);
+        if purpose == Purpose::Bring {
+            return Err(Error::Unauthorized);
+        }
         if escrowed {
-            if ids.len() >= MAX_OPEN_ESCROWS {
-                return Err(Error::TooManyEscrows);
-            }
-            if cash_at_hand(&env, &union) + amount > fc.union_treasury(&union) {
-                return Err(Error::AboveTreasury);
-            }
+            check_room(&env, &union, amount)?;
         }
 
         let me = env.current_contract_address();
@@ -670,35 +719,13 @@ impl FxPoolContract {
                 authorize_pull(&env, &core, amount);
                 fc.credit_recovery(&union, &id, &amount);
             }
+            // Refused above: only an LP's confirmed Bring opens one.
+            Purpose::Bring => return Err(Error::Unauthorized),
         }
 
         let mut escrow_id = 0u64;
         if escrowed && taken > 0 {
-            escrow_id = env
-                .storage()
-                .instance()
-                .get(&DataKey::NextEscrow)
-                .unwrap_or(0u64)
-                + 1;
-            env.storage()
-                .instance()
-                .set(&DataKey::NextEscrow, &escrow_id);
-            let k = DataKey::Escrow(escrow_id);
-            env.storage().persistent().set(
-                &k,
-                &Escrow {
-                    union: union.clone(),
-                    member: member.clone(),
-                    purpose,
-                    amount: taken,
-                    remaining: taken,
-                    expires: env.ledger().timestamp() + ESCROW_TERM,
-                },
-            );
-            bump(&env, &k);
-            ids.push_back(escrow_id);
-            save_escrows_of(&env, &union, &ids);
-            set_cash_at_hand(&env, &union, cash_at_hand(&env, &union) + taken);
+            escrow_id = open_escrow(&env, &union, &member, purpose, taken);
         }
         CashScanned {
             union,

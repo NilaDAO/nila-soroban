@@ -224,6 +224,7 @@ fn storage_layout_is_frozen() {
         Purpose::Repay,
         Purpose::Recovery,
         Purpose::Treasury,
+        Purpose::Bring,
     ] {
         v.push_back(pu.into_val(&env));
     }
@@ -269,7 +270,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "d03a0aadd7f618e44d45732ea20651776f86fced9e1423560207d508b59f9a80",
+        hex, "955f17b96f8c9206c5c4f04fd98aff23174263343b70c328d91e510a4be3cc5e",
         "fx_pool storage layout changed"
     );
 }

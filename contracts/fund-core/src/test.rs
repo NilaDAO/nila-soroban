@@ -2188,3 +2188,42 @@ fn close_unused_is_hers_only_and_evented() {
         Err(Ok(Error::LoanClosed))
     );
 }
+
+#[test]
+fn repaid_cash_goes_out_by_collect_and_a_loan_comes_in_by_bring() {
+    let fx = setup();
+    let (c, f) = (fx.core(), fx.fx());
+    let (_anchor, lp) = fx.lp_ready(); // treasury 5,000; the borrower invested 2,000 (escrow)
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&lp, &(100 * NIN));
+    let (s24, q) = fx.ids();
+    // No other borrower for the 2,000 in the drawer: an LP collects it for USDC.
+    let col = f.post_offer(
+        &fx.leader,
+        &fx.union,
+        &OfferKind::Collect,
+        &(1_900 * NIN),
+        &(T0 + 3_600),
+    );
+    f.accept(&lp, &col, &s24, &q);
+    f.confirm(&fx.leader, &col);
+    assert_eq!(f.cash_at_hand(&fx.union), 100 * NIN);
+    // Later a member wants 950 in cash and the drawer is short: an LP brings it.
+    let br = f.post_offer(
+        &fx.leader,
+        &fx.union,
+        &OfferKind::Bring,
+        &(950 * NIN),
+        &(T0 + 3_600),
+    );
+    f.accept(&lp, &br, &s24, &q);
+    f.confirm(&fx.leader, &br);
+    // Her rupees are cash at hand until the draw hands them out.
+    assert_eq!(f.cash_at_hand(&fx.union), 1_050 * NIN);
+    let id = loan_id(&fx.env, 1);
+    fx.attest(&fx.borrower, &id, 950 * NIN);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &id, &(950 * NIN), &0);
+    assert_eq!(f.cash_at_hand(&fx.union), 100 * NIN);
+    // A scan can never open a Bring escrow itself.
+    assert!(fx.scan(Purpose::Bring, &fx.borrower, NIN, 9, None).is_err());
+    fx.assert_conserved();
+}
