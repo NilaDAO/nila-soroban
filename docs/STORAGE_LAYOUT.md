@@ -30,8 +30,9 @@ storage:
 - An entry left idle beyond its TTL is **archived, not deleted**. Since Protocol 23, the next
   transaction that touches it restores it automatically; the restore costs a fee. See the
   checklist §E.
-- Temporary storage holds only fx_pool's USDC paid out per day (`DayOut`), which matters for one
-  day. Escrows and cash-outs are persistent, because a lost escrow would break the cash-at-hand
+- Temporary storage holds only counters that matter for a short window: fx_pool's USDC paid out per
+  day (`DayOut`) and machinery's hours per machine per week (`WeekUse`). The network deletes them when
+  they expire, with no restore, so nothing that holds money or prevents a double payment is temporary. Escrows and cash-outs are persistent, because a lost escrow would break the cash-at-hand
   books.
 
 ## roles
@@ -85,7 +86,7 @@ storage:
 | `PrepayDriverBp(union)` | persistent | u32 share of the driver part paid at the job (X32) |
 | `Machine(id)` | persistent | `Machine{union, owner, machine_type, hours_per_week, photos_hash, confirmed, on_hold, hold_reason}` |
 | `Voucher(union, token_id)` | persistent | `Voucher{member, hours, used, void, code_hash: Option, code_max, code_expires}` |
-| `WeekUse(machine_id, week)` | persistent | u32 hours worked that week |
+| `WeekUse(machine_id, week)` | **temporary** | u32 hours worked that week; lives ~8 days, then the network deletes it (C7) |
 
 ## fx_pool
 

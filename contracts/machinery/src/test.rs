@@ -158,3 +158,20 @@ fn storage_layout_is_frozen() {
         "machinery storage layout changed"
     );
 }
+
+#[test]
+fn weekly_hours_live_in_temporary_storage_and_lapse_after_the_week() {
+    use soroban_sdk::testutils::storage::Temporary as _;
+    let (env, c) = setup();
+    let id = c.address.clone();
+    let key = DataKey::WeekUse(7, env.ledger().timestamp() / WEEK);
+    env.as_contract(&id, || {
+        env.storage().temporary().set(&key, &5u32);
+        env.storage()
+            .temporary()
+            .extend_ttl(&key, WEEK_USE_LEDGERS, WEEK_USE_LEDGERS);
+        assert!(!env.storage().persistent().has(&key));
+        assert!(env.storage().temporary().get_ttl(&key) >= WEEK_USE_LEDGERS - 1);
+    });
+    assert_eq!(c.hours_this_week(&7), 5);
+}

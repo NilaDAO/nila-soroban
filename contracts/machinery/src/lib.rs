@@ -39,6 +39,9 @@ pub const DAY: u64 = 10;
 /// A spend code lives 48 hours (R54).
 pub const CODE_TERM: u64 = 2 * DAY;
 pub const WEEK: u64 = 7 * DAY;
+/// How long a week's hour count lives, in ledgers (~5 s each): eight days covers any claim in
+/// that week, whatever day it was first written.
+pub const WEEK_USE_LEDGERS: u32 = 8 * nila_common::DAY_IN_LEDGERS;
 /// Machine types per union in the rate table.
 pub const MAX_TYPES: u32 = 16;
 /// Default share of the driver part paid at the job (X32 open; the union changes it).
@@ -128,7 +131,8 @@ pub enum DataKey {
     NextMachine,
     Machine(u64),
     Voucher(Address, BytesN<32>),
-    /// Hours a machine worked in a week (machine id, week index).
+    /// Hours a machine worked in a week (machine id, week index). **Temporary** storage (C7):
+    /// deleted by the network once the week is over.
     WeekUse(u64, u64),
 }
 
@@ -659,12 +663,16 @@ impl MachineryContract {
             return Err(Error::TooManyHours);
         }
         let wk = DataKey::WeekUse(machine_id, now / WEEK);
-        let week_used: u32 = env.storage().persistent().get(&wk).unwrap_or(0);
+        let week_used: u32 = env.storage().temporary().get(&wk).unwrap_or(0);
         if week_used + hours > m.hours_per_week {
             return Err(Error::TooManyHours);
         }
-        env.storage().persistent().set(&wk, &(week_used + hours));
-        bump(&env, &wk);
+        // Temporary storage (C7): the count only matters for its week, then it is deleted by
+        // the network. It is kept alive a little past the week's end, never less.
+        env.storage().temporary().set(&wk, &(week_used + hours));
+        env.storage()
+            .temporary()
+            .extend_ttl(&wk, WEEK_USE_LEDGERS, WEEK_USE_LEDGERS);
         let r = rate(&env, &union, m.machine_type).ok_or(Error::NoRate)?;
         let pre = prepay_per_hour(&r, prepay_driver_bp(&env, &union));
         let prepay = pre * i128::from(hours);
@@ -730,7 +738,7 @@ impl MachineryContract {
 
     pub fn hours_this_week(env: Env, machine_id: u64) -> u32 {
         env.storage()
-            .persistent()
+            .temporary()
             .get(&DataKey::WeekUse(
                 machine_id,
                 env.ledger().timestamp() / WEEK,
