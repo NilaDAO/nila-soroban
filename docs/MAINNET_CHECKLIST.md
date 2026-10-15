@@ -1,6 +1,6 @@
 # Mainnet readiness checklist (C4, 10 Oct 2026)
 
-For the trust's signers and executive decision. **Claude Code never deploys to mainnet.** Every step below
+For the trust's signers and the executive. **Claude Code never deploys to mainnet.** Every step below
 is run by the people who hold the keys. Rehearsed on testnet by `scripts/c4-testnet.sh`, using
 a 2-of-3 trust account, a timelocked upgrade, and an upgrade that keeps the contract's state.
 The C3 flows are rehearsed by `scripts/c3-testnet.sh`.
