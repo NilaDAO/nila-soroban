@@ -1116,9 +1116,10 @@ name = "nila-fund-core"
 version = "0.1.0"
 dependencies = [
  "nila-common",
- "nila-fund-viewer",
+ "nila-fx-pool",
+ "nila-land-title",
+ "nila-machinery",
  "nila-math",
- "nila-membership",
  "nila-roles",
  "soroban-sdk",
 ]
@@ -1142,18 +1143,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "nila-math"
-version = "0.1.0"
-dependencies = [
- "soroban-sdk",
-]
-
-[[package]]
-name = "nila-membership"
+name = "nila-land-title"
 version = "0.1.0"
 dependencies = [
  "nila-common",
  "nila-roles",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "nila-machinery"
+version = "0.1.0"
+dependencies = [
+ "nila-common",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "nila-math"
+version = "0.1.0"
+dependencies = [
  "soroban-sdk",
 ]
 

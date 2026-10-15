@@ -3,11 +3,12 @@ resolver = "2"
 members = [
     "contracts/nila-math",
     "contracts/nila-common",
-    "contracts/membership",
+    "contracts/land-title",
     "contracts/roles",
     "contracts/fund-core",
     "contracts/fund-viewer",
     "contracts/fx-pool",
+    "contracts/machinery",
 ]
 
 [workspace.package]

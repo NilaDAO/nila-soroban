@@ -1,0 +1,22 @@
+[package]
+name = "nila-machinery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Machinery vouchers: union rate table, machine registry, spend codes, owner claims (C5, Nov 7)."
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+nila-common = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+
+[features]
+# One day = ten seconds, so a testnet rehearsal reaches escrow and cash-out expiry. Never for mainnet.
+testnet-short-windows = []

@@ -1,10 +1,10 @@
 [package]
-name = "nila-membership"
+name = "nila-land-title"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Union membership plus attested land-title facts (TAD §4.2)."
+description = "Stellar mirror of the Polygon land titles: a member is whoever holds a title her union minted."
 
 [lib]
 crate-type = ["lib", "cdylib"]
