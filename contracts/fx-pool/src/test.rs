@@ -164,6 +164,7 @@ fn storage_layout_is_frozen() {
     v.push_back(DataKey::OffersOf(a.clone()).into_val(&env));
     v.push_back(DataKey::DayOut(1).into_val(&env));
     v.push_back(DataKey::RateBandBp.into_val(&env));
+    v.push_back(DataKey::Moved(h.clone()).into_val(&env));
     v.push_back(
         LpMember {
             accepted: true,
@@ -270,7 +271,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "955f17b96f8c9206c5c4f04fd98aff23174263343b70c328d91e510a4be3cc5e",
+        hex, "0129a45e2f485e61d38f2f1703c0a63e78b2d7f196edb8d7328df43cff70ef3e",
         "fx_pool storage layout changed"
     );
 }

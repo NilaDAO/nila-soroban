@@ -102,6 +102,8 @@ pub enum Error {
     TooManyOffers = 27,
     /// The union's USDC (LP-collected plus senior above the floor) does not cover it.
     NoUsdc = 28,
+    /// This Polygon burn was minted on Stellar already (the move).
+    AlreadyMoved = 29,
 }
 
 /// Where a senior investor's USDC comes from (R24, D1): kept per deposit so the pools can be split later.
@@ -192,6 +194,8 @@ pub enum DataKey {
     DayOut(u64),
     /// How far the attester's fix may move from the last one, in bp.
     RateBandBp,
+    /// A Polygon nIN burn already minted on Stellar (the move, M1): its Polygon tx hash.
+    Moved(BytesN<32>),
 }
 
 /// Rupees a leader took in, not yet lent out or settled (R15).
@@ -214,6 +218,18 @@ pub struct CashOut {
     pub union: Address,
     pub amount: i128,
     pub expires: u64,
+}
+
+/// Her Polygon nIN, burned on Polygon, minted to her on Stellar (the move, M1; executive decision 16 Oct).
+#[contractevent]
+pub struct NinMoved {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub member: Address,
+    pub amount: i128,
+    /// The Polygon tx that burned it.
+    pub polygon_burn: BytesN<32>,
 }
 
 #[contractevent]
@@ -994,6 +1010,57 @@ impl FxPoolContract {
         }
         StellarAssetClient::new(&env, &nin_addr(&env)).set_authorized(&account, &authorized);
         Ok(())
+    }
+
+    // ---------- the move (M1) ----------
+
+    /// The move (executive decision, 16 Oct): her Polygon nIN was burned on Polygon (tx
+    /// `polygon_burn`); the attester mints the same amount to her here, once per burn. She
+    /// must hold an attested title in the union (or be a leader), so the oracle burns on
+    /// Polygon only after her title is on Stellar. At most `max_scan` per burn, like a scan.
+    pub fn mint_moved(
+        env: Env,
+        attester: Address,
+        union: Address,
+        member: Address,
+        amount: i128,
+        polygon_burn: BytesN<32>,
+    ) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        attester.require_auth();
+        if !RolesClient::new(&env, &get(&env, &DataKey::Roles)).has_role(&attester, &Role::Attester)
+        {
+            return Err(Error::Unauthorized);
+        }
+        check_amount(&env, amount)?;
+        if !is_member_or_leader(&env, &union, &member) {
+            return Err(Error::NotMember);
+        }
+        let k = DataKey::Moved(polygon_burn.clone());
+        if env.storage().persistent().has(&k) {
+            return Err(Error::AlreadyMoved);
+        }
+        env.storage().persistent().set(&k, &true);
+        bump(&env, &k);
+        // R10: her trustline is authorised only for this mint.
+        let sac = StellarAssetClient::new(&env, &nin_addr(&env));
+        sac.set_authorized(&member, &true);
+        sac.mint(&member, &amount);
+        sac.set_authorized(&member, &false);
+        NinMoved {
+            union,
+            member,
+            amount,
+            polygon_burn,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn moved(env: Env, polygon_burn: BytesN<32>) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::Moved(polygon_burn))
     }
 
     // ---------- member cash-out (D13, R16) ----------

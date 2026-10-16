@@ -2242,3 +2242,52 @@ fn exactly_the_gate_passes_after_interest_raised_the_share_price() {
     c.draw_loan(&fx.union, &her, &tok, &(100 * NIN), &0);
     assert!(c.get_loan(&fx.union, &tok).is_some());
 }
+
+/// The move (M1): her burned Polygon nIN is minted to her once, by the attester, only while
+/// she holds an attested title; her trustline stays deauthorised afterwards (R10).
+#[test]
+fn the_move_mints_her_polygon_nin_once_for_a_member() {
+    let f = setup();
+    let burn = BytesN::from_array(&f.env, &[9; 32]);
+    let stranger = Address::generate(&f.env);
+    assert_eq!(
+        f.fx()
+            .try_mint_moved(&f.attester, &f.union, &stranger, &(77 * 10_000_000), &burn),
+        Err(Ok(nila_fx_pool::Error::NotMember))
+    );
+    assert_eq!(
+        f.fx()
+            .try_mint_moved(&f.leader, &f.union, &f.borrower, &(77 * 10_000_000), &burn),
+        Err(Ok(nila_fx_pool::Error::Unauthorized))
+    );
+    f.fx().mint_moved(
+        &f.attester,
+        &f.union,
+        &f.borrower,
+        &(77 * 10_000_000),
+        &burn,
+    );
+    assert_eq!(f.token().balance(&f.borrower), 77 * 10_000_000);
+    assert!(f.fx().moved(&burn));
+    assert!(!StellarAssetClient::new(&f.env, &f.nin).authorized(&f.borrower));
+    assert_eq!(
+        f.fx().try_mint_moved(
+            &f.attester,
+            &f.union,
+            &f.borrower,
+            &(77 * 10_000_000),
+            &burn
+        ),
+        Err(Ok(nila_fx_pool::Error::AlreadyMoved))
+    );
+    assert_eq!(
+        f.fx().try_mint_moved(
+            &f.attester,
+            &f.union,
+            &f.borrower,
+            &(10_001 * 10_000_000),
+            &BytesN::from_array(&f.env, &[8; 32])
+        ),
+        Err(Ok(nila_fx_pool::Error::CapExceeded))
+    );
+}
