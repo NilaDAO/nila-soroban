@@ -2250,6 +2250,18 @@ fn the_move_mints_her_polygon_nin_once_for_a_member() {
     let f = setup();
     let burn = BytesN::from_array(&f.env, &[9; 32]);
     let stranger = Address::generate(&f.env);
+    // No budget set: nothing can be minted for the move.
+    assert_eq!(
+        f.fx().try_mint_moved(
+            &f.attester,
+            &f.union,
+            &f.borrower,
+            &(77 * 10_000_000),
+            &burn
+        ),
+        Err(Ok(nila_fx_pool::Error::MoveBudget))
+    );
+    f.fx().set_move_budget(&(100 * 10_000_000));
     assert_eq!(
         f.fx()
             .try_mint_moved(&f.attester, &f.union, &stranger, &(77 * 10_000_000), &burn),
@@ -2289,5 +2301,17 @@ fn the_move_mints_her_polygon_nin_once_for_a_member() {
             &BytesN::from_array(&f.env, &[8; 32])
         ),
         Err(Ok(nila_fx_pool::Error::CapExceeded))
+    );
+    // The budget is drawn down: 23 left of 100.
+    assert_eq!(f.fx().move_budget(), 23 * 10_000_000);
+    assert_eq!(
+        f.fx().try_mint_moved(
+            &f.attester,
+            &f.union,
+            &f.borrower,
+            &(24 * 10_000_000),
+            &BytesN::from_array(&f.env, &[7; 32])
+        ),
+        Err(Ok(nila_fx_pool::Error::MoveBudget))
     );
 }

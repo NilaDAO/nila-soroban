@@ -104,6 +104,8 @@ pub enum Error {
     NoUsdc = 28,
     /// This Polygon burn was minted on Stellar already (the move).
     AlreadyMoved = 29,
+    /// The move budget the trust set does not cover this mint.
+    MoveBudget = 30,
 }
 
 /// Where a senior investor's USDC comes from (R24, D1): kept per deposit so the pools can be split later.
@@ -196,6 +198,9 @@ pub enum DataKey {
     RateBandBp,
     /// A Polygon nIN burn already minted on Stellar (the move, M1): its Polygon tx hash.
     Moved(BytesN<32>),
+    /// What the attester may still mint for the move: set by the trust to the members' total
+    /// Polygon nIN at a snapshot (executive decision, 16 Oct); 0 until set.
+    MoveBudget,
 }
 
 /// Rupees a leader took in, not yet lent out or settled (R15).
@@ -1018,6 +1023,25 @@ impl FxPoolContract {
     /// `polygon_burn`); the attester mints the same amount to her here, once per burn. She
     /// must hold an attested title in the union (or be a leader), so the oracle burns on
     /// Polygon only after her title is on Stellar. At most `max_scan` per burn, like a scan.
+    /// The trust sets what the attester may mint for the move in total: the members' Polygon
+    /// nIN at a snapshot (16 Oct). Replaces the remaining budget; 0 closes the move.
+    pub fn set_move_budget(env: Env, budget: i128) -> Result<(), Error> {
+        require_admin(&env)?;
+        if budget < 0 {
+            return Err(Error::AmountZero);
+        }
+        env.storage().instance().set(&DataKey::MoveBudget, &budget);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    pub fn move_budget(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MoveBudget)
+            .unwrap_or(0)
+    }
+
     pub fn mint_moved(
         env: Env,
         attester: Address,
@@ -1040,13 +1064,30 @@ impl FxPoolContract {
         if env.storage().persistent().has(&k) {
             return Err(Error::AlreadyMoved);
         }
+        let budget: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MoveBudget)
+            .unwrap_or(0);
+        if amount > budget {
+            return Err(Error::MoveBudget);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MoveBudget, &(budget - amount));
         env.storage().persistent().set(&k, &true);
         bump(&env, &k);
-        // R10: her trustline is authorised only for this mint.
+        // R10: her trustline is authorised only for this mint, and left as it was.
         let sac = StellarAssetClient::new(&env, &nin_addr(&env));
-        sac.set_authorized(&member, &true);
+        let was = sac.authorized(&member);
+        if !was {
+            sac.set_authorized(&member, &true);
+        }
         sac.mint(&member, &amount);
-        sac.set_authorized(&member, &false);
+        if !was {
+            sac.set_authorized(&member, &false);
+        }
+        bump_instance(&env);
         NinMoved {
             union,
             member,
