@@ -237,6 +237,13 @@ pub struct NinMoved {
     pub polygon_burn: BytesN<32>,
 }
 
+/// The trust changed the move budget: by `delta`, now `budget`.
+#[contractevent]
+pub struct MoveBudgetSet {
+    pub delta: i128,
+    pub budget: i128,
+}
+
 #[contractevent]
 pub struct FundCoreSet {
     pub fund_core: Address,
@@ -1023,16 +1030,24 @@ impl FxPoolContract {
     /// `polygon_burn`); the attester mints the same amount to her here, once per burn. She
     /// must hold an attested title in the union (or be a leader), so the oracle burns on
     /// Polygon only after her title is on Stellar. At most `max_scan` per burn, like a scan.
-    /// The trust sets what the attester may mint for the move in total: the members' Polygon
-    /// nIN at a snapshot (16 Oct). Replaces the remaining budget; 0 closes the move.
-    pub fn set_move_budget(env: Env, budget: i128) -> Result<(), Error> {
+    /// The trust adds to (or, negative, takes back from) what the attester may still mint for
+    /// the move: the members' Polygon nIN at a snapshot (16 Oct), and later batches. Adding,
+    /// never replacing, so moves already minted are never counted twice. Never below zero.
+    pub fn add_move_budget(env: Env, delta: i128) -> Result<i128, Error> {
         require_admin(&env)?;
-        if budget < 0 {
+        let left: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MoveBudget)
+            .unwrap_or(0);
+        let budget = left + delta;
+        if delta == 0 || budget < 0 {
             return Err(Error::AmountZero);
         }
         env.storage().instance().set(&DataKey::MoveBudget, &budget);
+        MoveBudgetSet { delta, budget }.publish(&env);
         bump_instance(&env);
-        Ok(())
+        Ok(budget)
     }
 
     pub fn move_budget(env: Env) -> i128 {

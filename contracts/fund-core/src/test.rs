@@ -2261,7 +2261,12 @@ fn the_move_mints_her_polygon_nin_once_for_a_member() {
         ),
         Err(Ok(nila_fx_pool::Error::MoveBudget))
     );
-    f.fx().set_move_budget(&(100 * 10_000_000));
+    f.fx().add_move_budget(&(150 * 10_000_000));
+    f.fx().add_move_budget(&(-50 * 10_000_000)); // taken back: 100 left
+    assert_eq!(
+        f.fx().try_add_move_budget(&(-101 * 10_000_000)),
+        Err(Ok(nila_fx_pool::Error::AmountZero))
+    );
     assert_eq!(
         f.fx()
             .try_mint_moved(&f.attester, &f.union, &stranger, &(77 * 10_000_000), &burn),
