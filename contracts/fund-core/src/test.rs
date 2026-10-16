@@ -2242,3 +2242,81 @@ fn exactly_the_gate_passes_after_interest_raised_the_share_price() {
     c.draw_loan(&fx.union, &her, &tok, &(100 * NIN), &0);
     assert!(c.get_loan(&fx.union, &tok).is_some());
 }
+
+/// The move (M1): her burned Polygon nIN is minted to her once, by the attester, only while
+/// she holds an attested title; her trustline stays deauthorised afterwards (R10).
+#[test]
+fn the_move_mints_her_polygon_nin_once_for_a_member() {
+    let f = setup();
+    let burn = BytesN::from_array(&f.env, &[9; 32]);
+    let stranger = Address::generate(&f.env);
+    // No budget set: nothing can be minted for the move.
+    assert_eq!(
+        f.fx().try_mint_moved(
+            &f.attester,
+            &f.union,
+            &f.borrower,
+            &(77 * 10_000_000),
+            &burn
+        ),
+        Err(Ok(nila_fx_pool::Error::MoveBudget))
+    );
+    f.fx().add_move_budget(&(150 * 10_000_000));
+    f.fx().add_move_budget(&(-50 * 10_000_000)); // taken back: 100 left
+    assert_eq!(
+        f.fx().try_add_move_budget(&(-101 * 10_000_000)),
+        Err(Ok(nila_fx_pool::Error::AmountZero))
+    );
+    assert_eq!(
+        f.fx()
+            .try_mint_moved(&f.attester, &f.union, &stranger, &(77 * 10_000_000), &burn),
+        Err(Ok(nila_fx_pool::Error::NotMember))
+    );
+    assert_eq!(
+        f.fx()
+            .try_mint_moved(&f.leader, &f.union, &f.borrower, &(77 * 10_000_000), &burn),
+        Err(Ok(nila_fx_pool::Error::Unauthorized))
+    );
+    f.fx().mint_moved(
+        &f.attester,
+        &f.union,
+        &f.borrower,
+        &(77 * 10_000_000),
+        &burn,
+    );
+    assert_eq!(f.token().balance(&f.borrower), 77 * 10_000_000);
+    assert!(f.fx().moved(&burn));
+    assert!(!StellarAssetClient::new(&f.env, &f.nin).authorized(&f.borrower));
+    assert_eq!(
+        f.fx().try_mint_moved(
+            &f.attester,
+            &f.union,
+            &f.borrower,
+            &(77 * 10_000_000),
+            &burn
+        ),
+        Err(Ok(nila_fx_pool::Error::AlreadyMoved))
+    );
+    assert_eq!(
+        f.fx().try_mint_moved(
+            &f.attester,
+            &f.union,
+            &f.borrower,
+            &(10_001 * 10_000_000),
+            &BytesN::from_array(&f.env, &[8; 32])
+        ),
+        Err(Ok(nila_fx_pool::Error::CapExceeded))
+    );
+    // The budget is drawn down: 23 left of 100.
+    assert_eq!(f.fx().move_budget(), 23 * 10_000_000);
+    assert_eq!(
+        f.fx().try_mint_moved(
+            &f.attester,
+            &f.union,
+            &f.borrower,
+            &(24 * 10_000_000),
+            &BytesN::from_array(&f.env, &[7; 32])
+        ),
+        Err(Ok(nila_fx_pool::Error::MoveBudget))
+    );
+}

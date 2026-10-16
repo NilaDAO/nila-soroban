@@ -130,3 +130,6 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
   `Loan(union, loan_id)`, no copy of the borrower or token id, three flags packed into one number, and
   the token id is the loan id. Five union counters became one `Union` entry. Milestones moved to their
   own entry, written only when reported. Redeploy; no upgrade from C5.
+- **C8 (16 Oct, the move):** fx_pool gained two keys, `Moved(BytesN<32>)` (persistent, a Polygon burn
+  already minted on Stellar) and `MoveBudget` (instance, i128: what the attester may still mint for the move). Appended only: existing keys and values encode as before, so a C7 fx_pool
+  can be upgraded in place. The frozen-layout hash changed only because the sample list grew.
