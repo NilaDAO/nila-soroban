@@ -77,6 +77,10 @@ pub struct Quote {
     pub inr_per_usd: i128,
     /// The fix's expiry: a quote after it fails at accept with StaleOracle.
     pub valid_until: u64,
+    /// USDC still allowed out today under the daily cap (a Bring pays out of it).
+    pub day_left: i128,
+    /// USDC the union could pay a Bring now: LP-collected plus senior above the voucher floor.
+    pub usdc_free: i128,
 }
 
 #[contractevent]
@@ -243,15 +247,28 @@ fn day_out(env: &Env) -> i128 {
 
 /// The daily cap on USDC out (R76, C15): 2,500 USDC at launch.
 fn check_day_out(env: &Env, usdc: i128) -> Result<(), Error> {
-    let cap: i128 = env
-        .storage()
-        .instance()
-        .get(&DataKey::DailyCap)
-        .unwrap_or(0);
-    if day_out(env) + usdc > cap {
+    if day_out(env) + usdc > day_cap(env) {
         return Err(Error::CapExceeded);
     }
     Ok(())
+}
+
+/// (LP-collected USDC, senior USDC above the floor) a Bring may use. The floor is the admin's,
+/// but never below the USDC value of senior money fund_core holds back for unclaimed voucher
+/// hours (rounded up, so the floor never sits below the earmark).
+fn bring_room(env: &Env, union: &Address, inr_per_usd: i128) -> Result<(i128, i128), Error> {
+    let lp = p_get(env, &DataKey::LpUsdc(union.clone()));
+    let held = FundCoreClient::new(env, &core_addr(env)?).senior_earmark(union);
+    let held_usdc = (held * RATE_ONE + inr_per_usd - 1) / inr_per_usd;
+    let floor = core::cmp::max(voucher_floor(env, union), held_usdc);
+    Ok((lp, core::cmp::max(0, senior_total(env, union) - floor)))
+}
+
+fn day_cap(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&DataKey::DailyCap)
+        .unwrap_or(0)
 }
 
 fn lp_fee_bp(env: &Env) -> u32 {
@@ -287,6 +304,8 @@ fn price(env: &Env, kind: OfferKind, inr: i128) -> Result<Quote, Error> {
         fee_bp,
         inr_per_usd: rate.inr_per_usd,
         valid_until: rate.valid_until,
+        day_left: 0,
+        usdc_free: 0,
     })
 }
 
@@ -462,14 +481,8 @@ impl FxPoolContract {
                 // LP-collected USDC first, then senior above the floor, domestic before offshore.
                 let u = o.union.clone();
                 let lk = DataKey::LpUsdc(u.clone());
-                let from_lp = core::cmp::min(usdc, p_get(&env, &lk));
-                // The floor is the admin's, but never below the USDC value of senior money
-                // fund_core holds back for unclaimed voucher hours.
-                let held = FundCoreClient::new(&env, &core_addr(&env)?).senior_earmark(&u);
-                // Rounded up: the floor never sits below the earmark.
-                let held_usdc = (held * RATE_ONE + q.inr_per_usd - 1) / q.inr_per_usd;
-                let floor = core::cmp::max(voucher_floor(&env, &u), held_usdc);
-                let senior_free = core::cmp::max(0, senior_total(&env, &u) - floor);
+                let (lp_free, senior_free) = bring_room(&env, &u, q.inr_per_usd)?;
+                let from_lp = core::cmp::min(usdc, lp_free);
                 check_day_out(&env, usdc)?;
                 let need = usdc - from_lp;
                 if need > senior_free {
@@ -624,11 +637,16 @@ impl FxPoolContract {
         voucher_floor(&env, &union)
     }
 
-    /// C9: what a Bring or Collect of `inr` rupees pays or takes at today's fix (SEP-38 reads it).
-    /// The same numbers `accept` fixes on the offer, as long as the fix and the fee do not change.
-    pub fn quote(env: Env, kind: OfferKind, inr: i128) -> Result<Quote, Error> {
+    /// C9: what a Bring or Collect of `inr` rupees pays or takes at today's fix (SEP-38 reads it),
+    /// with the day cap and the union's free USDC left. The same price `accept` fixes while the fix
+    /// and the fee stay; accept may still refuse (pause, offer state, cap, USDC left).
+    pub fn quote(env: Env, union: Address, kind: OfferKind, inr: i128) -> Result<Quote, Error> {
         check_amount(&env, inr)?;
-        price(&env, kind, inr)
+        let mut q = price(&env, kind, inr)?;
+        q.day_left = core::cmp::max(0, day_cap(&env) - day_out(&env));
+        let (lp_free, senior_free) = bring_room(&env, &union, q.inr_per_usd)?;
+        q.usdc_free = lp_free + senior_free;
+        Ok(q)
     }
 
     pub fn lp_fee(env: Env) -> u32 {

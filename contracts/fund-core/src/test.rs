@@ -1574,7 +1574,7 @@ fn quote_matches_what_accept_fixes() {
     assert_eq!(f.lp_fee(), 100);
 
     // C9: SEP-38 reads the same numbers accept fixes on the offer.
-    let qc = f.quote(&OfferKind::Collect, &(950 * NIN));
+    let qc = f.quote(&fx.union, &OfferKind::Collect, &(950 * NIN));
     assert_eq!((qc.usdc, qc.fee, qc.fee_bp), (99_000_000, 1_000_000, 100));
     assert_eq!((qc.inr_per_usd, qc.valid_until), (95 * NIN, T0 + 86_400));
     let c = f.post_offer(
@@ -1585,26 +1585,34 @@ fn quote_matches_what_accept_fixes() {
         &(T0 + 3_600),
     );
     assert_eq!(f.accept(&lp, &c, &s24, &q), qc.usdc);
-    let qb = f.quote(&OfferKind::Bring, &(475 * NIN));
+    // Nothing collected yet and no senior USDC: a Bring has no USDC to pay from.
+    assert_eq!(qc.usdc_free, 0);
+    assert_eq!(qc.day_left, f.daily_cap());
+    f.confirm(&fx.leader, &c);
+    let qb = f.quote(&fx.union, &OfferKind::Bring, &(475 * NIN));
     assert_eq!((qb.usdc, qb.fee), (50_500_000, 500_000));
+    assert_eq!(qb.usdc_free, 99_000_000);
 
     // The fee follows set_lp_fee; amounts outside the scan cap are refused like post_offer.
     f.set_lp_fee(&200);
     assert_eq!(f.lp_fee(), 200);
-    assert_eq!(f.quote(&OfferKind::Bring, &(475 * NIN)).usdc, 51_000_000);
     assert_eq!(
-        f.try_quote(&OfferKind::Bring, &0),
+        f.quote(&fx.union, &OfferKind::Bring, &(475 * NIN)).usdc,
+        51_000_000
+    );
+    assert_eq!(
+        f.try_quote(&fx.union, &OfferKind::Bring, &0),
         Err(Ok(FxError::AmountZero))
     );
     assert_eq!(
-        f.try_quote(&OfferKind::Bring, &(10_001 * NIN)),
+        f.try_quote(&fx.union, &OfferKind::Bring, &(10_001 * NIN)),
         Err(Ok(FxError::CapExceeded))
     );
 
     // After the fix expires there is no quote, and no accept.
     fx.at(T0 + 86_401);
     assert_eq!(
-        f.try_quote(&OfferKind::Collect, &(950 * NIN)),
+        f.try_quote(&fx.union, &OfferKind::Collect, &(950 * NIN)),
         Err(Ok(FxError::StaleOracle))
     );
 }
