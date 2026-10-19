@@ -169,6 +169,11 @@ fn setup() -> Fx {
     // R8: fx_pool is the nIN SAC admin and authorises the two contract balances.
     StellarAssetClient::new(&env, &nin).set_admin(&fx_id);
     FxPoolContractClient::new(&env, &fx_id).activate();
+    // C9b: the anchor's swap key signs each LP accept.
+    FxPoolContractClient::new(&env, &fx_id).set_swap_key(&BytesN::from_array(
+        &env,
+        &swap_key().verifying_key().to_bytes(),
+    ));
 
     let fx = Fx {
         env,
@@ -1519,6 +1524,56 @@ impl Fx {
     }
 }
 
+/// The anchor's swap key in the tests (C9b): signs each accept like nila-anchor does.
+fn swap_key() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[9u8; 32])
+}
+
+type TryAcc = Result<Result<i128, soroban_sdk::Error>, Result<FxError, soroban_sdk::InvokeError>>;
+
+impl Fx {
+    /// The anchor's signature for an accept at today's quote (0 USDC when there is no quote).
+    fn signed(&self, lp: &Address, id: u64, s24: &SString, q: &SString) -> (i128, u64, BytesN<64>) {
+        use ed25519_dalek::Signer;
+        use soroban_sdk::xdr::ToXdr;
+        let f = self.fx();
+        let o = f.offer(&id).unwrap();
+        let usdc = f
+            .try_quote(&o.union, &o.kind, &o.inr)
+            .ok()
+            .and_then(|r| r.ok())
+            .map(|q| q.usdc)
+            .unwrap_or(0);
+        let until = self.env.ledger().timestamp() + 600;
+        let mut msg = soroban_sdk::Bytes::from_slice(&self.env, nila_fx_pool::ACCEPT_PREFIX);
+        msg.append(
+            &(
+                self.fx_id.clone(),
+                id,
+                lp.clone(),
+                s24.clone(),
+                q.clone(),
+                usdc,
+                until,
+            )
+                .to_xdr(&self.env),
+        );
+        let raw: std::vec::Vec<u8> = msg.iter().collect();
+        let sig = swap_key().sign(&raw).to_bytes();
+        (usdc, until, BytesN::from_array(&self.env, &sig))
+    }
+
+    fn acc(&self, lp: &Address, id: &u64, s24: &SString, q: &SString) -> i128 {
+        let (usdc, until, sig) = self.signed(lp, *id, s24, q);
+        self.fx().accept(lp, id, s24, q, &usdc, &until, &sig)
+    }
+
+    fn try_acc(&self, lp: &Address, id: &u64, s24: &SString, q: &SString) -> TryAcc {
+        let (usdc, until, sig) = self.signed(lp, *id, s24, q);
+        self.fx().try_accept(lp, id, s24, q, &usdc, &until, &sig)
+    }
+}
+
 #[test]
 fn collect_then_bring_through_an_lp() {
     let fx = setup();
@@ -1536,7 +1591,7 @@ fn collect_then_bring_through_an_lp() {
         &(950 * NIN),
         &(T0 + 3_600),
     );
-    assert_eq!(f.accept(&lp, &c, &s24, &q), 99_000_000);
+    assert_eq!(fx.acc(&lp, &c, &s24, &q), 99_000_000);
     let hand = f.cash_at_hand(&fx.union);
     assert_eq!(f.confirm(&fx.leader, &c), 99_000_000);
     assert_eq!(usdc.balance(&lp), 50 * NIN - 99_000_000);
@@ -1552,7 +1607,7 @@ fn collect_then_bring_through_an_lp() {
         &(475 * NIN),
         &(T0 + 3_600),
     );
-    assert_eq!(f.accept(&lp, &b, &s24, &q), 50_500_000);
+    assert_eq!(fx.acc(&lp, &b, &s24, &q), 50_500_000);
     assert_eq!(f.lp_usdc(&fx.union), 99_000_000 - 50_500_000);
     f.confirm(&fx.leader, &b);
     assert_eq!(usdc.balance(&lp), 50 * NIN - 99_000_000 + 50_500_000);
@@ -1562,6 +1617,59 @@ fn collect_then_bring_through_an_lp() {
     assert_eq!(fx.token().balance(&lp), 0);
     fx.assert_fx_empty();
     fx.assert_conserved();
+}
+
+#[test]
+fn quote_matches_what_accept_fixes() {
+    let fx = setup();
+    let f = fx.fx();
+    let (_anchor, lp) = fx.lp_ready();
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&lp, &(50 * NIN));
+    let (s24, q) = fx.ids();
+    assert_eq!(f.lp_fee(), 100);
+
+    // C9: SEP-38 reads the same numbers accept fixes on the offer.
+    let qc = f.quote(&fx.union, &OfferKind::Collect, &(950 * NIN));
+    assert_eq!((qc.usdc, qc.fee, qc.fee_bp), (99_000_000, 1_000_000, 100));
+    assert_eq!((qc.inr_per_usd, qc.valid_until), (95 * NIN, T0 + 86_400));
+    let c = f.post_offer(
+        &fx.leader,
+        &fx.union,
+        &OfferKind::Collect,
+        &(950 * NIN),
+        &(T0 + 3_600),
+    );
+    assert_eq!(fx.acc(&lp, &c, &s24, &q), qc.usdc);
+    // Nothing collected yet and no senior USDC: a Bring has no USDC to pay from.
+    assert_eq!(qc.usdc_free, 0);
+    assert_eq!(qc.day_left, f.daily_cap());
+    f.confirm(&fx.leader, &c);
+    let qb = f.quote(&fx.union, &OfferKind::Bring, &(475 * NIN));
+    assert_eq!((qb.usdc, qb.fee), (50_500_000, 500_000));
+    assert_eq!(qb.usdc_free, 99_000_000);
+
+    // The fee follows set_lp_fee; amounts outside the scan cap are refused like post_offer.
+    f.set_lp_fee(&200);
+    assert_eq!(f.lp_fee(), 200);
+    assert_eq!(
+        f.quote(&fx.union, &OfferKind::Bring, &(475 * NIN)).usdc,
+        51_000_000
+    );
+    assert_eq!(
+        f.try_quote(&fx.union, &OfferKind::Bring, &0),
+        Err(Ok(FxError::AmountZero))
+    );
+    assert_eq!(
+        f.try_quote(&fx.union, &OfferKind::Bring, &(10_001 * NIN)),
+        Err(Ok(FxError::CapExceeded))
+    );
+
+    // After the fix expires there is no quote, and no accept.
+    fx.at(T0 + 86_401);
+    assert_eq!(
+        f.try_quote(&fx.union, &OfferKind::Collect, &(950 * NIN)),
+        Err(Ok(FxError::StaleOracle))
+    );
 }
 
 #[test]
@@ -1586,7 +1694,7 @@ fn bring_draws_senior_usdc_only_above_the_voucher_floor() {
         &(T0 + 3_600),
     );
     assert_eq!(
-        f.try_accept(&lp, &big, &s24, &q),
+        fx.try_acc(&lp, &big, &s24, &q),
         Err(Ok(FxError::BelowVoucherFloor))
     );
     // Only 10 USDC are free above the floor: ₹950 (10.1 USDC with the fee) is refused, ₹900 fits.
@@ -1598,7 +1706,7 @@ fn bring_draws_senior_usdc_only_above_the_voucher_floor() {
         &(T0 + 3_600),
     );
     assert_eq!(
-        f.try_accept(&lp, &mid, &s24, &q),
+        fx.try_acc(&lp, &mid, &s24, &q),
         Err(Ok(FxError::BelowVoucherFloor))
     );
     let ok = f.post_offer(
@@ -1608,7 +1716,7 @@ fn bring_draws_senior_usdc_only_above_the_voucher_floor() {
         &(900 * NIN),
         &(T0 + 3_600),
     );
-    let paid = f.accept(&lp, &ok, &s24, &q);
+    let paid = fx.acc(&lp, &ok, &s24, &q);
     let o = f.offer(&ok).unwrap();
     assert_eq!((o.from_lp, o.from_domestic, o.from_offshore), (0, 0, paid));
     assert_eq!(f.senior_usdc(&fx.union, &Tag::Offshore), 100 * NIN - paid);
@@ -1622,7 +1730,7 @@ fn bring_draws_senior_usdc_only_above_the_voucher_floor() {
         &(900 * NIN),
         &(T0 + 3_600),
     );
-    f.accept(&lp, &again, &s24, &q);
+    fx.acc(&lp, &again, &s24, &q);
     assert_eq!(f.try_expire_offer(&again), Err(Ok(FxError::NotExpired)));
     fx.at(T0 + 3_600);
     assert_eq!(
@@ -1663,7 +1771,7 @@ fn only_member_lps_accepted_by_the_anchor() {
         &(T0 + 3_600),
     );
     assert_eq!(
-        f.try_accept(&fx.borrower, &c, &s24, &q),
+        fx.try_acc(&fx.borrower, &c, &s24, &q),
         Err(Ok(FxError::NotLp))
     );
     // Only a leader posts and confirms; offers are capped at ₹10,000 and 7 days.
@@ -1699,10 +1807,10 @@ fn only_member_lps_accepted_by_the_anchor() {
         &(95 * NIN),
         &(T0 + 3_600),
     );
-    assert_eq!(f.try_accept(&lp, &b, &s24, &q), Err(Ok(FxError::NoUsdc)));
+    assert_eq!(fx.try_acc(&lp, &b, &s24, &q), Err(Ok(FxError::NoUsdc)));
     // A dropped LP cannot accept.
     f.set_lp(&fx.union, &lp, &false, &loan_id(&fx.env, 1));
-    assert_eq!(f.try_accept(&lp, &c, &s24, &q), Err(Ok(FxError::NotLp)));
+    assert_eq!(fx.try_acc(&lp, &c, &s24, &q), Err(Ok(FxError::NotLp)));
 }
 
 #[test]
@@ -1720,12 +1828,22 @@ fn collect_accept_needs_only_the_lp_signature() {
         &(T0 + 3_600),
     );
     let expiry_ledger = fx.env.ledger().sequence() + (3_600 / 5 + 1) as u32;
+    let (usdc, until, sig) = fx.signed(&lp, c, &s24, &q);
     fx.env.mock_auths(&[MockAuth {
         address: &lp,
         invoke: &MockAuthInvoke {
             contract: &fx.fx_id,
             fn_name: "accept",
-            args: (lp.clone(), c, s24.clone(), q.clone()).into_val(&fx.env),
+            args: (
+                lp.clone(),
+                c,
+                s24.clone(),
+                q.clone(),
+                usdc,
+                until,
+                sig.clone(),
+            )
+                .into_val(&fx.env),
             sub_invokes: &[MockAuthInvoke {
                 contract: &fx.usdc,
                 fn_name: "approve",
@@ -1735,7 +1853,7 @@ fn collect_accept_needs_only_the_lp_signature() {
             }],
         },
     }]);
-    f.accept(&lp, &c, &s24, &q);
+    f.accept(&lp, &c, &s24, &q, &usdc, &until, &sig);
     fx.env.mock_all_auths();
     assert_eq!(
         TokenClient::new(&fx.env, &fx.usdc).allowance(&lp, &fx.fx_id),
@@ -2109,7 +2227,7 @@ fn bring_respects_the_daily_cap_and_the_voucher_earmark() {
         &(T0 + 3_600),
     );
     assert_eq!(
-        f.try_accept(&v.owner, &b, &s24, &q),
+        fx.try_acc(&v.owner, &b, &s24, &q),
         Err(Ok(FxError::BelowVoucherFloor))
     );
     // ₹150 → 3.03 USDC fits in the 4 free.
@@ -2120,7 +2238,7 @@ fn bring_respects_the_daily_cap_and_the_voucher_earmark() {
         &(150 * NIN),
         &(T0 + 3_600),
     );
-    f.accept(&v.owner, &ok, &s24, &q);
+    fx.acc(&v.owner, &ok, &s24, &q);
     // The daily cap: set it below the payout and the confirm is refused.
     f.set_daily_cap(&NIN);
     assert_eq!(
@@ -2196,7 +2314,7 @@ fn repaid_cash_goes_out_by_collect_and_a_loan_comes_in_by_bring() {
         &(1_900 * NIN),
         &(T0 + 3_600),
     );
-    f.accept(&lp, &col, &s24, &q);
+    fx.acc(&lp, &col, &s24, &q);
     f.confirm(&fx.leader, &col);
     assert_eq!(f.cash_at_hand(&fx.union), 100 * NIN);
     // Later a member wants 950 in cash and the drawer is short: an LP brings it.
@@ -2207,7 +2325,7 @@ fn repaid_cash_goes_out_by_collect_and_a_loan_comes_in_by_bring() {
         &(950 * NIN),
         &(T0 + 3_600),
     );
-    f.accept(&lp, &br, &s24, &q);
+    fx.acc(&lp, &br, &s24, &q);
     f.confirm(&fx.leader, &br);
     // Her rupees are cash at hand until the draw hands them out.
     assert_eq!(f.cash_at_hand(&fx.union), 1_050 * NIN);
@@ -2318,5 +2436,70 @@ fn the_move_mints_her_polygon_nin_once_for_a_member() {
             &BytesN::from_array(&f.env, &[7; 32])
         ),
         Err(Ok(nila_fx_pool::Error::MoveBudget))
+    );
+}
+
+#[test]
+fn accept_needs_the_anchors_signed_quote() {
+    let fx = setup();
+    let f = fx.fx();
+    let (_anchor, lp) = fx.lp_ready();
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&lp, &(50 * NIN));
+    let (s24, q) = fx.ids();
+    let c = f.post_offer(
+        &fx.leader,
+        &fx.union,
+        &OfferKind::Collect,
+        &(950 * NIN),
+        &(T0 + 3_600),
+    );
+    let (usdc, until, sig) = fx.signed(&lp, c, &s24, &q);
+    // Another SEP-24 id, another USDC amount or another LP than the anchor signed: the signature
+    // does not verify (a host trap, not a contract error code).
+    let other = SString::from_str(&fx.env, "sep24-other");
+    assert!(matches!(
+        f.try_accept(&lp, &c, &other, &q, &usdc, &until, &sig),
+        Err(Err(_))
+    ));
+    assert!(matches!(
+        f.try_accept(&lp, &c, &s24, &q, &(usdc + 1), &until, &sig),
+        Err(Err(_))
+    ));
+    f.set_lp(&fx.union, &fx.borrower, &true, &loan_id(&fx.env, 0x4D));
+    assert!(matches!(
+        f.try_accept(&fx.borrower, &c, &s24, &q, &usdc, &until, &sig),
+        Err(Err(_))
+    ));
+    // A rotated key voids the signature; the right key works again.
+    f.set_swap_key(&BytesN::from_array(&fx.env, &[1u8; 32]));
+    assert!(matches!(
+        f.try_accept(&lp, &c, &s24, &q, &usdc, &until, &sig),
+        Err(Err(_))
+    ));
+    f.set_swap_key(&BytesN::from_array(
+        &fx.env,
+        &swap_key().verifying_key().to_bytes(),
+    ));
+    // The quote ran out.
+    fx.at(until + 1);
+    assert_eq!(
+        f.try_accept(&lp, &c, &s24, &q, &usdc, &until, &sig),
+        Err(Ok(FxError::QuoteExpired))
+    );
+    fx.at(T0);
+    // The fix moved after the anchor quoted: the signed USDC no longer matches.
+    f.override_rate(&(96 * NIN), &(T0 + 86_400));
+    assert_eq!(
+        f.try_accept(&lp, &c, &s24, &q, &usdc, &until, &sig),
+        Err(Ok(FxError::QuoteChanged))
+    );
+    // A fresh signed quote goes through; the offer keeps the anchor's ids.
+    let at96 = f.quote(&fx.union, &OfferKind::Collect, &(950 * NIN)).usdc;
+    assert!(at96 < usdc);
+    assert_eq!(fx.acc(&lp, &c, &s24, &q), at96);
+    assert_eq!(f.offer(&c).unwrap().sep24_id, s24);
+    assert_eq!(
+        f.swap_key().unwrap().to_array(),
+        swap_key().verifying_key().to_bytes()
     );
 }

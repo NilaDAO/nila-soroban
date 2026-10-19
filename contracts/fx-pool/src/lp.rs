@@ -12,10 +12,16 @@
 //!   USDC approve that lapses at the offer's expiry (R23). On the scan the union takes her USDC
 //!   (less her fee) and she takes the rupees, which leave the union's cash at hand.
 //! - Each accepted offer stores the anchor's SEP-24 transaction id and the SEP-38 quote id (R23).
+//!   `accept` needs the anchor's signature over them (C9b): fx_pool pays an LP only for a swap the
+//!   anchor recorded (C16), and only at the USDC the anchor quoted, before the quote runs out.
 //! - A no-show costs nothing: the offer expires and any reservation or approve lapses.
 
 use super::*;
-use soroban_sdk::String;
+use soroban_sdk::{xdr::ToXdr, String};
+
+/// What the anchor's swap key signs for one accept (C9b): this prefix, then the XDR of
+/// (fx_pool, offer_id, lp, sep24_id, quote_id, usdc, valid_until).
+pub const ACCEPT_PREFIX: &[u8] = b"nila-lp-accept-v1";
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,6 +69,29 @@ pub struct Offer {
     pub from_lp: i128,
     pub from_domestic: i128,
     pub from_offshore: i128,
+}
+
+/// What an offer pays or takes at today's fix (C9): the anchor's SEP-38 price reads it.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Quote {
+    /// USDC paid to her (Bring, fee added) or taken from her (Collect, fee taken off).
+    pub usdc: i128,
+    /// Her fee in USDC.
+    pub fee: i128,
+    pub fee_bp: u32,
+    pub inr_per_usd: i128,
+    /// The fix's expiry: a quote after it fails at accept with StaleOracle.
+    pub valid_until: u64,
+    /// USDC still allowed out today under the daily cap (a Bring pays out of it).
+    pub day_left: i128,
+    /// USDC the union could pay a Bring now: LP-collected plus senior above the voucher floor.
+    pub usdc_free: i128,
+}
+
+#[contractevent]
+pub struct SwapKeySet {
+    pub key: BytesN<32>,
 }
 
 #[contractevent]
@@ -229,15 +258,66 @@ fn day_out(env: &Env) -> i128 {
 
 /// The daily cap on USDC out (R76, C15): 2,500 USDC at launch.
 fn check_day_out(env: &Env, usdc: i128) -> Result<(), Error> {
-    let cap: i128 = env
-        .storage()
-        .instance()
-        .get(&DataKey::DailyCap)
-        .unwrap_or(0);
-    if day_out(env) + usdc > cap {
+    if day_out(env) + usdc > day_cap(env) {
         return Err(Error::CapExceeded);
     }
     Ok(())
+}
+
+/// (LP-collected USDC, senior USDC above the floor) a Bring may use. The floor is the admin's,
+/// but never below the USDC value of senior money fund_core holds back for unclaimed voucher
+/// hours (rounded up, so the floor never sits below the earmark).
+fn bring_room(env: &Env, union: &Address, inr_per_usd: i128) -> Result<(i128, i128), Error> {
+    let lp = p_get(env, &DataKey::LpUsdc(union.clone()));
+    let held = FundCoreClient::new(env, &core_addr(env)?).senior_earmark(union);
+    let held_usdc = (held * RATE_ONE + inr_per_usd - 1) / inr_per_usd;
+    let floor = core::cmp::max(voucher_floor(env, union), held_usdc);
+    Ok((lp, core::cmp::max(0, senior_total(env, union) - floor)))
+}
+
+fn day_cap(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&DataKey::DailyCap)
+        .unwrap_or(0)
+}
+
+fn lp_fee_bp(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::LpFeeBp)
+        .unwrap_or(DEFAULT_LP_FEE_BP)
+}
+
+/// The USDC for `inr` rupees at the attester's fix, with her fee (same maths in `accept` and `quote`).
+fn price(env: &Env, kind: OfferKind, inr: i128) -> Result<Quote, Error> {
+    let rate: RateFix = env
+        .storage()
+        .instance()
+        .get(&DataKey::Rate)
+        .ok_or(Error::StaleOracle)?;
+    if env.ledger().timestamp() > rate.valid_until {
+        return Err(Error::StaleOracle);
+    }
+    let base = inr
+        .checked_mul(RATE_ONE)
+        .map(|v| v / rate.inr_per_usd)
+        .ok_or(Error::CapExceeded)?;
+    let fee_bp = lp_fee_bp(env);
+    let fee = base * i128::from(fee_bp) / 10_000;
+    let usdc = match kind {
+        OfferKind::Bring => base + fee,
+        OfferKind::Collect => base - fee,
+    };
+    Ok(Quote {
+        usdc,
+        fee,
+        fee_bp,
+        inr_per_usd: rate.inr_per_usd,
+        valid_until: rate.valid_until,
+        day_left: 0,
+        usdc_free: 0,
+    })
 }
 
 fn is_lp(env: &Env, union: &Address, lp: &Address) -> bool {
@@ -292,6 +372,16 @@ impl FxPoolContract {
             accepted,
         }
         .publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// C9b: the anchor's swap key (ed25519), apart from the anchor account that accepts LPs.
+    /// Rotating it voids every signature not yet used.
+    pub fn set_swap_key(env: Env, key: BytesN<32>) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::SwapKey, &key);
+        SwapKeySet { key }.publish(&env);
         bump_instance(&env);
         Ok(())
     }
@@ -385,14 +475,21 @@ impl FxPoolContract {
         Ok(id)
     }
 
-    /// A2: an LP of the union accepts at the attester's fix (the rate is fixed now). A Bring
+    /// A2: an LP of the union accepts at the attester's fix (the rate is fixed now), with the anchor's
+    /// signed quote (C9b): NotAnchor without a swap key, QuoteExpired after `valid_until`,
+    /// QuoteChanged when today's price no longer gives `usdc`; a bad signature traps (host error,
+    /// no contract error code). A Bring
     /// reserves the union's USDC; a Collect has her approve her USDC until the offer expires.
+    #[allow(clippy::too_many_arguments)]
     pub fn accept(
         env: Env,
         lp: Address,
         offer_id: u64,
         sep24_id: String,
         quote_id: String,
+        usdc: i128,
+        valid_until: u64,
+        sig: BytesN<64>,
     ) -> Result<i128, Error> {
         require_not_paused(&env)?;
         lp.require_auth();
@@ -404,40 +501,42 @@ impl FxPoolContract {
         if !is_lp(&env, &o.union, &lp) {
             return Err(Error::NotLp);
         }
-        let rate: RateFix = env
+        // C16: only a swap the anchor recorded, at the USDC it quoted, before the quote runs out.
+        let key: BytesN<32> = env
             .storage()
             .instance()
-            .get(&DataKey::Rate)
-            .ok_or(Error::StaleOracle)?;
-        if now > rate.valid_until {
-            return Err(Error::StaleOracle);
+            .get(&DataKey::SwapKey)
+            .ok_or(Error::NotAnchor)?;
+        if now > valid_until {
+            return Err(Error::QuoteExpired);
         }
-        let base = o
-            .inr
-            .checked_mul(RATE_ONE)
-            .map(|v| v / rate.inr_per_usd)
-            .ok_or(Error::CapExceeded)?;
-        let fee_bp: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::LpFeeBp)
-            .unwrap_or(DEFAULT_LP_FEE_BP);
-        let fee = base * i128::from(fee_bp) / 10_000;
+        let mut msg = Bytes::from_slice(&env, ACCEPT_PREFIX);
+        msg.append(
+            &(
+                env.current_contract_address(),
+                offer_id,
+                lp.clone(),
+                sep24_id.clone(),
+                quote_id.clone(),
+                usdc,
+                valid_until,
+            )
+                .to_xdr(&env),
+        );
+        env.crypto().ed25519_verify(&key, &msg, &sig);
+        let q = price(&env, o.kind, o.inr)?;
+        if q.usdc != usdc {
+            return Err(Error::QuoteChanged);
+        }
         let usdc_addr: Address = get(&env, &DataKey::Usdc);
         match o.kind {
             OfferKind::Bring => {
-                let usdc = base + fee;
+                let usdc = q.usdc;
                 // LP-collected USDC first, then senior above the floor, domestic before offshore.
                 let u = o.union.clone();
                 let lk = DataKey::LpUsdc(u.clone());
-                let from_lp = core::cmp::min(usdc, p_get(&env, &lk));
-                // The floor is the admin's, but never below the USDC value of senior money
-                // fund_core holds back for unclaimed voucher hours.
-                let held = FundCoreClient::new(&env, &core_addr(&env)?).senior_earmark(&u);
-                // Rounded up: the floor never sits below the earmark.
-                let held_usdc = (held * RATE_ONE + rate.inr_per_usd - 1) / rate.inr_per_usd;
-                let floor = core::cmp::max(voucher_floor(&env, &u), held_usdc);
-                let senior_free = core::cmp::max(0, senior_total(&env, &u) - floor);
+                let (lp_free, senior_free) = bring_room(&env, &u, q.inr_per_usd)?;
+                let from_lp = core::cmp::min(usdc, lp_free);
                 check_day_out(&env, usdc)?;
                 let need = usdc - from_lp;
                 if need > senior_free {
@@ -460,7 +559,7 @@ impl FxPoolContract {
                 o.from_offshore = from_offshore;
             }
             OfferKind::Collect => {
-                let usdc = base - fee;
+                let usdc = q.usdc;
                 let ledgers = ((o.expires - now) / LEDGER_SECONDS + 1) as u32;
                 TokenClient::new(&env, &usdc_addr).approve(
                     &lp,
@@ -473,7 +572,7 @@ impl FxPoolContract {
         }
         o.state = OfferState::Accepted;
         o.lp = Some(lp.clone());
-        o.inr_per_usd = rate.inr_per_usd;
+        o.inr_per_usd = q.inr_per_usd;
         o.sep24_id = sep24_id.clone();
         o.quote_id = quote_id.clone();
         save_offer(&env, offer_id, &o);
@@ -482,7 +581,7 @@ impl FxPoolContract {
             offer_id,
             lp,
             usdc: o.usdc,
-            inr_per_usd: rate.inr_per_usd,
+            inr_per_usd: q.inr_per_usd,
             sep24_id,
             quote_id,
         }
@@ -590,6 +689,26 @@ impl FxPoolContract {
 
     pub fn voucher_floor(env: Env, union: Address) -> i128 {
         voucher_floor(&env, &union)
+    }
+
+    /// C9: what a Bring or Collect of `inr` rupees pays or takes at today's fix (SEP-38 reads it),
+    /// with the day cap and the union's free USDC left. The same price `accept` fixes while the fix
+    /// and the fee stay; accept may still refuse (pause, offer state, cap, USDC left).
+    pub fn quote(env: Env, union: Address, kind: OfferKind, inr: i128) -> Result<Quote, Error> {
+        check_amount(&env, inr)?;
+        let mut q = price(&env, kind, inr)?;
+        q.day_left = core::cmp::max(0, day_cap(&env) - day_out(&env));
+        let (lp_free, senior_free) = bring_room(&env, &union, q.inr_per_usd)?;
+        q.usdc_free = lp_free + senior_free;
+        Ok(q)
+    }
+
+    pub fn swap_key(env: Env) -> Option<BytesN<32>> {
+        env.storage().instance().get(&DataKey::SwapKey)
+    }
+
+    pub fn lp_fee(env: Env) -> u32 {
+        lp_fee_bp(&env)
     }
 
     pub fn anchor(env: Env) -> Option<Address> {

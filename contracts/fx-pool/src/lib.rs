@@ -14,9 +14,11 @@
 //! - Senior route (Nov 7): a senior investor the trust accepted deposits USDC, which stays
 //!   on-chain as the guarantee behind vouchers; nIN is minted at the
 //!   attester's INR/USD fix into fund_core's senior pool; every deposit is tagged offshore or
-//!   domestic (R24, R46, R77). No USDC goes out yet: senior payouts are T2 (X15).
+//!   domestic (R24, R46, R77). Senior payouts (unbond, claim) are T2 (X15); senior USDC above the
+//!   voucher floor can pay a Bring.
 //!
-//! LP offers, Reflector and the anchor (R18–R23) are T2.
+//! - LP offers (C5b, Nov 7, `lp.rs`): Bring and Collect through member LPs the anchor accepted
+//!   (R18–R23); `quote` gives the SEP-38 price (C9). Reflector is later (R77).
 
 use nila_common::{bump_instance, upgrade, FundCoreClient, LandTitleClient, Role, RolesClient};
 use soroban_sdk::{
@@ -106,6 +108,10 @@ pub enum Error {
     AlreadyMoved = 29,
     /// The move budget the trust set does not cover this mint.
     MoveBudget = 30,
+    /// The anchor's signed quote no longer matches what the offer pays or takes (C9b).
+    QuoteChanged = 31,
+    /// The anchor's signed quote has run out (C9b).
+    QuoteExpired = 32,
 }
 
 /// Where a senior investor's USDC comes from (R24, D1): kept per deposit so the pools can be split later.
@@ -119,7 +125,7 @@ pub enum Tag {
 
 /// The trust's acceptance of a senior investor: global or domestic, never a member. `kyc_ref`
 /// points at the KYC record kept off-chain; no personal data on-chain (C17). Not an LP: an LP
-/// is a member who swaps cash for USDC for a fee and never lends (executive decision, 12 Oct; T2).
+/// is a member who swaps cash for USDC for a fee and never lends (executive decision, 12 Oct; LP offers in `lp.rs`).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SeniorInvestor {
@@ -201,6 +207,8 @@ pub enum DataKey {
     /// What the attester may still mint for the move: set by the trust to the members' total
     /// Polygon nIN at a snapshot (executive decision, 16 Oct); 0 until set.
     MoveBudget,
+    /// The anchor's swap key (ed25519 public key): it signs each LP accept (C9b, C16). Instance.
+    SwapKey,
 }
 
 /// Rupees a leader took in, not yet lent out or settled (R15).
@@ -654,7 +662,7 @@ impl FxPoolContract {
         Ok(())
     }
 
-    /// USDC out per day (R76); used once USDC moves (T2).
+    /// USDC out per day (R76): caps what Bring offers pay out.
     pub fn set_daily_cap(env: Env, cap: i128) -> Result<(), Error> {
         require_admin(&env)?;
         env.storage().instance().set(&DataKey::DailyCap, &cap);
@@ -1329,7 +1337,7 @@ impl FxPoolContract {
 }
 
 mod lp;
-pub use lp::{LpMember, Offer, OfferKind, OfferState};
+pub use lp::{LpMember, Offer, OfferKind, OfferState, Quote, ACCEPT_PREFIX};
 
 #[cfg(test)]
 mod test;

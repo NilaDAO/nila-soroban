@@ -81,8 +81,14 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
       the trust account.
 - [ ] The nIN SAC `admin` = fx_pool. The issuer has master weight 0 and no other signers.
 - [ ] fx_pool `fund_core` and fund_core `fx_pool` point at each other.
-- [ ] `is_paused` = false. `max_scan` = 10,000 nIN. `daily_cap` is stored but **not enforced**
-      in T1 (it caps USDC out, which is T2).
+- [ ] `is_paused` = false. `max_scan` = 10,000 nIN. `daily_cap` = 2,500 USDC: it caps the USDC
+      Bring offers pay out in a day.
+- [ ] LP offers: `anchor` = the trust's anchor account (nila-anchor), `lp_fee` = 100 (1%),
+      `voucher_floor` per union as decided.
+- [ ] `swap_key` = the anchor's swap key (C9b; `set_swap_key`, admin). Without it every LP accept is
+      refused (NotAnchor), also right after the C8 → C9b upgrade. The swap key is apart from the
+      anchor account's key: the business server holds only the swap key, the anchor key stays with
+      the trust operator (nila-anchor docs/A0.md).
 - [ ] The on-chain wasm (`stellar contract fetch`) sha256 equals the recorded build hash, for
       each contract.
 - [ ] One small end-to-end run per union, with real people:
@@ -147,9 +153,9 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     more signers than the threshold, hardware keys kept apart and a written key-loss
     procedure. No contract `set_admin`.
 - Q36: the indexer. Q34: which button calls which function. X22: what a pay-out releases.
-- T2 work is not in this release:
-  - USDC, LP offers and senior payouts (X15, R46–R47);
-  - Reflector (R77) and the anchor (SEP-10/12/24/38).
+- In this release (Nov 7): USDC through the senior route and the LP offers (C5b, C9); the anchor
+  (SEP-1/10/12/24/38) is the trust's own, in nila-anchor.
+- T2 work is not in this release: senior payouts (X15, R46–R47) and Reflector (R77).
 
 ## G. Storage layout
 

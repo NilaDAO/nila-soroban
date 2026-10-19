@@ -114,6 +114,7 @@ storage:
 | `OffersOf(union)` | persistent | Vec of open offer ids (max 64) |
 | `DayOut(day)` | **temporary** | i128 USDC paid out that day, against the daily cap |
 | `RateBandBp` | instance | u32 how far the attester's fix may move (default 500 = 5%) |
+| `SwapKey` | instance | BytesN<32> the anchor's ed25519 swap key; `accept` needs its signature (C9b) |
 
 ## Layout changes before the freeze
 
@@ -133,3 +134,7 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
 - **C8 (16 Oct, the move):** fx_pool gained two keys, `Moved(BytesN<32>)` (persistent, a Polygon burn
   already minted on Stellar) and `MoveBudget` (instance, i128: what the attester may still mint for the move). Appended only: existing keys and values encode as before, so a C7 fx_pool
   can be upgraded in place. The frozen-layout hash changed only because the sample list grew.
+- **C9b (19 Oct, the anchor's signed accept):** fx_pool gained one key, `SwapKey` (instance, BytesN<32>: the
+  anchor's ed25519 swap key that signs each LP accept, C16). Appended only; a C8 fx_pool can be upgraded in
+  place. `accept` takes three more arguments (`usdc`, `valid_until`, `sig`): callers change, storage does not.
+  The frozen-layout hash changed only because the sample list grew.
