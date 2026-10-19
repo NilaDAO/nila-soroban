@@ -2454,14 +2454,32 @@ fn accept_needs_the_anchors_signed_quote() {
         &(T0 + 3_600),
     );
     let (usdc, until, sig) = fx.signed(&lp, c, &s24, &q);
-    // Another SEP-24 id, another USDC amount or another LP than the anchor signed: refused.
+    // Another SEP-24 id, another USDC amount or another LP than the anchor signed: the signature
+    // does not verify (a host trap, not a contract error code).
     let other = SString::from_str(&fx.env, "sep24-other");
-    assert!(f
-        .try_accept(&lp, &c, &other, &q, &usdc, &until, &sig)
-        .is_err());
-    assert!(f
-        .try_accept(&lp, &c, &s24, &q, &(usdc + 1), &until, &sig)
-        .is_err());
+    assert!(matches!(
+        f.try_accept(&lp, &c, &other, &q, &usdc, &until, &sig),
+        Err(Err(_))
+    ));
+    assert!(matches!(
+        f.try_accept(&lp, &c, &s24, &q, &(usdc + 1), &until, &sig),
+        Err(Err(_))
+    ));
+    f.set_lp(&fx.union, &fx.borrower, &true, &loan_id(&fx.env, 0x4D));
+    assert!(matches!(
+        f.try_accept(&fx.borrower, &c, &s24, &q, &usdc, &until, &sig),
+        Err(Err(_))
+    ));
+    // A rotated key voids the signature; the right key works again.
+    f.set_swap_key(&BytesN::from_array(&fx.env, &[1u8; 32]));
+    assert!(matches!(
+        f.try_accept(&lp, &c, &s24, &q, &usdc, &until, &sig),
+        Err(Err(_))
+    ));
+    f.set_swap_key(&BytesN::from_array(
+        &fx.env,
+        &swap_key().verifying_key().to_bytes(),
+    ));
     // The quote ran out.
     fx.at(until + 1);
     assert_eq!(

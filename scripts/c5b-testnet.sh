@@ -10,6 +10,8 @@
 #
 # Kept as a record of its step. From C6 on, loans are keyed by the food token id (`token_id`, no
 # separate `loan_id`): this script no longer runs unchanged. The current flow is scripts/c5-testnet.sh.
+# From C9b, `accept` also needs the anchor's signed quote (usdc, valid_until, sig) and fx_pool a swap key:
+# the LP offers on testnet are exercised by nila-integrations scripts/demo/check-anchor.py (E7).
 set -euo pipefail
 
 NETWORK="${NETWORK:-testnet}"

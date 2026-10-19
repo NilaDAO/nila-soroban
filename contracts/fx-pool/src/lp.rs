@@ -376,8 +376,8 @@ impl FxPoolContract {
         Ok(())
     }
 
-    /// The LP's fee on each swap, at most 5%.
     /// C9b: the anchor's swap key (ed25519), apart from the anchor account that accepts LPs.
+    /// Rotating it voids every signature not yet used.
     pub fn set_swap_key(env: Env, key: BytesN<32>) -> Result<(), Error> {
         require_admin(&env)?;
         env.storage().instance().set(&DataKey::SwapKey, &key);
@@ -386,6 +386,7 @@ impl FxPoolContract {
         Ok(())
     }
 
+    /// The LP's fee on each swap, at most 5%.
     pub fn set_lp_fee(env: Env, fee_bp: u32) -> Result<(), Error> {
         require_admin(&env)?;
         if fee_bp > 500 {
@@ -474,7 +475,10 @@ impl FxPoolContract {
         Ok(id)
     }
 
-    /// A2: an LP of the union accepts at the attester's fix (the rate is fixed now). A Bring
+    /// A2: an LP of the union accepts at the attester's fix (the rate is fixed now), with the anchor's
+    /// signed quote (C9b): NotAnchor without a swap key, QuoteExpired after `valid_until`,
+    /// QuoteChanged when today's price no longer gives `usdc`; a bad signature traps (host error,
+    /// no contract error code). A Bring
     /// reserves the union's USDC; a Collect has her approve her USDC until the offer expires.
     #[allow(clippy::too_many_arguments)]
     pub fn accept(

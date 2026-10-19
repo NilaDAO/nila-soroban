@@ -85,6 +85,10 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
       Bring offers pay out in a day.
 - [ ] LP offers: `anchor` = the trust's anchor account (nila-anchor), `lp_fee` = 100 (1%),
       `voucher_floor` per union as decided.
+- [ ] `swap_key` = the anchor's swap key (C9b; `set_swap_key`, admin). Without it every LP accept is
+      refused (NotAnchor), also right after the C8 → C9b upgrade. The swap key is apart from the
+      anchor account's key: the business server holds only the swap key, the anchor key stays with
+      the trust operator (nila-anchor docs/A0.md).
 - [ ] The on-chain wasm (`stellar contract fetch`) sha256 equals the recorded build hash, for
       each contract.
 - [ ] One small end-to-end run per union, with real people:
