@@ -12,10 +12,16 @@
 //!   USDC approve that lapses at the offer's expiry (R23). On the scan the union takes her USDC
 //!   (less her fee) and she takes the rupees, which leave the union's cash at hand.
 //! - Each accepted offer stores the anchor's SEP-24 transaction id and the SEP-38 quote id (R23).
+//!   `accept` needs the anchor's signature over them (C9b): fx_pool pays an LP only for a swap the
+//!   anchor recorded (C16), and only at the USDC the anchor quoted, before the quote runs out.
 //! - A no-show costs nothing: the offer expires and any reservation or approve lapses.
 
 use super::*;
-use soroban_sdk::String;
+use soroban_sdk::{xdr::ToXdr, String};
+
+/// What the anchor's swap key signs for one accept (C9b): this prefix, then the XDR of
+/// (fx_pool, offer_id, lp, sep24_id, quote_id, usdc, valid_until).
+pub const ACCEPT_PREFIX: &[u8] = b"nila-lp-accept-v1";
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,6 +87,11 @@ pub struct Quote {
     pub day_left: i128,
     /// USDC the union could pay a Bring now: LP-collected plus senior above the voucher floor.
     pub usdc_free: i128,
+}
+
+#[contractevent]
+pub struct SwapKeySet {
+    pub key: BytesN<32>,
 }
 
 #[contractevent]
@@ -366,6 +377,15 @@ impl FxPoolContract {
     }
 
     /// The LP's fee on each swap, at most 5%.
+    /// C9b: the anchor's swap key (ed25519), apart from the anchor account that accepts LPs.
+    pub fn set_swap_key(env: Env, key: BytesN<32>) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::SwapKey, &key);
+        SwapKeySet { key }.publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
     pub fn set_lp_fee(env: Env, fee_bp: u32) -> Result<(), Error> {
         require_admin(&env)?;
         if fee_bp > 500 {
@@ -456,12 +476,16 @@ impl FxPoolContract {
 
     /// A2: an LP of the union accepts at the attester's fix (the rate is fixed now). A Bring
     /// reserves the union's USDC; a Collect has her approve her USDC until the offer expires.
+    #[allow(clippy::too_many_arguments)]
     pub fn accept(
         env: Env,
         lp: Address,
         offer_id: u64,
         sep24_id: String,
         quote_id: String,
+        usdc: i128,
+        valid_until: u64,
+        sig: BytesN<64>,
     ) -> Result<i128, Error> {
         require_not_paused(&env)?;
         lp.require_auth();
@@ -473,7 +497,33 @@ impl FxPoolContract {
         if !is_lp(&env, &o.union, &lp) {
             return Err(Error::NotLp);
         }
+        // C16: only a swap the anchor recorded, at the USDC it quoted, before the quote runs out.
+        let key: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SwapKey)
+            .ok_or(Error::NotAnchor)?;
+        if now > valid_until {
+            return Err(Error::QuoteExpired);
+        }
+        let mut msg = Bytes::from_slice(&env, ACCEPT_PREFIX);
+        msg.append(
+            &(
+                env.current_contract_address(),
+                offer_id,
+                lp.clone(),
+                sep24_id.clone(),
+                quote_id.clone(),
+                usdc,
+                valid_until,
+            )
+                .to_xdr(&env),
+        );
+        env.crypto().ed25519_verify(&key, &msg, &sig);
         let q = price(&env, o.kind, o.inr)?;
+        if q.usdc != usdc {
+            return Err(Error::QuoteChanged);
+        }
         let usdc_addr: Address = get(&env, &DataKey::Usdc);
         match o.kind {
             OfferKind::Bring => {
@@ -647,6 +697,10 @@ impl FxPoolContract {
         let (lp_free, senior_free) = bring_room(&env, &union, q.inr_per_usd)?;
         q.usdc_free = lp_free + senior_free;
         Ok(q)
+    }
+
+    pub fn swap_key(env: Env) -> Option<BytesN<32>> {
+        env.storage().instance().get(&DataKey::SwapKey)
     }
 
     pub fn lp_fee(env: Env) -> u32 {

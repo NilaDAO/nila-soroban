@@ -21,6 +21,7 @@ nila-roles = { path = "../roles" }
 nila-land-title = { path = "../land-title" }
 nila-fx-pool = { path = "../fx-pool" }
 nila-machinery = { path = "../machinery" }
+ed25519-dalek = { version = "2.2.0", default-features = false }
 
 [features]
 # One day = one second, so a testnet rehearsal reaches the payback date. Never for mainnet.

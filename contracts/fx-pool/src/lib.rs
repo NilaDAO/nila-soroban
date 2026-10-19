@@ -108,6 +108,10 @@ pub enum Error {
     AlreadyMoved = 29,
     /// The move budget the trust set does not cover this mint.
     MoveBudget = 30,
+    /// The anchor's signed quote no longer matches what the offer pays or takes (C9b).
+    QuoteChanged = 31,
+    /// The anchor's signed quote has run out (C9b).
+    QuoteExpired = 32,
 }
 
 /// Where a senior investor's USDC comes from (R24, D1): kept per deposit so the pools can be split later.
@@ -203,6 +207,8 @@ pub enum DataKey {
     /// What the attester may still mint for the move: set by the trust to the members' total
     /// Polygon nIN at a snapshot (executive decision, 16 Oct); 0 until set.
     MoveBudget,
+    /// The anchor's swap key (ed25519 public key): it signs each LP accept (C9b, C16). Instance.
+    SwapKey,
 }
 
 /// Rupees a leader took in, not yet lent out or settled (R15).
@@ -1331,7 +1337,7 @@ impl FxPoolContract {
 }
 
 mod lp;
-pub use lp::{LpMember, Offer, OfferKind, OfferState};
+pub use lp::{LpMember, Offer, OfferKind, OfferState, Quote, ACCEPT_PREFIX};
 
 #[cfg(test)]
 mod test;
