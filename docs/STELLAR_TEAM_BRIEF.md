@@ -181,10 +181,10 @@ Aligned to TAD §7 and the tranche table (§9). Honest scope for this tree:
 
 | Item | TAD home | Status |
 | --- | --- | --- |
-| Full `fx_pool` (mint/redeem, ±2% band, daily USDC-out cap enforcement, cash-scan DISBURSE/INVEST/REPAY, redeem-order and cash-offer books) | §5.2, §7.1 FX table | Skeleton only |
+| Full `fx_pool` (mint/redeem, ±2% band, daily USDC-out cap enforcement, cash-scan DISBURSE/INVEST/REPAY, redeem-order and cash-offer books) | §5.2, §7.1 FX table | Built: cash scan and cash-out (C3), senior route (C5a), LP Bring/Collect offers with the daily cap (C5b), `quote` (C9); attester fix with a 5% band instead of ±2% |
 | Reflector INR/USD (SEP-40), staleness guard, signed-fix override | §4.3, Tranche 2-B | Not integrated |
 | CCTP EVM → native Circle USDC | §5.6, Tranche 2-A | Not started |
-| Anchor Platform (SEP-1/10/12/24/38), membership at SEP-10 | §5.4, Tranche 1-A | Not this repo |
+| Anchor Platform (SEP-1/10/12/24/38), membership at SEP-10 | §5.4, Tranche 1-A | Not this repo: nila-anchor (Nov 7) |
 | Privy + sponsored reserves | §5.3, Tranche 1-B/C | Not this repo |
 | Mainnet at ₹10,000 cap, 3-of-5 admin, no timelock until caps rise | §4.3, Tranche 1-D | Testnet rehearsal only. TAD: testnet is for the suite, not milestones. |
 | Polygon 30 July 2026 book replay (side-by-side waterfall) | Tranche 2-B | Property tests not written |

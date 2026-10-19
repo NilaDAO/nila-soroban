@@ -65,6 +65,20 @@ pub struct Offer {
     pub from_offshore: i128,
 }
 
+/// What an offer pays or takes at today's fix (C9): the anchor's SEP-38 price reads it.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Quote {
+    /// USDC paid to her (Bring, fee added) or taken from her (Collect, fee taken off).
+    pub usdc: i128,
+    /// Her fee in USDC.
+    pub fee: i128,
+    pub fee_bp: u32,
+    pub inr_per_usd: i128,
+    /// The fix's expiry: a quote after it fails at accept with StaleOracle.
+    pub valid_until: u64,
+}
+
 #[contractevent]
 pub struct AnchorSet {
     pub anchor: Address,
@@ -240,6 +254,42 @@ fn check_day_out(env: &Env, usdc: i128) -> Result<(), Error> {
     Ok(())
 }
 
+fn lp_fee_bp(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::LpFeeBp)
+        .unwrap_or(DEFAULT_LP_FEE_BP)
+}
+
+/// The USDC for `inr` rupees at the attester's fix, with her fee (same maths in `accept` and `quote`).
+fn price(env: &Env, kind: OfferKind, inr: i128) -> Result<Quote, Error> {
+    let rate: RateFix = env
+        .storage()
+        .instance()
+        .get(&DataKey::Rate)
+        .ok_or(Error::StaleOracle)?;
+    if env.ledger().timestamp() > rate.valid_until {
+        return Err(Error::StaleOracle);
+    }
+    let base = inr
+        .checked_mul(RATE_ONE)
+        .map(|v| v / rate.inr_per_usd)
+        .ok_or(Error::CapExceeded)?;
+    let fee_bp = lp_fee_bp(env);
+    let fee = base * i128::from(fee_bp) / 10_000;
+    let usdc = match kind {
+        OfferKind::Bring => base + fee,
+        OfferKind::Collect => base - fee,
+    };
+    Ok(Quote {
+        usdc,
+        fee,
+        fee_bp,
+        inr_per_usd: rate.inr_per_usd,
+        valid_until: rate.valid_until,
+    })
+}
+
 fn is_lp(env: &Env, union: &Address, lp: &Address) -> bool {
     env.storage()
         .persistent()
@@ -404,29 +454,11 @@ impl FxPoolContract {
         if !is_lp(&env, &o.union, &lp) {
             return Err(Error::NotLp);
         }
-        let rate: RateFix = env
-            .storage()
-            .instance()
-            .get(&DataKey::Rate)
-            .ok_or(Error::StaleOracle)?;
-        if now > rate.valid_until {
-            return Err(Error::StaleOracle);
-        }
-        let base = o
-            .inr
-            .checked_mul(RATE_ONE)
-            .map(|v| v / rate.inr_per_usd)
-            .ok_or(Error::CapExceeded)?;
-        let fee_bp: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::LpFeeBp)
-            .unwrap_or(DEFAULT_LP_FEE_BP);
-        let fee = base * i128::from(fee_bp) / 10_000;
+        let q = price(&env, o.kind, o.inr)?;
         let usdc_addr: Address = get(&env, &DataKey::Usdc);
         match o.kind {
             OfferKind::Bring => {
-                let usdc = base + fee;
+                let usdc = q.usdc;
                 // LP-collected USDC first, then senior above the floor, domestic before offshore.
                 let u = o.union.clone();
                 let lk = DataKey::LpUsdc(u.clone());
@@ -435,7 +467,7 @@ impl FxPoolContract {
                 // fund_core holds back for unclaimed voucher hours.
                 let held = FundCoreClient::new(&env, &core_addr(&env)?).senior_earmark(&u);
                 // Rounded up: the floor never sits below the earmark.
-                let held_usdc = (held * RATE_ONE + rate.inr_per_usd - 1) / rate.inr_per_usd;
+                let held_usdc = (held * RATE_ONE + q.inr_per_usd - 1) / q.inr_per_usd;
                 let floor = core::cmp::max(voucher_floor(&env, &u), held_usdc);
                 let senior_free = core::cmp::max(0, senior_total(&env, &u) - floor);
                 check_day_out(&env, usdc)?;
@@ -460,7 +492,7 @@ impl FxPoolContract {
                 o.from_offshore = from_offshore;
             }
             OfferKind::Collect => {
-                let usdc = base - fee;
+                let usdc = q.usdc;
                 let ledgers = ((o.expires - now) / LEDGER_SECONDS + 1) as u32;
                 TokenClient::new(&env, &usdc_addr).approve(
                     &lp,
@@ -473,7 +505,7 @@ impl FxPoolContract {
         }
         o.state = OfferState::Accepted;
         o.lp = Some(lp.clone());
-        o.inr_per_usd = rate.inr_per_usd;
+        o.inr_per_usd = q.inr_per_usd;
         o.sep24_id = sep24_id.clone();
         o.quote_id = quote_id.clone();
         save_offer(&env, offer_id, &o);
@@ -482,7 +514,7 @@ impl FxPoolContract {
             offer_id,
             lp,
             usdc: o.usdc,
-            inr_per_usd: rate.inr_per_usd,
+            inr_per_usd: q.inr_per_usd,
             sep24_id,
             quote_id,
         }
@@ -590,6 +622,17 @@ impl FxPoolContract {
 
     pub fn voucher_floor(env: Env, union: Address) -> i128 {
         voucher_floor(&env, &union)
+    }
+
+    /// C9: what a Bring or Collect of `inr` rupees pays or takes at today's fix (SEP-38 reads it).
+    /// The same numbers `accept` fixes on the offer, as long as the fix and the fee do not change.
+    pub fn quote(env: Env, kind: OfferKind, inr: i128) -> Result<Quote, Error> {
+        check_amount(&env, inr)?;
+        price(&env, kind, inr)
+    }
+
+    pub fn lp_fee(env: Env) -> u32 {
+        lp_fee_bp(&env)
     }
 
     pub fn anchor(env: Env) -> Option<Address> {
