@@ -869,6 +869,34 @@ impl FundCore {
         Ok(())
     }
 
+    /// C10 (executive decision, 20 Oct): a leader puts her own nIN into the union treasury, as on Polygon
+    /// (`withdrawUnionTreasury(.., deposit=true)`). Not a cash scan: the rupees behind her nIN were counted
+    /// when it was minted. Her trustline is authorised for this transfer only (R10).
+    pub fn leader_deposit_treasury(
+        env: Env,
+        leader: Address,
+        union: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        require_leader(&env, &union, &leader)?;
+        require_positive(amount)?;
+        union_cfg(&env, &union)?;
+        let fx = FxPoolClient::new(&env, &cfg(&env).fx_pool.ok_or(Error::NotFxPool)?);
+        fx.set_member_auth(&union, &leader, &true);
+        nin(&env).transfer(&leader, env.current_contract_address(), &amount);
+        fx.set_member_auth(&union, &leader, &false);
+        i_add(&env, &Counter::Treasury(union.clone()), amount)?;
+        TreasuryMoved {
+            union,
+            amount,
+            rainy: false,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
     /// Cash-scan TREASURY: the union's own rupees into its treasury (R17), via fx_pool.
     pub fn deposit_union_treasury(env: Env, union: Address, amount: i128) -> Result<(), Error> {
         require_not_paused(&env)?;

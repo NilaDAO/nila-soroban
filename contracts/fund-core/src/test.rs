@@ -2503,3 +2503,40 @@ fn accept_needs_the_anchors_signed_quote() {
         swap_key().verifying_key().to_bytes()
     );
 }
+
+#[test]
+fn leader_deposits_her_own_nin_into_the_treasury() {
+    // C10 (executive decision, 20 Oct): as on Polygon, a leader puts her own nIN into the treasury; withdraw
+    // and deposit are a round trip, and no rupees are scanned twice.
+    let fx = setup();
+    let c = fx.core();
+    fx.scan(Purpose::Treasury, &fx.leader, 1_000 * NIN, 1, None)
+        .unwrap();
+    c.withdraw_union_treasury(&fx.leader, &fx.union, &(400 * NIN), &false);
+    assert_eq!(fx.token().balance(&fx.leader), 400 * NIN);
+    assert_eq!(c.union_treasury(&fx.union), 600 * NIN);
+    c.leader_deposit_treasury(&fx.leader, &fx.union, &(250 * NIN));
+    assert_eq!(fx.token().balance(&fx.leader), 150 * NIN);
+    assert_eq!(c.union_treasury(&fx.union), 850 * NIN);
+    fx.assert_conserved();
+    // Her trustline is authorised only inside the call (R10).
+    assert!(!StellarAssetClient::new(&fx.env, &fx.nin).authorized(&fx.leader));
+    // Only a leader of the union, only a positive amount, only nIN she has.
+    assert_eq!(
+        c.try_leader_deposit_treasury(&fx.borrower, &fx.union, &NIN),
+        Err(Ok(Error::NotLeader))
+    );
+    assert_eq!(
+        c.try_leader_deposit_treasury(&fx.leader, &fx.union, &0),
+        Err(Ok(Error::AmountZero))
+    );
+    assert!(c
+        .try_leader_deposit_treasury(&fx.leader, &fx.union, &(151 * NIN))
+        .is_err());
+    // Paused: no money moves in.
+    c.pause();
+    assert_eq!(
+        c.try_leader_deposit_treasury(&fx.leader, &fx.union, &NIN),
+        Err(Ok(Error::Paused))
+    );
+}
