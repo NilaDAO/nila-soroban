@@ -18,5 +18,7 @@ nila-common = { workspace = true }
 soroban-sdk = { workspace = true, features = ["testutils"] }
 
 [features]
+# Demo builds only: a 60-second upgrade timelock (in-place upgrades keep the demo state). Never for mainnet.
+demo-upgrade-delay = []
 # One day = ten seconds, so a testnet rehearsal reaches escrow and cash-out expiry. Never for mainnet.
 testnet-short-windows = []

@@ -150,7 +150,7 @@ pub struct Paused {
     pub paused: bool,
 }
 
-/// Treasury in (cash scan, positive) or out to a leader (negative), R17.
+/// Treasury in (cash scan or a leader's own nIN, C10; positive) or out to a leader (negative), R17.
 #[contractevent]
 pub struct TreasuryMoved {
     #[topic]

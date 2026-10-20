@@ -91,11 +91,14 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
       the trust operator (nila-anchor docs/A0.md).
 - [ ] The on-chain wasm (`stellar contract fetch`) sha256 equals the recorded build hash, for
       each contract.
+- [ ] No wasm carries the `demo-upgrade-delay` marker (`strings <wasm> | grep demo-upgrade-delay` is empty), and
+      `upgrade_delay` = 172800 (48 h) on every contract: demo builds have a 60-second timelock.
 - [ ] One small end-to-end run per union, with real people:
   - treasury scan, invest scan, draw, repay scan;
-  - a cash-out and a pay-out.
+  - a cash-out and a pay-out;
+  - a leader's treasury withdraw and her deposit of her own nIN back (C10, sponsored by the node, O15).
 
-  fund_core nIN must equal junior + senior + treasury + rainy, and fx_pool must hold no nIN
+  fund_core nIN must equal junior + senior + treasury + rainy + machine owners' balances (C5), and fx_pool must hold no nIN
   outside open cash-outs.
 
 ## E. Operations

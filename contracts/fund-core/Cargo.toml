@@ -24,5 +24,7 @@ nila-machinery = { path = "../machinery" }
 ed25519-dalek = { version = "2.2.0", default-features = false }
 
 [features]
+# Demo builds only: a 60-second upgrade timelock (in-place upgrades keep the demo state). Never for mainnet.
+demo-upgrade-delay = []
 # One day = one second, so a testnet rehearsal reaches the payback date. Never for mainnet.
 testnet-short-windows = []
