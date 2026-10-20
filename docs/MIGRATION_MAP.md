@@ -17,7 +17,7 @@ Legend: **Direct** = same logic. **Adapt** = same shape, one dependency swapped.
 | `AcceptLoan` | Adapt | Same flattened FX call |
 | `repayLoan` | Adapt | Also callable by FX on cash-scan REPAY; dust = 0.1 nIN at 7 dec |
 | `markDefault` | Adapt | `haircut_index` via U256 |
-| `reportMilestone`, `removeLoan`, `addJuniorCash`, `withdrawUnionTreasury` | Direct | |
+| `reportMilestone`, `removeLoan`, `addJuniorCash`, `withdrawUnionTreasury` | Direct | The deposit direction (`deposit=true`, her own nIN) is `leader_deposit_treasury` (C10) |
 | `creditEscrowNin`, `burnTreasuryForExpiry` | Direct | Caller = FX contract `require_auth` |
 | `burnEscrowNin` | Drop | Unused by current FX pool |
 | Views | Direct | Written explicitly — no auto-getters |

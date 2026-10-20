@@ -93,9 +93,10 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
       each contract.
 - [ ] One small end-to-end run per union, with real people:
   - treasury scan, invest scan, draw, repay scan;
-  - a cash-out and a pay-out.
+  - a cash-out and a pay-out;
+  - a leader's treasury withdraw and her deposit of her own nIN back (C10, sponsored by the node, O15).
 
-  fund_core nIN must equal junior + senior + treasury + rainy, and fx_pool must hold no nIN
+  fund_core nIN must equal junior + senior + treasury + rainy + machine owners' balances (C5), and fx_pool must hold no nIN
   outside open cash-outs.
 
 ## E. Operations

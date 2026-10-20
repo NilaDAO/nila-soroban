@@ -2516,6 +2516,11 @@ fn leader_deposits_her_own_nin_into_the_treasury() {
     assert_eq!(fx.token().balance(&fx.leader), 400 * NIN);
     assert_eq!(c.union_treasury(&fx.union), 600 * NIN);
     c.leader_deposit_treasury(&fx.leader, &fx.union, &(250 * NIN));
+    // Only she signs: the call and, inside it, the nIN transfer from her wallet (one auth tree).
+    let auths = fx.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, fx.leader);
+    assert_eq!(auths[0].1.sub_invocations.len(), 1);
     assert_eq!(fx.token().balance(&fx.leader), 150 * NIN);
     assert_eq!(c.union_treasury(&fx.union), 850 * NIN);
     fx.assert_conserved();
