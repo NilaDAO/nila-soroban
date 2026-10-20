@@ -9,6 +9,14 @@ use soroban_sdk::{
 };
 
 contractmeta!(key = "binver", val = "0.1.0");
+
+// Demo builds only (feature `demo-upgrade-delay`): the upgrade timelock is 60 seconds, so a demo deployment can be
+// upgraded in place and keep its state. Never for mainnet: the wasm carries this marker, which deploys refuse.
+#[cfg(feature = "demo-upgrade-delay")]
+soroban_sdk::contractmeta!(
+    key = "demo_upgrade_delay",
+    val = "demo-upgrade-delay: 60 s, never mainnet"
+);
 contractmeta!(
     key = "desc",
     val = "Nila role registry: leaders, oracle, attester, core, union officers"
@@ -69,6 +77,11 @@ pub struct AdminSet {
     pub admin: Address,
 }
 
+/// Upgrade timelock at deploy: 48 hours (C15).
+#[cfg(not(feature = "demo-upgrade-delay"))]
+pub const UPGRADE_DELAY: u64 = upgrade::DEFAULT_DELAY;
+#[cfg(feature = "demo-upgrade-delay")]
+pub const UPGRADE_DELAY: u64 = 60;
 #[contract]
 pub struct RolesContract;
 
@@ -109,7 +122,7 @@ fn read_flag(env: &Env, key: &DataKey) -> bool {
 impl RolesContract {
     pub fn __constructor(env: Env, admin: Address) {
         env.storage().instance().set(&DataKey::Admin, &admin);
-        upgrade::init(&env, upgrade::DEFAULT_DELAY);
+        upgrade::init(&env, UPGRADE_DELAY);
         bump_instance(&env);
     }
 

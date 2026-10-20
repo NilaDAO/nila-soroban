@@ -91,6 +91,8 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
       the trust operator (nila-anchor docs/A0.md).
 - [ ] The on-chain wasm (`stellar contract fetch`) sha256 equals the recorded build hash, for
       each contract.
+- [ ] No wasm carries the `demo-upgrade-delay` marker (`strings <wasm> | grep demo-upgrade-delay` is empty), and
+      `upgrade_delay` = 172800 (48 h) on every contract: demo builds have a 60-second timelock.
 - [ ] One small end-to-end run per union, with real people:
   - treasury scan, invest scan, draw, repay scan;
   - a cash-out and a pay-out;

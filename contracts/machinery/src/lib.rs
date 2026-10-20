@@ -21,6 +21,14 @@ use soroban_sdk::{
 };
 
 contractmeta!(key = "binver", val = "0.1.0");
+
+// Demo builds only (feature `demo-upgrade-delay`): the upgrade timelock is 60 seconds, so a demo deployment can be
+// upgraded in place and keep its state. Never for mainnet: the wasm carries this marker, which deploys refuse.
+#[cfg(feature = "demo-upgrade-delay")]
+soroban_sdk::contractmeta!(
+    key = "demo_upgrade_delay",
+    val = "demo-upgrade-delay: 60 s, never mainnet"
+);
 contractmeta!(
     key = "desc",
     val = "Nila machinery — rate table, machines, vouchers, owner claims"
@@ -46,7 +54,10 @@ pub const WEEK_USE_LEDGERS: u32 = 8 * nila_common::DAY_IN_LEDGERS;
 pub const MAX_TYPES: u32 = 16;
 /// Default share of the driver part paid at the job (X32 open; the union changes it).
 pub const DEFAULT_PREPAY_DRIVER_BP: u32 = 5_000;
+#[cfg(not(feature = "demo-upgrade-delay"))]
 pub const UPGRADE_DELAY: u64 = 2 * DAY;
+#[cfg(feature = "demo-upgrade-delay")]
+pub const UPGRADE_DELAY: u64 = 60;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

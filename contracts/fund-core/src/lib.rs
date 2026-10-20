@@ -22,6 +22,14 @@ use types::{
 pub use types::{Config, Due, Error, FoodToken, Investor, Position, UnionConfig, VoucherBook};
 
 contractmeta!(key = "binver", val = "0.2.0");
+
+// Demo builds only (feature `demo-upgrade-delay`): the upgrade timelock is 60 seconds, so a demo deployment can be
+// upgraded in place and keep its state. Never for mainnet: the wasm carries this marker, which deploys refuse.
+#[cfg(feature = "demo-upgrade-delay")]
+soroban_sdk::contractmeta!(
+    key = "demo_upgrade_delay",
+    val = "demo-upgrade-delay: 60 s, never mainnet"
+);
 contractmeta!(
     key = "desc",
     val = "Nila fund_core — junior pool, cash-part loans, repay, default waterfall"
@@ -48,7 +56,10 @@ pub const MAX_RATE_BP: u32 = 1250;
 /// Share valuation rounds down; this much is forgiven at the gate (stroops).
 const GATE_ROUNDING: i128 = 10;
 /// Upgrade timelock at deploy: 48 hours (C15); short builds rehearse it in seconds.
+#[cfg(not(feature = "demo-upgrade-delay"))]
 pub const UPGRADE_DELAY: u64 = 2 * DAY;
+#[cfg(feature = "demo-upgrade-delay")]
+pub const UPGRADE_DELAY: u64 = 60;
 /// Unbond request to claim (R28).
 pub const UNBONDING: u64 = 14 * DAY;
 /// Repay window after the end of season (LOAN_RULES §1).

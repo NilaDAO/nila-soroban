@@ -16,3 +16,7 @@ nila-common = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+
+[features]
+# Demo builds only: a 60-second upgrade timelock (in-place upgrades keep the demo state). Never for mainnet.
+demo-upgrade-delay = []

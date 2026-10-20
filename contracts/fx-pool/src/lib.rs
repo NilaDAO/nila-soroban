@@ -29,6 +29,14 @@ use soroban_sdk::{
 };
 
 contractmeta!(key = "binver", val = "0.3.0");
+
+// Demo builds only (feature `demo-upgrade-delay`): the upgrade timelock is 60 seconds, so a demo deployment can be
+// upgraded in place and keep its state. Never for mainnet: the wasm carries this marker, which deploys refuse.
+#[cfg(feature = "demo-upgrade-delay")]
+soroban_sdk::contractmeta!(
+    key = "demo_upgrade_delay",
+    val = "demo-upgrade-delay: 60 s, never mainnet"
+);
 contractmeta!(
     key = "desc",
     val = "Nila fx_pool — cash scan, cash at hand, member cash-out, nIN authoriser"
@@ -63,7 +71,10 @@ pub const DEFAULT_RATE_BAND_BP: u32 = 500;
 /// The LP's fee: 1% (R21).
 pub const DEFAULT_LP_FEE_BP: u32 = 100;
 /// Upgrade timelock at deploy: 48 hours (R75, C15); short builds rehearse it in seconds.
+#[cfg(not(feature = "demo-upgrade-delay"))]
 pub const UPGRADE_DELAY: u64 = 2 * DAY;
+#[cfg(feature = "demo-upgrade-delay")]
+pub const UPGRADE_DELAY: u64 = 60;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
