@@ -1031,6 +1031,7 @@ impl FundCore {
             tranche: tranche(true),
             amount,
             cash: false,
+            cash_settled: 0,
         }
         .publish(&env);
         bump_instance(&env);
@@ -1053,13 +1054,14 @@ impl FundCore {
         let amount = claim(&env, true, &union, &member, max_shares, false)?;
         nin(&env).burn(&env.current_contract_address(), &amount);
         let fx = cfg(&env).fx_pool.ok_or(Error::NotFxPool)?;
-        FxPoolClient::new(&env, &fx).settle_cash(&union, &amount);
+        let settled = FxPoolClient::new(&env, &fx).settle_cash(&union, &amount);
         Claimed {
             investor: member,
             union,
             tranche: tranche(true),
             amount,
             cash: true,
+            cash_settled: settled,
         }
         .publish(&env);
         bump_instance(&env);
@@ -1129,6 +1131,7 @@ impl FundCore {
             tranche: tranche(false),
             amount,
             cash: false,
+            cash_settled: 0,
         }
         .publish(&env);
         bump_instance(&env);

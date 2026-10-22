@@ -2544,6 +2544,25 @@ fn claim_junior_cash_pays_over_the_desk() {
     assert!(c
         .try_claim_junior_cash(&fx.union, &fx.neighbour, &fx.leader, &0)
         .is_err());
+    // And the leader must sign too: she alone cannot collect cash at the desk.
+    fx.env.mock_auths(&[MockAuth {
+        address: &fx.neighbour,
+        invoke: &MockAuthInvoke {
+            contract: &fx.core_id,
+            fn_name: "claim_junior_cash",
+            args: (
+                fx.union.clone(),
+                fx.neighbour.clone(),
+                fx.leader.clone(),
+                0i128,
+            )
+                .into_val(&fx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(c
+        .try_claim_junior_cash(&fx.union, &fx.neighbour, &fx.leader, &0)
+        .is_err());
     fx.env.mock_all_auths();
 
     let hand = f.cash_at_hand(&fx.union);
