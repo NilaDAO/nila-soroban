@@ -11,7 +11,7 @@ Legend: **Direct** = same logic. **Adapt** = same shape, one dependency swapped.
 | `initialize`, `pause`/`unpause`, setters, `setFeeBps` | Direct | `__constructor` + instance storage; admin `require_auth` |
 | `setReserveConfigForUnion`, `setBucketThresholds`, `setRateParams` | Direct | Persistent `(union[, loan_type])` keys |
 | `depositSenior`, `depositJunior` | Adapt | `membership.is_member`; 7-dec nIN; `U256` share math |
-| `requestUnbondSenior/Junior`, `claimSenior/Junior` | Direct | 14-day gate on ledger timestamp |
+| `requestUnbondSenior/Junior`, `claimSenior/Junior` | Direct | 14-day gate on ledger timestamp. Since 22 Oct (desk only): `claim_junior` pays a **leader's** own investment to her wallet; a member collects hers over the desk with `claim_junior_cash` (she and a leader sign; burned and booked against cash at hand like `draw_loan`) |
 | `_redeemClaimable` | Adapt | Snap-vs-live payout; i128 + U256 |
 | `drawLoanWithVoucher` | Redesign | Oracle `require_auth` (host nonces); terms packed in `DrawParams`; flattened FX call |
 | `AcceptLoan` | Adapt | Same flattened FX call |

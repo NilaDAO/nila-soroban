@@ -254,6 +254,8 @@ pub struct NinMoved {
     pub amount: i128,
     /// The Polygon tx that burned it.
     pub polygon_burn: BytesN<32>,
+    /// sha256 of her one-time code: the cash-out a leader pays at the desk (22 Oct).
+    pub code_hash: BytesN<32>,
 }
 
 /// The trust changed the move budget: by `delta`, now `budget`.
@@ -1046,7 +1048,8 @@ impl FxPoolContract {
     // ---------- the move (M1) ----------
 
     /// The move (executive decision, 16 Oct): her Polygon nIN was burned on Polygon (tx
-    /// `polygon_burn`); the attester mints the same amount to her here, once per burn. She
+    /// `polygon_burn`); the attester mints the same amount here, once per burn, as a cash-out she collects
+    /// at the desk (`mint_moved`, 22 Oct: no nIN in a member's wallet). She
     /// must hold an attested title in the union (or be a leader), so the oracle burns on
     /// Polygon only after her title is on Stellar. At most `max_scan` per burn, like a scan.
     /// The trust adds to (or, negative, takes back from) what the attester may still mint for
@@ -1083,6 +1086,7 @@ impl FxPoolContract {
         member: Address,
         amount: i128,
         polygon_burn: BytesN<32>,
+        code_hash: BytesN<32>,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         attester.require_auth();
@@ -1098,6 +1102,15 @@ impl FxPoolContract {
         if env.storage().persistent().has(&k) {
             return Err(Error::AlreadyMoved);
         }
+        let ck = DataKey::CashOut(code_hash.clone());
+        if env.storage().persistent().has(&ck)
+            || env
+                .storage()
+                .persistent()
+                .has(&DataKey::CodeUsed(code_hash.clone()))
+        {
+            return Err(Error::CodeUsed);
+        }
         let budget: i128 = env
             .storage()
             .instance()
@@ -1111,22 +1124,27 @@ impl FxPoolContract {
             .set(&DataKey::MoveBudget, &(budget - amount));
         env.storage().persistent().set(&k, &true);
         bump(&env, &k);
-        // R10: her trustline is authorised only for this mint, and left as it was.
-        let sac = StellarAssetClient::new(&env, &nin_addr(&env));
-        let was = sac.authorized(&member);
-        if !was {
-            sac.set_authorized(&member, &true);
-        }
-        sac.mint(&member, &amount);
-        if !was {
-            sac.set_authorized(&member, &false);
-        }
+        // No nIN in a member's wallet (executive decision 22 Oct): the moved nIN is minted into fx_pool as a
+        // cash-out under her code, which never expires; a leader of her union pays it with `pay_out`.
+        StellarAssetClient::new(&env, &nin_addr(&env))
+            .mint(&env.current_contract_address(), &amount);
+        env.storage().persistent().set(
+            &ck,
+            &CashOut {
+                member: member.clone(),
+                union: union.clone(),
+                amount,
+                expires: u64::MAX,
+            },
+        );
+        bump(&env, &ck);
         bump_instance(&env);
         NinMoved {
             union,
             member,
             amount,
             polygon_burn,
+            code_hash,
         }
         .publish(&env);
         Ok(())

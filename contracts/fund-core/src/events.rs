@@ -45,6 +45,9 @@ pub struct Claimed {
     pub union: Address,
     pub tranche: Tranche,
     pub amount: i128,
+    /// Collected over the desk (`claim_junior_cash`): burned and booked against cash at hand, not paid
+    /// to a wallet (executive decision 22 Oct).
+    pub cash: bool,
 }
 
 #[contractevent]
