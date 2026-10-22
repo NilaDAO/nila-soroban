@@ -2903,3 +2903,62 @@ fn the_anchor_marks_identity_checked_and_can_withdraw_it() {
     f.set_id_checked(&leader, &false, &loan_id(&fx.env, 9));
     assert!(!f.id_checked(&leader));
 }
+
+#[test]
+fn leader_swaps_usdc_to_nin_and_back_from_her_bucket_only() {
+    let fx = setup();
+    let f = fx.fx();
+    fx.env.mock_all_auths();
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&fx.leader, &(100 * NIN));
+    f.override_rate(&(95 * NIN), &(T0 + 86_400));
+    // Identity not checked: refused.
+    assert_eq!(
+        f.try_swap_usdc_to_nin(&fx.leader, &fx.union, &(10 * NIN)),
+        Err(Ok(FxError::NotIdChecked))
+    );
+    f.set_anchor(&Address::generate(&fx.env));
+    f.set_id_checked(&fx.leader, &true, &loan_id(&fx.env, 0x51));
+    // Not a leader of the union: refused.
+    let outsider = Address::generate(&fx.env);
+    assert_eq!(
+        f.try_swap_usdc_to_nin(&outsider, &fx.union, &(10 * NIN)),
+        Err(Ok(FxError::NotLeader))
+    );
+    // Treasury USDC sits in its own bucket and is never paid out by a swap back.
+    fx.treasury_usdc(950 * NIN).unwrap();
+    assert_eq!(
+        f.try_swap_nin_to_usdc(&fx.leader, &fx.union, &(95 * NIN)),
+        Err(Ok(FxError::NoUsdc))
+    );
+    // USDC → nIN in her wallet; the USDC stays in fx_pool in the leader-swap bucket.
+    f.override_rate(&(95 * NIN), &(T0 + 86_400));
+    assert_eq!(
+        f.swap_usdc_to_nin(&fx.leader, &fx.union, &(10 * NIN)),
+        950 * NIN
+    );
+    assert_eq!(fx.token().balance(&fx.leader), 950 * NIN);
+    assert_eq!(f.leader_swap_usdc(&fx.union), 10 * NIN);
+    assert_eq!(f.treasury_usdc(&fx.union), 95 * NIN / 10);
+    // Back: more than the bucket holds is refused; within it, her nIN burns and USDC comes back.
+    assert_eq!(
+        f.try_swap_nin_to_usdc(&fx.leader, &fx.union, &(1_900 * NIN)),
+        Err(Ok(FxError::NoUsdc))
+    );
+    assert_eq!(
+        f.swap_nin_to_usdc(&fx.leader, &fx.union, &(475 * NIN)),
+        5 * NIN
+    );
+    assert_eq!(fx.token().balance(&fx.leader), 475 * NIN);
+    assert_eq!(f.leader_swap_usdc(&fx.union), 5 * NIN);
+    assert_eq!(f.treasury_usdc(&fx.union), 95 * NIN / 10);
+    // A stale rate: refused both ways.
+    fx.env.ledger().set_timestamp(T0 + 2 * 86_400);
+    assert_eq!(
+        f.try_swap_usdc_to_nin(&fx.leader, &fx.union, &NIN),
+        Err(Ok(FxError::StaleOracle))
+    );
+    assert_eq!(
+        f.try_swap_nin_to_usdc(&fx.leader, &fx.union, &NIN),
+        Err(Ok(FxError::StaleOracle))
+    );
+}

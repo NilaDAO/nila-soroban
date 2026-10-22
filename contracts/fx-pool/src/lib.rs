@@ -227,6 +227,8 @@ pub enum DataKey {
     TreasuryUsdc(Address),
     /// An account whose identity the anchor checked (K1, SEP-12): its reference to the anchor's record (22 Oct).
     IdChecked(Address),
+    /// USDC a union's id-checked leaders swapped into nIN in their own wallets: paid back only from here (22 Oct).
+    LeaderSwapUsdc(Address),
 }
 
 /// Rupees a leader took in, not yet lent out or settled (R15).
@@ -373,6 +375,19 @@ pub struct RateSet {
 #[contractevent]
 pub struct RateBandSet {
     pub band_bp: u32,
+}
+
+/// A leader's own swap (22 Oct): USDC → nIN in her wallet (`to_nin`), or back.
+#[contractevent]
+pub struct LeaderSwap {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub leader: Address,
+    pub to_nin: bool,
+    pub usdc: i128,
+    pub nin: i128,
+    pub inr_per_usd: i128,
 }
 
 #[contractevent]
@@ -603,6 +618,43 @@ fn settle(env: &Env, union: &Address, amount: i128) -> i128 {
 fn close_code(env: &Env, code_hash: &BytesN<32>) {
     let k = DataKey::CodeUsed(code_hash.clone());
     env.storage().persistent().set(&k, &true);
+    bump(env, &k);
+}
+
+/// A leader's own swap: not paused, a leader of the union, her identity checked, a fresh rate.
+fn leader_swap_checks(
+    env: &Env,
+    union: &Address,
+    leader: &Address,
+    amount: i128,
+) -> Result<RateFix, Error> {
+    require_not_paused(env)?;
+    require_leader(env, union, leader)?;
+    if !env
+        .storage()
+        .persistent()
+        .has(&DataKey::IdChecked(leader.clone()))
+    {
+        return Err(Error::NotIdChecked);
+    }
+    if amount <= 0 {
+        return Err(Error::AmountZero);
+    }
+    let rate: RateFix = env
+        .storage()
+        .instance()
+        .get(&DataKey::Rate)
+        .ok_or(Error::StaleOracle)?;
+    if env.ledger().timestamp() > rate.valid_until {
+        return Err(Error::StaleOracle);
+    }
+    Ok(rate)
+}
+
+fn add_leader_swap(env: &Env, union: &Address, usdc: i128) {
+    let k = DataKey::LeaderSwapUsdc(union.clone());
+    let held: i128 = env.storage().persistent().get(&k).unwrap_or(0);
+    env.storage().persistent().set(&k, &(held + usdc));
     bump(env, &k);
 }
 
@@ -1062,6 +1114,87 @@ impl FxPoolContract {
         .publish(&env);
         bump_instance(&env);
         Ok(nin)
+    }
+
+    /// A leader's own swap, USDC → nIN in her wallet (executive decision 22 Oct): a leader of the union whose identity
+    /// the anchor checked. Her USDC stays in fx_pool, in the union's leader-swap bucket, as the backing of that nIN.
+    pub fn swap_usdc_to_nin(
+        env: Env,
+        leader: Address,
+        union: Address,
+        usdc: i128,
+    ) -> Result<i128, Error> {
+        let rate = leader_swap_checks(&env, &union, &leader, usdc)?;
+        let nin = usdc
+            .checked_mul(rate.inr_per_usd)
+            .map(|v| v / RATE_ONE)
+            .ok_or(Error::CapExceeded)?;
+        check_amount(&env, nin)?;
+        let me = env.current_contract_address();
+        TokenClient::new(&env, &get::<Address>(&env, &DataKey::Usdc)).transfer(&leader, &me, &usdc);
+        StellarAssetClient::new(&env, &nin_addr(&env)).mint(&me, &nin);
+        sandwich_transfer(&env, &me, &leader, &leader, nin);
+        add_leader_swap(&env, &union, usdc);
+        LeaderSwap {
+            union,
+            leader,
+            to_nin: true,
+            usdc,
+            nin,
+            inr_per_usd: rate.inr_per_usd,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(nin)
+    }
+
+    /// Back: her nIN is burned and USDC at the rate is paid only from the union's leader-swap bucket (never the LP,
+    /// senior or treasury USDC); refused when the bucket is short.
+    pub fn swap_nin_to_usdc(
+        env: Env,
+        leader: Address,
+        union: Address,
+        nin: i128,
+    ) -> Result<i128, Error> {
+        let rate = leader_swap_checks(&env, &union, &leader, nin)?;
+        check_amount(&env, nin)?;
+        let usdc = nin
+            .checked_mul(RATE_ONE)
+            .map(|v| v / rate.inr_per_usd)
+            .ok_or(Error::CapExceeded)?;
+        if usdc <= 0 {
+            return Err(Error::AmountZero);
+        }
+        let k = DataKey::LeaderSwapUsdc(union.clone());
+        let held: i128 = env.storage().persistent().get(&k).unwrap_or(0);
+        if usdc > held {
+            return Err(Error::NoUsdc);
+        }
+        let me = env.current_contract_address();
+        sandwich_transfer(&env, &leader, &me, &leader, nin);
+        TokenClient::new(&env, &nin_addr(&env)).burn(&me, &nin);
+        TokenClient::new(&env, &get::<Address>(&env, &DataKey::Usdc)).transfer(&me, &leader, &usdc);
+        env.storage().persistent().set(&k, &(held - usdc));
+        bump(&env, &k);
+        LeaderSwap {
+            union,
+            leader,
+            to_nin: false,
+            usdc,
+            nin,
+            inr_per_usd: rate.inr_per_usd,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(usdc)
+    }
+
+    /// USDC in a union's leader-swap bucket (swap_usdc_to_nin less swap_nin_to_usdc).
+    pub fn leader_swap_usdc(env: Env, union: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LeaderSwapUsdc(union))
+            .unwrap_or(0)
     }
 
     /// USDC behind a union's treasury nIN (deposit_usdc_treasury).
