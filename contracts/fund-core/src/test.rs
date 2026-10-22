@@ -860,6 +860,29 @@ fn hash(env: &Env, b: u8) -> BytesN<32> {
 }
 
 impl Fx {
+    /// The leader swaps USDC into the union treasury: `nin` at 100 nIN a USDC; the rate in force
+    /// before is put back afterwards.
+    fn treasury_usdc(&self, nin: i128) -> Result<i128, FxError> {
+        let f = self.fx();
+        self.env.mock_all_auths();
+        let prev = f.rate();
+        let now = self.env.ledger().timestamp();
+        f.override_rate(&(100 * NIN), &(now + 86_400));
+        let usdc = nin / 100;
+        StellarAssetClient::new(&self.env, &self.usdc).mint(&self.leader, &usdc);
+        let r = f.try_deposit_usdc_treasury(&self.leader, &self.union, &usdc);
+        if let Some(p) = prev {
+            if p.valid_until > now {
+                f.override_rate(&p.inr_per_usd, &p.valid_until);
+            }
+        }
+        match r {
+            Ok(Ok(v)) => Ok(v),
+            Err(Ok(e)) => Err(e),
+            other => panic!("treasury usdc: {other:?}"),
+        }
+    }
+
     /// The leader scans rupees in; only the leader signs (fx_pool signs its own pull).
     fn scan(
         &self,
@@ -869,6 +892,12 @@ impl Fx {
         receipt: u8,
         loan: Option<BytesN<32>>,
     ) -> Result<u64, FxError> {
+        // Counted cash never goes into the treasury (22 Oct): the tests' treasury top-ups are the
+        // leader's USDC swapped in (deposit_usdc_treasury), at 100 nIN a USDC for exact amounts.
+        if purpose == Purpose::Treasury {
+            let _ = receipt;
+            return self.treasury_usdc(amount).map(|_| 0);
+        }
         let args = (
             self.leader.clone(),
             self.union.clone(),
@@ -1629,7 +1658,11 @@ fn collect_then_bring_through_an_lp() {
     assert_eq!(f.lp_usdc(&fx.union), 99_000_000 - 50_500_000);
     f.confirm(&fx.leader, &b);
     assert_eq!(usdc.balance(&lp), 50 * NIN - 99_000_000 + 50_500_000);
-    assert_eq!(usdc.balance(&fx.fx_id), 99_000_000 - 50_500_000);
+    // fx_pool also holds the treasury's USDC backing (the fixture's treasury top-up).
+    assert_eq!(
+        usdc.balance(&fx.fx_id) - f.treasury_usdc(&fx.union),
+        99_000_000 - 50_500_000
+    );
     assert_eq!(f.offers_of(&fx.union).len(), 0);
     // The LP never holds nIN; nIN books are untouched by swaps.
     assert_eq!(fx.token().balance(&lp), 0);
@@ -2745,4 +2778,91 @@ fn leader_deposits_her_own_nin_into_the_treasury() {
         c.try_leader_deposit_treasury(&fx.leader, &fx.union, &NIN),
         Err(Ok(Error::Paused))
     );
+}
+
+// ---------- 22 Oct: the treasury is USDC-backed, never counted cash ----------
+
+#[test]
+fn treasury_cash_scan_is_refused() {
+    let fx = setup();
+    let f = fx.fx();
+    fx.env.mock_all_auths();
+    assert_eq!(
+        f.try_cash_scan_mint(
+            &fx.leader,
+            &fx.union,
+            &Purpose::Treasury,
+            &fx.leader,
+            &(1_000 * NIN),
+            &hash(&fx.env, 0x71),
+            &None,
+        ),
+        Err(Ok(FxError::Unauthorized))
+    );
+    assert_eq!(fx.core().union_treasury(&fx.union), 0);
+}
+
+#[test]
+fn leader_usdc_into_the_treasury() {
+    let fx = setup();
+    let c = fx.core();
+    let f = fx.fx();
+    fx.env.mock_all_auths();
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&fx.leader, &(100 * NIN));
+    // No rate yet: refused.
+    assert_eq!(
+        f.try_deposit_usdc_treasury(&fx.leader, &fx.union, &(10 * NIN)),
+        Err(Ok(FxError::StaleOracle))
+    );
+    f.override_rate(&(95 * NIN), &(T0 + 86_400));
+
+    // Only the leader signs: her USDC transfer, fx_pool's own pull into fund_core.
+    let args = (fx.leader.clone(), fx.union.clone(), 100 * NIN);
+    fx.env.mock_auths(&[MockAuth {
+        address: &fx.leader,
+        invoke: &MockAuthInvoke {
+            contract: &fx.fx_id,
+            fn_name: "deposit_usdc_treasury",
+            args: args.into_val(&fx.env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &fx.usdc,
+                fn_name: "transfer",
+                args: (fx.leader.clone(), fx.fx_id.clone(), 100 * NIN).into_val(&fx.env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+    assert_eq!(
+        f.deposit_usdc_treasury(&fx.leader, &fx.union, &(100 * NIN)),
+        9_500 * NIN
+    );
+    fx.env.mock_all_auths();
+    assert_eq!(c.union_treasury(&fx.union), 9_500 * NIN);
+    assert_eq!(f.treasury_usdc(&fx.union), 100 * NIN);
+    assert_eq!(
+        TokenClient::new(&fx.env, &fx.usdc).balance(&fx.fx_id),
+        100 * NIN
+    );
+    assert_eq!(fx.token().balance(&fx.fx_id), 0);
+
+    // Above the per-call cap (₹10,000): refused.
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&fx.leader, &(200 * NIN));
+    assert_eq!(
+        f.try_deposit_usdc_treasury(&fx.leader, &fx.union, &(200 * NIN)),
+        Err(Ok(FxError::CapExceeded))
+    );
+    // Not a leader of the union: refused.
+    let outsider = Address::generate(&fx.env);
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&outsider, &(10 * NIN));
+    assert_eq!(
+        f.try_deposit_usdc_treasury(&outsider, &fx.union, &(10 * NIN)),
+        Err(Ok(FxError::NotLeader))
+    );
+    // The rate went stale: refused.
+    fx.env.ledger().set_timestamp(T0 + 2 * 86_400);
+    assert_eq!(
+        f.try_deposit_usdc_treasury(&fx.leader, &fx.union, &(10 * NIN)),
+        Err(Ok(FxError::StaleOracle))
+    );
+    assert_eq!(c.union_treasury(&fx.union), 9_500 * NIN);
 }

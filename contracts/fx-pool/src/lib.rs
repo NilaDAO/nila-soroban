@@ -164,7 +164,8 @@ pub enum Purpose {
     Repay = 1,
     /// Money recovered after a default.
     Recovery = 2,
-    /// The union's own cash into its treasury (R17); no escrow.
+    /// Refused since 22 Oct (executive decision): the treasury is the mirror of cash and its nIN is
+    /// always USDC-backed, so counted cash never goes into it. Kept for the value's position.
     Treasury = 3,
     /// Rupees an LP brought for a loan the drawer could not pay (Bring, R18): cash at hand
     /// until the draw hands them out (executive decision, 12 Oct). Opened by `confirm`, never by a scan.
@@ -220,6 +221,8 @@ pub enum DataKey {
     MoveBudget,
     /// The anchor's swap key (ed25519 public key): it signs each LP accept (C9b, C16). Instance.
     SwapKey,
+    /// USDC a union's leaders swapped into its treasury: the backing of that treasury nIN (22 Oct).
+    TreasuryUsdc(Address),
 }
 
 /// Rupees a leader took in, not yet lent out or settled (R15).
@@ -366,6 +369,17 @@ pub struct RateSet {
 #[contractevent]
 pub struct RateBandSet {
     pub band_bp: u32,
+}
+
+#[contractevent]
+pub struct TreasuryUsdcIn {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub leader: Address,
+    pub usdc: i128,
+    pub nin: i128,
+    pub inr_per_usd: i128,
 }
 
 #[contractevent]
@@ -703,8 +717,8 @@ impl FxPoolContract {
     /// The leader scanned rupees in (C6, L10, N11). `scan_hash` is the receipt's hash and
     /// is used once. Invest, repay and recovery open a 7-day escrow on the union's cash at
     /// hand, which may not exceed its treasury (R15). A repay larger than what she owes
-    /// mints only what is owed; the leader hands back the change. Returns the escrow id
-    /// (0 for a treasury deposit).
+    /// mints only what is owed; the leader hands back the change. Returns the escrow id.
+    /// Treasury is refused (22 Oct): counted cash never goes into the treasury.
     #[allow(clippy::too_many_arguments)]
     pub fn cash_scan_mint(
         env: Env,
@@ -728,13 +742,12 @@ impl FxPoolContract {
 
         let core = core_addr(&env)?;
         let fc = FundCoreClient::new(&env, &core);
-        let escrowed = purpose != Purpose::Treasury;
-        if purpose == Purpose::Bring {
+        // Counted cash never goes into the treasury (executive decision 22 Oct); a Bring is opened
+        // only by an LP's confirm.
+        if purpose == Purpose::Treasury || purpose == Purpose::Bring {
             return Err(Error::Unauthorized);
         }
-        if escrowed {
-            check_room(&env, &union, amount)?;
-        }
+        check_room(&env, &union, amount)?;
 
         let me = env.current_contract_address();
         let nin = nin_addr(&env);
@@ -746,10 +759,6 @@ impl FxPoolContract {
             Purpose::Invest => {
                 authorize_pull(&env, &core, amount);
                 fc.deposit_junior(&union, &member, &amount);
-            }
-            Purpose::Treasury => {
-                authorize_pull(&env, &core, amount);
-                fc.deposit_union_treasury(&union, &amount);
             }
             Purpose::Repay => {
                 let id = token_id.ok_or(Error::NoLoan)?;
@@ -768,12 +777,12 @@ impl FxPoolContract {
                 authorize_pull(&env, &core, amount);
                 fc.credit_recovery(&union, &id, &amount);
             }
-            // Refused above: only an LP's confirmed Bring opens one.
-            Purpose::Bring => return Err(Error::Unauthorized),
+            // Refused above.
+            Purpose::Treasury | Purpose::Bring => return Err(Error::Unauthorized),
         }
 
         let mut escrow_id = 0u64;
-        if escrowed && taken > 0 {
+        if taken > 0 {
             escrow_id = open_escrow(&env, &union, &member, purpose, taken);
         }
         CashScanned {
@@ -998,6 +1007,65 @@ impl FxPoolContract {
         .publish(&env);
         bump_instance(&env);
         Ok(nin)
+    }
+
+    /// A leader adds USDC to her union's treasury (executive decision 22 Oct): the USDC stays in
+    /// fx_pool as the backing, and the same value in nIN at the attester's rate goes into the
+    /// union treasury in fund_core. The only way, besides a leader's own nIN, that the treasury
+    /// grows. Same cap per call as a scan. Returns the nIN minted.
+    pub fn deposit_usdc_treasury(
+        env: Env,
+        leader: Address,
+        union: Address,
+        usdc: i128,
+    ) -> Result<i128, Error> {
+        require_not_paused(&env)?;
+        require_leader(&env, &union, &leader)?;
+        if usdc <= 0 {
+            return Err(Error::AmountZero);
+        }
+        let rate: RateFix = env
+            .storage()
+            .instance()
+            .get(&DataKey::Rate)
+            .ok_or(Error::StaleOracle)?;
+        if env.ledger().timestamp() > rate.valid_until {
+            return Err(Error::StaleOracle);
+        }
+        let nin = usdc
+            .checked_mul(rate.inr_per_usd)
+            .map(|v| v / RATE_ONE)
+            .ok_or(Error::CapExceeded)?;
+        check_amount(&env, nin)?;
+        let me = env.current_contract_address();
+        let usdc_addr: Address = get(&env, &DataKey::Usdc);
+        TokenClient::new(&env, &usdc_addr).transfer(&leader, &me, &usdc);
+        StellarAssetClient::new(&env, &nin_addr(&env)).mint(&me, &nin);
+        let core = core_addr(&env)?;
+        authorize_pull(&env, &core, nin);
+        FundCoreClient::new(&env, &core).deposit_union_treasury(&union, &nin);
+        let k = DataKey::TreasuryUsdc(union.clone());
+        let held: i128 = env.storage().persistent().get(&k).unwrap_or(0);
+        env.storage().persistent().set(&k, &(held + usdc));
+        bump(&env, &k);
+        TreasuryUsdcIn {
+            union,
+            leader,
+            usdc,
+            nin,
+            inr_per_usd: rate.inr_per_usd,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(nin)
+    }
+
+    /// USDC behind a union's treasury nIN (deposit_usdc_treasury).
+    pub fn treasury_usdc(env: Env, union: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TreasuryUsdc(union))
+            .unwrap_or(0)
     }
 
     pub fn senior_investor(env: Env, investor: Address) -> Option<SeniorInvestor> {
