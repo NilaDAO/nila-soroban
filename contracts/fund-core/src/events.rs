@@ -45,6 +45,12 @@ pub struct Claimed {
     pub union: Address,
     pub tranche: Tranche,
     pub amount: i128,
+    /// Collected over the desk (`claim_junior_cash`): burned and booked against cash at hand, not paid
+    /// to a wallet (executive decision 22 Oct).
+    pub cash: bool,
+    /// The part of `amount` booked against cash at hand (`fx_pool.settle_cash`), as `LoanDrawn.cash_settled`;
+    /// 0 on the wallet paths. Less than `amount` when the desk's cash at hand was short (desk reconciliation).
+    pub cash_settled: i128,
 }
 
 #[contractevent]

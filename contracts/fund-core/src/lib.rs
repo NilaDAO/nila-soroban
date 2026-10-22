@@ -583,13 +583,15 @@ fn request_unbond(
     Ok(snap)
 }
 
-/// After 14 days (R28), when the pool's idle cash covers it and the reserve.
+/// After 14 days (R28), when the pool's idle cash covers it and the reserve. `to_wallet` false (the desk,
+/// executive decision 22 Oct): nothing is paid to her wallet; the caller books the amount as cash.
 fn claim(
     env: &Env,
     junior: bool,
     union: &Address,
     who: &Address,
     max_shares: i128,
+    to_wallet: bool,
 ) -> Result<i128, Error> {
     if max_shares < 0 {
         return Err(Error::NegativeAmount);
@@ -639,11 +641,14 @@ fn claim(
     m.claimable_principal -= release;
     save_inv(env, junior, union, who, &inv);
     save_market(env, junior, union, &m);
-    if junior {
-        pay_member(env, union, who, amount)?;
-    } else {
-        // Senior payouts go out through fx_pool's USDC redeem (R47, X15): T2.
-        nin(env).transfer(&env.current_contract_address(), who, &amount);
+    // Over the desk (`to_wallet` false) the caller burns it and settles it against cash at hand.
+    if to_wallet {
+        if junior {
+            pay_member(env, union, who, amount)?;
+        } else {
+            // Senior payouts go out through fx_pool's USDC redeem (R47, X15): T2.
+            nin(env).transfer(&env.current_contract_address(), who, &amount);
+        }
     }
     Ok(amount)
 }
@@ -1008,6 +1013,9 @@ impl FundCore {
         Ok(())
     }
 
+    /// A leader's own junior investment, paid as nIN to her wallet (for treasury deposits). Members never
+    /// hold nIN (executive decision 22 Oct, "No nIN in a member's wallet (desk only)"): they use
+    /// `claim_junior_cash`.
     pub fn claim_junior(
         env: Env,
         union: Address,
@@ -1015,13 +1023,45 @@ impl FundCore {
         max_shares: i128,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
-        member.require_auth();
-        let amount = claim(&env, true, &union, &member, max_shares)?;
+        require_leader(&env, &union, &member)?;
+        let amount = claim(&env, true, &union, &member, max_shares, true)?;
         Claimed {
             investor: member,
             union,
             tranche: tranche(true),
             amount,
+            cash: false,
+            cash_settled: 0,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// Her junior investment collected over the desk (executive decision 22 Oct): she and a leader of her
+    /// union both sign; the claim's nIN is burned in fund_core and booked against the union's cash at hand,
+    /// as `draw_loan` does for the cash part. No nIN reaches her wallet. The leader hands the notes.
+    pub fn claim_junior_cash(
+        env: Env,
+        union: Address,
+        member: Address,
+        leader: Address,
+        max_shares: i128,
+    ) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        member.require_auth();
+        require_leader(&env, &union, &leader)?;
+        let amount = claim(&env, true, &union, &member, max_shares, false)?;
+        nin(&env).burn(&env.current_contract_address(), &amount);
+        let fx = cfg(&env).fx_pool.ok_or(Error::NotFxPool)?;
+        let settled = FxPoolClient::new(&env, &fx).settle_cash(&union, &amount);
+        Claimed {
+            investor: member,
+            union,
+            tranche: tranche(true),
+            amount,
+            cash: true,
+            cash_settled: settled,
         }
         .publish(&env);
         bump_instance(&env);
@@ -1084,12 +1124,14 @@ impl FundCore {
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         investor.require_auth();
-        let amount = claim(&env, false, &union, &investor, max_shares)?;
+        let amount = claim(&env, false, &union, &investor, max_shares, true)?;
         Claimed {
             investor,
             union,
             tranche: tranche(false),
             amount,
+            cash: false,
+            cash_settled: 0,
         }
         .publish(&env);
         bump_instance(&env);

@@ -95,7 +95,9 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
       `upgrade_delay` = 172800 (48 h) on every contract: demo builds have a 60-second timelock.
 - [ ] One small end-to-end run per union, with real people:
   - treasury scan, invest scan, draw, repay scan;
-  - a cash-out and a pay-out;
+  - a cash-out and a pay-out (a leader's; members hold no nIN, 22 Oct);
+  - a member's investment collected over the desk (`claim_junior_cash`) and a moved member's cash-out
+    (`mint_moved` → `pay_out`); her nIN balance stays 0 throughout;
   - a leader's treasury withdraw and her deposit of her own nIN back (C10, sponsored by the node, O15).
 
   fund_core nIN must equal junior + senior + treasury + rainy + machine owners' balances (C5), and fx_pool must hold no nIN

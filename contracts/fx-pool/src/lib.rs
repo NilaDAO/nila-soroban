@@ -123,6 +123,8 @@ pub enum Error {
     QuoteChanged = 31,
     /// The anchor's signed quote has run out (C9b).
     QuoteExpired = 32,
+    /// The anchor has not checked this account's identity (K1, 22 Oct).
+    NotIdChecked = 33,
 }
 
 /// Where a senior investor's USDC comes from (R24, D1): kept per deposit so the pools can be split later.
@@ -164,7 +166,8 @@ pub enum Purpose {
     Repay = 1,
     /// Money recovered after a default.
     Recovery = 2,
-    /// The union's own cash into its treasury (R17); no escrow.
+    /// Refused since 22 Oct (executive decision): the treasury is the mirror of cash and its nIN is
+    /// always USDC-backed, so counted cash never goes into it. Kept for the value's position.
     Treasury = 3,
     /// Rupees an LP brought for a loan the drawer could not pay (Bring, R18): cash at hand
     /// until the draw hands them out (executive decision, 12 Oct). Opened by `confirm`, never by a scan.
@@ -220,6 +223,12 @@ pub enum DataKey {
     MoveBudget,
     /// The anchor's swap key (ed25519 public key): it signs each LP accept (C9b, C16). Instance.
     SwapKey,
+    /// USDC a union's leaders swapped into its treasury: the backing of that treasury nIN (22 Oct).
+    TreasuryUsdc(Address),
+    /// An account whose identity the anchor checked (K1, SEP-12): its reference to the anchor's record (22 Oct).
+    IdChecked(Address),
+    /// USDC a union's id-checked leaders swapped into nIN in their own wallets: paid back only from here (22 Oct).
+    LeaderSwapUsdc(Address),
 }
 
 /// Rupees a leader took in, not yet lent out or settled (R15).
@@ -254,6 +263,8 @@ pub struct NinMoved {
     pub amount: i128,
     /// The Polygon tx that burned it.
     pub polygon_burn: BytesN<32>,
+    /// sha256 of her one-time code: the cash-out a leader pays at the desk (22 Oct).
+    pub code_hash: BytesN<32>,
 }
 
 /// The trust changed the move budget: by `delta`, now `budget`.
@@ -364,6 +375,30 @@ pub struct RateSet {
 #[contractevent]
 pub struct RateBandSet {
     pub band_bp: u32,
+}
+
+/// A leader's own swap (22 Oct): USDC → nIN in her wallet (`to_nin`), or back.
+#[contractevent]
+pub struct LeaderSwap {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub leader: Address,
+    pub to_nin: bool,
+    pub usdc: i128,
+    pub nin: i128,
+    pub inr_per_usd: i128,
+}
+
+#[contractevent]
+pub struct TreasuryUsdcIn {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub leader: Address,
+    pub usdc: i128,
+    pub nin: i128,
+    pub inr_per_usd: i128,
 }
 
 #[contractevent]
@@ -586,6 +621,43 @@ fn close_code(env: &Env, code_hash: &BytesN<32>) {
     bump(env, &k);
 }
 
+/// A leader's own swap: not paused, a leader of the union, her identity checked, a fresh rate.
+fn leader_swap_checks(
+    env: &Env,
+    union: &Address,
+    leader: &Address,
+    amount: i128,
+) -> Result<RateFix, Error> {
+    require_not_paused(env)?;
+    require_leader(env, union, leader)?;
+    if !env
+        .storage()
+        .persistent()
+        .has(&DataKey::IdChecked(leader.clone()))
+    {
+        return Err(Error::NotIdChecked);
+    }
+    if amount <= 0 {
+        return Err(Error::AmountZero);
+    }
+    let rate: RateFix = env
+        .storage()
+        .instance()
+        .get(&DataKey::Rate)
+        .ok_or(Error::StaleOracle)?;
+    if env.ledger().timestamp() > rate.valid_until {
+        return Err(Error::StaleOracle);
+    }
+    Ok(rate)
+}
+
+fn add_leader_swap(env: &Env, union: &Address, usdc: i128) {
+    let k = DataKey::LeaderSwapUsdc(union.clone());
+    let held: i128 = env.storage().persistent().get(&k).unwrap_or(0);
+    env.storage().persistent().set(&k, &(held + usdc));
+    bump(env, &k);
+}
+
 /// R10: her trustline is authorised only for the transfer and deauthorised right after.
 fn sandwich_transfer(env: &Env, from: &Address, to: &Address, member: &Address, amount: i128) {
     let nin = nin_addr(env);
@@ -701,8 +773,8 @@ impl FxPoolContract {
     /// The leader scanned rupees in (C6, L10, N11). `scan_hash` is the receipt's hash and
     /// is used once. Invest, repay and recovery open a 7-day escrow on the union's cash at
     /// hand, which may not exceed its treasury (R15). A repay larger than what she owes
-    /// mints only what is owed; the leader hands back the change. Returns the escrow id
-    /// (0 for a treasury deposit).
+    /// mints only what is owed; the leader hands back the change. Returns the escrow id.
+    /// Treasury is refused (22 Oct): counted cash never goes into the treasury.
     #[allow(clippy::too_many_arguments)]
     pub fn cash_scan_mint(
         env: Env,
@@ -726,13 +798,12 @@ impl FxPoolContract {
 
         let core = core_addr(&env)?;
         let fc = FundCoreClient::new(&env, &core);
-        let escrowed = purpose != Purpose::Treasury;
-        if purpose == Purpose::Bring {
+        // Counted cash never goes into the treasury (executive decision 22 Oct); a Bring is opened
+        // only by an LP's confirm.
+        if purpose == Purpose::Treasury || purpose == Purpose::Bring {
             return Err(Error::Unauthorized);
         }
-        if escrowed {
-            check_room(&env, &union, amount)?;
-        }
+        check_room(&env, &union, amount)?;
 
         let me = env.current_contract_address();
         let nin = nin_addr(&env);
@@ -744,10 +815,6 @@ impl FxPoolContract {
             Purpose::Invest => {
                 authorize_pull(&env, &core, amount);
                 fc.deposit_junior(&union, &member, &amount);
-            }
-            Purpose::Treasury => {
-                authorize_pull(&env, &core, amount);
-                fc.deposit_union_treasury(&union, &amount);
             }
             Purpose::Repay => {
                 let id = token_id.ok_or(Error::NoLoan)?;
@@ -766,12 +833,12 @@ impl FxPoolContract {
                 authorize_pull(&env, &core, amount);
                 fc.credit_recovery(&union, &id, &amount);
             }
-            // Refused above: only an LP's confirmed Bring opens one.
-            Purpose::Bring => return Err(Error::Unauthorized),
+            // Refused above.
+            Purpose::Treasury | Purpose::Bring => return Err(Error::Unauthorized),
         }
 
         let mut escrow_id = 0u64;
-        if escrowed && taken > 0 {
+        if taken > 0 {
             escrow_id = open_escrow(&env, &union, &member, purpose, taken);
         }
         CashScanned {
@@ -998,6 +1065,146 @@ impl FxPoolContract {
         Ok(nin)
     }
 
+    /// A leader adds USDC to her union's treasury (executive decision 22 Oct): the USDC stays in
+    /// fx_pool as the backing, and the same value in nIN at the attester's rate goes into the
+    /// union treasury in fund_core. The only way, besides a leader's own nIN, that the treasury
+    /// grows. Same cap per call as a scan. Returns the nIN minted.
+    pub fn deposit_usdc_treasury(
+        env: Env,
+        leader: Address,
+        union: Address,
+        usdc: i128,
+    ) -> Result<i128, Error> {
+        require_not_paused(&env)?;
+        require_leader(&env, &union, &leader)?;
+        if usdc <= 0 {
+            return Err(Error::AmountZero);
+        }
+        let rate: RateFix = env
+            .storage()
+            .instance()
+            .get(&DataKey::Rate)
+            .ok_or(Error::StaleOracle)?;
+        if env.ledger().timestamp() > rate.valid_until {
+            return Err(Error::StaleOracle);
+        }
+        let nin = usdc
+            .checked_mul(rate.inr_per_usd)
+            .map(|v| v / RATE_ONE)
+            .ok_or(Error::CapExceeded)?;
+        check_amount(&env, nin)?;
+        let me = env.current_contract_address();
+        let usdc_addr: Address = get(&env, &DataKey::Usdc);
+        TokenClient::new(&env, &usdc_addr).transfer(&leader, &me, &usdc);
+        StellarAssetClient::new(&env, &nin_addr(&env)).mint(&me, &nin);
+        let core = core_addr(&env)?;
+        authorize_pull(&env, &core, nin);
+        FundCoreClient::new(&env, &core).deposit_union_treasury(&union, &nin);
+        let k = DataKey::TreasuryUsdc(union.clone());
+        let held: i128 = env.storage().persistent().get(&k).unwrap_or(0);
+        env.storage().persistent().set(&k, &(held + usdc));
+        bump(&env, &k);
+        TreasuryUsdcIn {
+            union,
+            leader,
+            usdc,
+            nin,
+            inr_per_usd: rate.inr_per_usd,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(nin)
+    }
+
+    /// A leader's own swap, USDC → nIN in her wallet (executive decision 22 Oct): a leader of the union whose identity
+    /// the anchor checked. Her USDC stays in fx_pool, in the union's leader-swap bucket, as the backing of that nIN.
+    pub fn swap_usdc_to_nin(
+        env: Env,
+        leader: Address,
+        union: Address,
+        usdc: i128,
+    ) -> Result<i128, Error> {
+        let rate = leader_swap_checks(&env, &union, &leader, usdc)?;
+        let nin = usdc
+            .checked_mul(rate.inr_per_usd)
+            .map(|v| v / RATE_ONE)
+            .ok_or(Error::CapExceeded)?;
+        check_amount(&env, nin)?;
+        let me = env.current_contract_address();
+        TokenClient::new(&env, &get::<Address>(&env, &DataKey::Usdc)).transfer(&leader, &me, &usdc);
+        StellarAssetClient::new(&env, &nin_addr(&env)).mint(&me, &nin);
+        sandwich_transfer(&env, &me, &leader, &leader, nin);
+        add_leader_swap(&env, &union, usdc);
+        LeaderSwap {
+            union,
+            leader,
+            to_nin: true,
+            usdc,
+            nin,
+            inr_per_usd: rate.inr_per_usd,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(nin)
+    }
+
+    /// Back: her nIN is burned and USDC at the rate is paid only from the union's leader-swap bucket (never the LP,
+    /// senior or treasury USDC); refused when the bucket is short.
+    pub fn swap_nin_to_usdc(
+        env: Env,
+        leader: Address,
+        union: Address,
+        nin: i128,
+    ) -> Result<i128, Error> {
+        let rate = leader_swap_checks(&env, &union, &leader, nin)?;
+        check_amount(&env, nin)?;
+        let usdc = nin
+            .checked_mul(RATE_ONE)
+            .map(|v| v / rate.inr_per_usd)
+            .ok_or(Error::CapExceeded)?;
+        if usdc <= 0 {
+            return Err(Error::AmountZero);
+        }
+        let k = DataKey::LeaderSwapUsdc(union.clone());
+        let held: i128 = env.storage().persistent().get(&k).unwrap_or(0);
+        if usdc > held {
+            return Err(Error::NoUsdc);
+        }
+        let me = env.current_contract_address();
+        sandwich_transfer(&env, &leader, &me, &leader, nin);
+        TokenClient::new(&env, &nin_addr(&env)).burn(&me, &nin);
+        TokenClient::new(&env, &get::<Address>(&env, &DataKey::Usdc)).transfer(&me, &leader, &usdc);
+        env.storage().persistent().set(&k, &(held - usdc));
+        bump(&env, &k);
+        LeaderSwap {
+            union,
+            leader,
+            to_nin: false,
+            usdc,
+            nin,
+            inr_per_usd: rate.inr_per_usd,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(usdc)
+    }
+
+    /// USDC in a union's leader-swap bucket (swap_usdc_to_nin less swap_nin_to_usdc).
+    pub fn leader_swap_usdc(env: Env, union: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LeaderSwapUsdc(union))
+            .unwrap_or(0)
+    }
+
+    /// USDC behind a union's treasury nIN (deposit_usdc_treasury).
+    pub fn treasury_usdc(env: Env, union: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TreasuryUsdc(union))
+            .unwrap_or(0)
+    }
+
     pub fn senior_investor(env: Env, investor: Address) -> Option<SeniorInvestor> {
         env.storage()
             .persistent()
@@ -1046,7 +1253,8 @@ impl FxPoolContract {
     // ---------- the move (M1) ----------
 
     /// The move (executive decision, 16 Oct): her Polygon nIN was burned on Polygon (tx
-    /// `polygon_burn`); the attester mints the same amount to her here, once per burn. She
+    /// `polygon_burn`); the attester mints the same amount here, once per burn, as a cash-out she collects
+    /// at the desk (`mint_moved`, 22 Oct: no nIN in a member's wallet). She
     /// must hold an attested title in the union (or be a leader), so the oracle burns on
     /// Polygon only after her title is on Stellar. At most `max_scan` per burn, like a scan.
     /// The trust adds to (or, negative, takes back from) what the attester may still mint for
@@ -1083,6 +1291,7 @@ impl FxPoolContract {
         member: Address,
         amount: i128,
         polygon_burn: BytesN<32>,
+        code_hash: BytesN<32>,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         attester.require_auth();
@@ -1098,6 +1307,15 @@ impl FxPoolContract {
         if env.storage().persistent().has(&k) {
             return Err(Error::AlreadyMoved);
         }
+        let ck = DataKey::CashOut(code_hash.clone());
+        if env.storage().persistent().has(&ck)
+            || env
+                .storage()
+                .persistent()
+                .has(&DataKey::CodeUsed(code_hash.clone()))
+        {
+            return Err(Error::CodeUsed);
+        }
         let budget: i128 = env
             .storage()
             .instance()
@@ -1111,22 +1329,27 @@ impl FxPoolContract {
             .set(&DataKey::MoveBudget, &(budget - amount));
         env.storage().persistent().set(&k, &true);
         bump(&env, &k);
-        // R10: her trustline is authorised only for this mint, and left as it was.
-        let sac = StellarAssetClient::new(&env, &nin_addr(&env));
-        let was = sac.authorized(&member);
-        if !was {
-            sac.set_authorized(&member, &true);
-        }
-        sac.mint(&member, &amount);
-        if !was {
-            sac.set_authorized(&member, &false);
-        }
+        // No nIN in a member's wallet (executive decision 22 Oct): the moved nIN is minted into fx_pool as a
+        // cash-out under her code, which never expires; a leader of her union pays it with `pay_out`.
+        StellarAssetClient::new(&env, &nin_addr(&env))
+            .mint(&env.current_contract_address(), &amount);
+        env.storage().persistent().set(
+            &ck,
+            &CashOut {
+                member: member.clone(),
+                union: union.clone(),
+                amount,
+                expires: u64::MAX,
+            },
+        );
+        bump(&env, &ck);
         bump_instance(&env);
         NinMoved {
             union,
             member,
             amount,
             polygon_burn,
+            code_hash,
         }
         .publish(&env);
         Ok(())
