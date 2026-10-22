@@ -108,6 +108,14 @@ pub struct LpMemberSet {
     pub accepted: bool,
 }
 
+/// The anchor checked (or withdrew) an account's identity (K1, 22 Oct).
+#[contractevent]
+pub struct IdCheckedSet {
+    #[topic]
+    pub account: Address,
+    pub checked: bool,
+}
+
 #[contractevent]
 pub struct LpFeeSet {
     pub fee_bp: u32,
@@ -357,6 +365,14 @@ impl FxPoolContract {
             .ok_or(Error::NotAnchor)?;
         anchor.require_auth();
         if accepted
+            && !env
+                .storage()
+                .persistent()
+                .has(&DataKey::IdChecked(lp.clone()))
+        {
+            return Err(Error::NotIdChecked);
+        }
+        if accepted
             && !LandTitleClient::new(&env, &get(&env, &DataKey::LandTitle)).holds_title(&union, &lp)
         {
             return Err(Error::NotMember);
@@ -387,6 +403,36 @@ impl FxPoolContract {
     }
 
     /// The LP's fee on each swap, at most 5%.
+    /// K1 (22 Oct): the anchor marks an account's identity as checked (or withdraws it), with the reference to its
+    /// SEP-12 record. An LP needs it before `set_lp`; the app unlocks a leader's USDC (A9) on it.
+    pub fn set_id_checked(
+        env: Env,
+        account: Address,
+        checked: bool,
+        kyc_ref: BytesN<32>,
+    ) -> Result<(), Error> {
+        let anchor: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Anchor)
+            .ok_or(Error::NotAnchor)?;
+        anchor.require_auth();
+        let k = DataKey::IdChecked(account.clone());
+        if checked {
+            env.storage().persistent().set(&k, &kyc_ref);
+            bump(&env, &k);
+        } else {
+            env.storage().persistent().remove(&k);
+        }
+        IdCheckedSet { account, checked }.publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    pub fn id_checked(env: Env, account: Address) -> bool {
+        env.storage().persistent().has(&DataKey::IdChecked(account))
+    }
+
     pub fn set_lp_fee(env: Env, fee_bp: u32) -> Result<(), Error> {
         require_admin(&env)?;
         if fee_bp > 500 {

@@ -1549,6 +1549,7 @@ impl Fx {
         let f = self.fx();
         let anchor = Address::generate(&self.env);
         f.set_anchor(&anchor);
+        f.set_id_checked(&self.neighbour, &true, &loan_id(&self.env, 0x4B));
         f.set_lp(
             &self.union,
             &self.neighbour,
@@ -1802,12 +1803,19 @@ fn only_member_lps_accepted_by_the_anchor() {
     let (anchor, lp) = fx.lp_ready();
     let (s24, q) = fx.ids();
     let stranger = Address::generate(&fx.env);
+    // K1 (22 Oct): the anchor checked her identity first.
+    assert_eq!(
+        f.try_set_lp(&fx.union, &stranger, &true, &loan_id(&fx.env, 1)),
+        Err(Ok(FxError::NotIdChecked))
+    );
+    f.set_id_checked(&stranger, &true, &loan_id(&fx.env, 2));
     // R20: a member with a title the union minted.
     assert_eq!(
         f.try_set_lp(&fx.union, &stranger, &true, &loan_id(&fx.env, 1)),
         Err(Ok(FxError::NotMember))
     );
     // Only the anchor accepts LPs.
+    f.set_id_checked(&fx.borrower, &true, &loan_id(&fx.env, 3));
     fx.env.set_auths(&[]);
     assert!(f
         .try_set_lp(&fx.union, &fx.borrower, &true, &loan_id(&fx.env, 1))
@@ -2261,6 +2269,7 @@ fn bring_respects_the_daily_cap_and_the_voucher_earmark() {
     let (fx, c, f) = (&v.fx, v.fx.core(), v.fx.fx());
     let anchor = Address::generate(&fx.env);
     f.set_anchor(&anchor);
+    f.set_id_checked(&v.owner, &true, &loan_id(&fx.env, 0x4B));
     f.set_lp(&fx.union, &v.owner, &true, &loan_id(&fx.env, 0x4C));
     fx.scan(Purpose::Treasury, &fx.leader, 5_000 * NIN, 1, None)
         .unwrap();
@@ -2699,6 +2708,7 @@ fn accept_needs_the_anchors_signed_quote() {
         f.try_accept(&lp, &c, &s24, &q, &(usdc + 1), &until, &sig),
         Err(Err(_))
     ));
+    f.set_id_checked(&fx.borrower, &true, &loan_id(&fx.env, 0x4B));
     f.set_lp(&fx.union, &fx.borrower, &true, &loan_id(&fx.env, 0x4D));
     assert!(matches!(
         f.try_accept(&fx.borrower, &c, &s24, &q, &usdc, &until, &sig),
@@ -2865,4 +2875,31 @@ fn leader_usdc_into_the_treasury() {
         Err(Ok(FxError::StaleOracle))
     );
     assert_eq!(c.union_treasury(&fx.union), 9_500 * NIN);
+}
+
+#[test]
+fn the_anchor_marks_identity_checked_and_can_withdraw_it() {
+    let fx = setup();
+    let f = fx.fx();
+    let leader = fx.leader.clone();
+    // No anchor set yet: nobody can mark it.
+    assert_eq!(
+        f.try_set_id_checked(&leader, &true, &loan_id(&fx.env, 9)),
+        Err(Ok(FxError::NotAnchor))
+    );
+    let anchor = Address::generate(&fx.env);
+    f.set_anchor(&anchor);
+    assert!(!f.id_checked(&leader));
+    f.set_id_checked(&leader, &true, &loan_id(&fx.env, 9));
+    assert!(f.id_checked(&leader));
+    // Only the anchor signs it.
+    fx.env.set_auths(&[]);
+    assert!(f
+        .try_set_id_checked(&leader, &false, &loan_id(&fx.env, 9))
+        .is_err());
+    fx.env.mock_all_auths();
+    assert!(f.id_checked(&leader));
+    // Withdrawn.
+    f.set_id_checked(&leader, &false, &loan_id(&fx.env, 9));
+    assert!(!f.id_checked(&leader));
 }

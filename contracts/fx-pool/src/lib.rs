@@ -123,6 +123,8 @@ pub enum Error {
     QuoteChanged = 31,
     /// The anchor's signed quote has run out (C9b).
     QuoteExpired = 32,
+    /// The anchor has not checked this account's identity (K1, 22 Oct).
+    NotIdChecked = 33,
 }
 
 /// Where a senior investor's USDC comes from (R24, D1): kept per deposit so the pools can be split later.
@@ -223,6 +225,8 @@ pub enum DataKey {
     SwapKey,
     /// USDC a union's leaders swapped into its treasury: the backing of that treasury nIN (22 Oct).
     TreasuryUsdc(Address),
+    /// An account whose identity the anchor checked (K1, SEP-12): its reference to the anchor's record (22 Oct).
+    IdChecked(Address),
 }
 
 /// Rupees a leader took in, not yet lent out or settled (R15).
