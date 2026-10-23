@@ -7,8 +7,9 @@
 //! - **Machines** (D15, R82, R83): a leader registers a member's machine (L13); the owner
 //!   confirms (N9) and can put it on hold with a reason.
 //! - **Vouchers** (R51–R55): a loan's voucher part is hours of machinery, granted by fund_core at
-//!   the draw. Non-transferable by construction (C5). She opens a spend code (A8a, 48 h, capped);
-//!   the owner scans it and claims hours (D19), within the machine's hours a week (R84).
+//!   the draw. Non-transferable by construction (C5). She signs a one-time authorisation for
+//!   `claim` up to X hours (A8a QR; Soroban's nonce and expiry ledger, ~48 h; executive decision
+//!   23 Oct); the owner scans it and claims hours (D19), within the machine's hours a week (R84).
 //! - **Pay** (D18, R85): at the claim fund_core pays the owner the prepay (diesel plus a share of
 //!   the driver part, X32) from senior money; the rest is pending until she repays.
 //!
@@ -17,7 +18,7 @@
 use nila_common::{bump_instance, upgrade, FundCoreClient, LandTitleClient, RolesClient};
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contractmeta, contracttype, vec, Address,
-    Bytes, BytesN, Env, Vec,
+    BytesN, Env, IntoVal, Vec,
 };
 
 contractmeta!(key = "binver", val = "0.1.0");
@@ -44,8 +45,6 @@ pub const DAY: u64 = 86_400;
 #[cfg(feature = "testnet-short-windows")]
 pub const DAY: u64 = 10;
 
-/// A spend code lives 48 hours (R54).
-pub const CODE_TERM: u64 = 2 * DAY;
 pub const WEEK: u64 = 7 * DAY;
 /// How long a week's hour count lives, in ledgers (~5 s each): eight days covers any claim in
 /// that week, whatever day it was first written.
@@ -74,11 +73,8 @@ pub enum Error {
     TooManyTypes = 9,
     /// Not confirmed by the owner, or on hold.
     Unavailable = 10,
-    /// More hours than the code, the voucher or the machine's week allows.
+    /// More hours than her authorisation, the voucher or the machine's week allows.
     TooManyHours = 11,
-    BadCode = 12,
-    CodeExpired = 13,
-    CodeOpen = 14,
     Paused = 15,
     VoucherExists = 16,
     UpgradeNotReady = 17,
@@ -123,6 +119,7 @@ pub struct Voucher {
     pub used: u32,
     /// Lapsed when the loan closed or defaulted.
     pub void: bool,
+    /// Unused since the signed claim (23 Oct); kept so stored vouchers keep their layout.
     pub code_hash: Option<BytesN<32>>,
     pub code_max: u32,
     pub code_expires: u64,
@@ -191,16 +188,6 @@ pub struct VoucherGranted {
     pub token_id: BytesN<32>,
     pub member: Address,
     pub hours: u32,
-}
-
-#[contractevent]
-pub struct CodeOpened {
-    #[topic]
-    pub union: Address,
-    #[topic]
-    pub token_id: BytesN<32>,
-    pub max_hours: u32,
-    pub expires: u64,
 }
 
 #[contractevent]
@@ -570,7 +557,6 @@ impl MachineryContract {
         if let Ok(mut v) = load_voucher(&env, &union, &token_id) {
             if !v.void {
                 v.void = true;
-                v.code_hash = None;
                 save_voucher(&env, &union, &token_id, &v);
                 VoucherVoided {
                     union,
@@ -583,62 +569,10 @@ impl MachineryContract {
         Ok(())
     }
 
-    /// A8 → A8a: she opens a spend code for at most `max_hours`, valid 48 h; one at a time.
-    pub fn open_code(
-        env: Env,
-        member: Address,
-        union: Address,
-        token_id: BytesN<32>,
-        max_hours: u32,
-        code_hash: BytesN<32>,
-    ) -> Result<u64, Error> {
-        require_not_paused(&env)?;
-        member.require_auth();
-        let mut v = load_voucher(&env, &union, &token_id)?;
-        if v.member != member || v.void {
-            return Err(Error::NotFound);
-        }
-        let now = env.ledger().timestamp();
-        if v.code_hash.is_some() && now < v.code_expires {
-            return Err(Error::CodeOpen);
-        }
-        if max_hours == 0 || max_hours > v.hours - v.used {
-            return Err(Error::TooManyHours);
-        }
-        let expires = now + CODE_TERM;
-        v.code_hash = Some(code_hash);
-        v.code_max = max_hours;
-        v.code_expires = expires;
-        save_voucher(&env, &union, &token_id, &v);
-        CodeOpened {
-            union,
-            token_id,
-            max_hours,
-            expires,
-        }
-        .publish(&env);
-        Ok(expires)
-    }
-
-    /// A8: she cancels her open code.
-    pub fn cancel_code(
-        env: Env,
-        member: Address,
-        union: Address,
-        token_id: BytesN<32>,
-    ) -> Result<(), Error> {
-        member.require_auth();
-        let mut v = load_voucher(&env, &union, &token_id)?;
-        if v.member != member {
-            return Err(Error::NotFound);
-        }
-        v.code_hash = None;
-        save_voucher(&env, &union, &token_id, &v);
-        Ok(())
-    }
-
-    /// D19: the owner scans her code after the job and claims the hours worked. fund_core pays
-    /// the prepay from senior money at once and books the rest as pending (D18, R85).
+    /// D19: the owner scans her QR after the job and claims the hours worked (≤ `max_hours`, the
+    /// hours she signed for: her authorisation of (union, token_id, max_hours) is used once, its
+    /// expiry ledger ~48 h out). fund_core pays the prepay from senior money at once and books the
+    /// rest as pending (D18, R85).
     #[allow(clippy::too_many_arguments)]
     pub fn claim(
         env: Env,
@@ -646,7 +580,7 @@ impl MachineryContract {
         machine_id: u64,
         union: Address,
         token_id: BytesN<32>,
-        code: Bytes,
+        max_hours: u32,
         hours: u32,
     ) -> Result<(i128, i128), Error> {
         require_not_paused(&env)?;
@@ -662,15 +596,13 @@ impl MachineryContract {
         if v.member == owner {
             return Err(Error::SelfClaim);
         }
-        let h: BytesN<32> = env.crypto().sha256(&code).into();
-        if v.void || v.code_hash != Some(h) {
-            return Err(Error::BadCode);
+        if v.void {
+            return Err(Error::NotFound);
         }
+        v.member
+            .require_auth_for_args((union.clone(), token_id.clone(), max_hours).into_val(&env));
         let now = env.ledger().timestamp();
-        if now >= v.code_expires {
-            return Err(Error::CodeExpired);
-        }
-        if hours == 0 || hours > v.code_max || hours > v.hours - v.used {
+        if hours == 0 || hours > max_hours || hours > v.hours - v.used {
             return Err(Error::TooManyHours);
         }
         let wk = DataKey::WeekUse(machine_id, now / WEEK);
@@ -688,9 +620,8 @@ impl MachineryContract {
         let pre = prepay_per_hour(&r, prepay_driver_bp(&env, &union));
         let prepay = pre * i128::from(hours);
         let pending = (total_per_hour(&r) - pre) * i128::from(hours);
-        // One claim per code; the rest of her hours stay with her (R55).
+        // One claim per signature; the rest of her hours stay with her (R55).
         v.used += hours;
-        v.code_hash = None;
         save_voucher(&env, &union, &token_id, &v);
         FundCoreClient::new(&env, &core_addr(&env)?)
             .pay_voucher(&union, &token_id, &owner, &hours, &prepay, &pending);

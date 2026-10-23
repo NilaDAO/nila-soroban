@@ -2022,14 +2022,18 @@ fn voucher_draw_claim_repay_and_collect() {
     // Senior cash held back is not claimable by seniors.
     assert_eq!(c.get_senior_market(&fx.union).cash, 10_000 * NIN);
 
-    // A8a: she opens a code for up to 6 hours; the owner works 4 and scans it.
-    let code = Bytes::from_array(&fx.env, b"tractor-code-1");
-    let h: BytesN<32> = fx.env.crypto().sha256(&code).into();
-    mc.open_code(&fx.borrower, &fx.union, &id, &6, &h);
+    // A8a: she signs for up to 6 hours; the owner works 4 and scans it.
     assert_eq!(
-        mc.claim(&v.owner, &v.machine, &fx.union, &id, &code, &4),
+        mc.claim(&v.owner, &v.machine, &fx.union, &id, &6, &4),
         (4 * PRE, 4 * PEND)
     );
+    // Her own authorisation of (union, token, max hours) is what the claim used (23 Oct).
+    use soroban_sdk::{testutils::AuthorizedFunction, IntoVal, Symbol};
+    let signed: soroban_sdk::Vec<soroban_sdk::Val> =
+        (fx.union.clone(), id.clone(), 6u32).into_val(&fx.env);
+    assert!(fx.env.auths().iter().any(|(a, inv)| *a == fx.borrower
+        && matches!(&inv.function, AuthorizedFunction::Contract((c, f, args))
+            if *c == mc.address && *f == Symbol::new(&fx.env, "claim") && *args == signed)));
     // The prepay is in the owner's wallet at once, from senior money (D18, N4).
     assert_eq!(fx.token().balance(&v.owner), 4 * PRE);
     assert!(!fx.authorized(&v.owner));
@@ -2040,11 +2044,8 @@ fn voucher_draw_claim_repay_and_collect() {
         (b.senior_out, b.dues.get(0).unwrap().amount),
         (4 * PRE, 4 * PEND)
     );
-    // One claim per code; the rest of her hours stay with her.
-    assert_eq!(
-        mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &code, &1),
-        Err(Ok(nila_machinery::Error::BadCode))
-    );
+    // The rest of her hours stay with her (one claim per signature: Soroban's nonce).
+    assert_eq!(mc.voucher(&fx.union, &id).unwrap().used, 4);
     // Her lock counts the voucher part too (R27): she owes more than her 2,000, so all of it.
     let p = c.position(&fx.union, &fx.borrower);
     assert_eq!(p.locked, p.invested);
@@ -2072,7 +2073,7 @@ fn voucher_draw_claim_repay_and_collect() {
 }
 
 #[test]
-fn claims_stay_inside_code_voucher_week_and_availability() {
+fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
     let v = vsetup();
     let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
     let id = loan_id(&fx.env, 1);
@@ -2083,51 +2084,54 @@ fn claims_stay_inside_code_voucher_week_and_availability() {
         c.try_repay_loan(&fx.union, &id, &NIN),
         Err(Ok(Error::NothingOwed))
     );
-    let code = Bytes::from_array(&fx.env, b"c1");
-    let h: BytesN<32> = fx.env.crypto().sha256(&code).into();
     use nila_machinery::Error as ME;
+    // The owner alone cannot claim: her own authorisation is required.
+    {
+        use soroban_sdk::{
+            testutils::{MockAuth, MockAuthInvoke},
+            IntoVal,
+        };
+        fx.env.mock_auths(&[MockAuth {
+            address: &v.owner,
+            invoke: &MockAuthInvoke {
+                contract: &mc.address,
+                fn_name: "claim",
+                args: (&v.owner, v.machine, &fx.union, &id, 10u32, 1u32).into_val(&fx.env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert!(mc
+            .try_claim(&v.owner, &v.machine, &fx.union, &id, &10, &1)
+            .is_err());
+        fx.env.mock_all_auths();
+    }
+    // Not her machine; more than she signed for; more than her voucher; more than a machine's
+    // hours a week.
     assert_eq!(
-        mc.try_open_code(&fx.borrower, &fx.union, &id, &15, &h),
-        Err(Ok(ME::TooManyHours))
-    );
-    mc.open_code(&fx.borrower, &fx.union, &id, &10, &h);
-    assert_eq!(
-        mc.try_open_code(&fx.borrower, &fx.union, &id, &1, &h),
-        Err(Ok(ME::CodeOpen))
-    );
-    // Not her machine; more than the code; more than a machine's hours a week.
-    assert_eq!(
-        mc.try_claim(&fx.borrower, &v.machine, &fx.union, &id, &code, &1),
+        mc.try_claim(&fx.borrower, &v.machine, &fx.union, &id, &10, &1),
         Err(Ok(ME::NotOwner))
     );
     assert_eq!(
-        mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &code, &11),
+        mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &10, &11),
+        Err(Ok(ME::TooManyHours))
+    );
+    assert_eq!(
+        mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &15, &15),
         Err(Ok(ME::TooManyHours))
     );
     let small = mc.register_machine(&fx.leader, &fx.union, &v.owner, &1, &3, &id);
     mc.confirm_machine(&v.owner, &small);
     assert_eq!(
-        mc.try_claim(&v.owner, &small, &fx.union, &id, &code, &4),
+        mc.try_claim(&v.owner, &small, &fx.union, &id, &10, &4),
         Err(Ok(ME::TooManyHours))
     );
     // On hold (R83): no claims.
     mc.set_hold(&v.owner, &v.machine, &true, &1);
     assert_eq!(
-        mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &code, &1),
+        mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &10, &1),
         Err(Ok(ME::Unavailable))
     );
     mc.set_hold(&v.owner, &v.machine, &false, &0);
-    // A wrong code, then an expired one (48 h).
-    let wrong = Bytes::from_array(&fx.env, b"c2");
-    assert_eq!(
-        mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &wrong, &1),
-        Err(Ok(ME::BadCode))
-    );
-    fx.at(T0 + 2 * 86_400);
-    assert_eq!(
-        mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &code, &1),
-        Err(Ok(ME::CodeExpired))
-    );
     // Only a leader registers; only members own machines; rates are the union's (3 of 5).
     assert_eq!(
         mc.try_register_machine(&fx.borrower, &fx.union, &v.owner, &1, &40, &id),
@@ -2164,10 +2168,7 @@ fn default_pays_the_owner_and_senior_from_her_investment_first() {
         &T0,
     );
     c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &2);
-    let code = Bytes::from_array(&fx.env, b"c1");
-    let h: BytesN<32> = fx.env.crypto().sha256(&code).into();
-    mc.open_code(&fx.borrower, &fx.union, &id, &2, &h);
-    mc.claim(&v.owner, &v.machine, &fx.union, &id, &code, &2);
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &2, &2);
     c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
     fx.at(T0 + 111 * 86_400 + 1);
     c.mark_default(&fx.union, &id);
@@ -2195,10 +2196,7 @@ fn default_beyond_her_investment_owner_still_paid_senior_takes_its_loss() {
         &T0,
     );
     c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &4);
-    let code = Bytes::from_array(&fx.env, b"c1");
-    let h: BytesN<32> = fx.env.crypto().sha256(&code).into();
-    mc.open_code(&fx.borrower, &fx.union, &id, &4, &h);
-    mc.claim(&v.owner, &v.machine, &fx.union, &id, &code, &4);
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &4, &4);
     c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
     fx.at(T0 + 111 * 86_400 + 1);
     c.mark_default(&fx.union, &id);
@@ -2231,11 +2229,8 @@ fn review_fixes_self_claim_rate_rise_earmarks_close_unused() {
     let id = loan_id(&fx.env, 1);
     c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &4, &T0);
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &4);
-    let code = Bytes::from_array(&fx.env, b"c1");
-    let h: BytesN<32> = fx.env.crypto().sha256(&code).into();
-    mc.open_code(&fx.borrower, &fx.union, &id, &4, &h);
     assert_eq!(
-        mc.try_claim(&fx.borrower, &mine, &fx.union, &id, &code, &1),
+        mc.try_claim(&fx.borrower, &mine, &fx.union, &id, &4, &1),
         Err(Ok(ME::SelfClaim))
     );
     // Another loan holds back 10 hours: 14 × ₹700 of the 10,000 senior nIN are earmarked.
@@ -2247,10 +2242,10 @@ fn review_fixes_self_claim_rate_rise_earmarks_close_unused() {
     // other loan's earmark, so the claim is refused.
     mc.set_rate(&fx.union, &1, &tractor(15_000_000));
     assert!(mc
-        .try_claim(&v.owner, &v.machine, &fx.union, &id, &code, &4)
+        .try_claim(&v.owner, &v.machine, &fx.union, &id, &4, &4)
         .is_err());
     mc.set_rate(&fx.union, &1, &tractor(NIN));
-    mc.claim(&v.owner, &v.machine, &fx.union, &id, &code, &4);
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &4, &4);
 
     // She releases the voucher she no longer needs: nothing owed, the earmark goes back.
     assert_eq!(

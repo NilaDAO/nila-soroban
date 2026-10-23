@@ -85,7 +85,7 @@ storage:
 | `Types(union)` | persistent | Vec<u32> machine types with a rate (max 16) |
 | `PrepayDriverBp(union)` | persistent | u32 share of the driver part paid at the job (X32) |
 | `Machine(id)` | persistent | `Machine{union, owner, machine_type, hours_per_week, photos_hash, confirmed, on_hold, hold_reason}` |
-| `Voucher(union, token_id)` | persistent | `Voucher{member, hours, used, void, code_hash: Option, code_max, code_expires}` |
+| `Voucher(union, token_id)` | persistent | `Voucher{member, hours, used, void, code_hash: Option, code_max, code_expires}` (the three code fields unused since the signed claim, 23 Oct; kept for the layout) |
 | `WeekUse(machine_id, week)` | **temporary** | u32 hours worked that week; lives ~8 days, then the network deletes it (C7) |
 
 ## fx_pool

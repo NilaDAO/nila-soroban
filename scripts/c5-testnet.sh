@@ -136,15 +136,11 @@ TX_DRAW=$(tx stellar contract invoke --id "$CORE" --source ${P}-member -- draw_l
   --member ${P}-member --token_id "$L" --cash $((400 * NIN)) --hours 10)
 expect "senior earmark" "$(view "$CORE" senior_earmark --union "$UNION")" "\"$((7000 * NIN))\""
 
-log "A8a: she opens a code for up to 6 hours; the owner works 4 and scans it (D19)"
-CODE=$(openssl rand -hex 16)
-CODE_HASH=$(printf '%s' "$CODE" | xxd -r -p | shasum -a 256 | awk '{print $1}')
-TX_CODE=$(tx stellar contract invoke --id "$MACH" --source ${P}-member -- open_code --member ${P}-member \
-  --union "$UNION" --token_id "$L" --max_hours 6 --code_hash "$CODE_HASH")
-must_fail "a claim above the code's hours" stellar contract invoke --id "$MACH" --source ${P}-owner -- \
-  claim --owner ${P}-owner --machine_id "$MACHINE" --union "$UNION" --token_id "$L" --code "$CODE" --hours 7
-TX_CLAIM=$(tx stellar contract invoke --id "$MACH" --source ${P}-owner -- claim --owner ${P}-owner \
-  --machine_id "$MACHINE" --union "$UNION" --token_id "$L" --code "$CODE" --hours 4)
+log "A8a: she signs for up to 6 hours (her auth entry for claim); the owner works 4 and claims (D19)"
+must_fail "a claim above her signed hours" stellar contract invoke --id "$MACH" --source ${P}-owner --auto-sign -- \
+  claim --owner ${P}-owner --machine_id "$MACHINE" --union "$UNION" --token_id "$L" --max_hours 6 --hours 7
+TX_CLAIM=$(tx stellar contract invoke --id "$MACH" --source ${P}-owner --auto-sign -- claim --owner ${P}-owner \
+  --machine_id "$MACHINE" --union "$UNION" --token_id "$L" --max_hours 6 --hours 4)
 expect "owner wallet after the job (prepay 4 × ₹700)" "$(view "$NIN_SAC" balance --id "$OWNER")" "\"$((2800 * NIN))\""
 expect "owner trustline after the payout" "$(view "$NIN_SAC" authorized --id "$OWNER")" "false"
 expect "owner's pending part (4 × ₹750)" \
@@ -176,7 +172,6 @@ TX_RATE_TABLE=$TX_RATE_TABLE
 TX_CONFIRM=$TX_CONFIRM
 TX_ATTEST=$TX_ATTEST
 TX_DRAW=$TX_DRAW
-TX_CODE=$TX_CODE
 TX_CLAIM=$TX_CLAIM
 TX_REPAY=$TX_REPAY
 TX_COLLECT=$TX_COLLECT
