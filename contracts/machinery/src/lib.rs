@@ -202,7 +202,7 @@ pub struct VoucherClaimed {
     pub token_id: BytesN<32>,
     pub machine_id: u64,
     pub owner: Address,
-    /// Whole hours worked on the machine.
+    /// Hours worked on the machine, in hundredths of an hour.
     pub hours: u32,
     /// Centi tractor hours they used of her voucher.
     pub units: u32,
@@ -302,14 +302,14 @@ fn total_per_hour(r: &RateParts) -> i128 {
 /// The machine type whose hour is the voucher's unit (executive decision 23 Oct).
 pub const TRACTOR_TYPE: u32 = 1;
 
-/// Centi tractor hours that `hours` of a machine at rate `r` use, rounded up.
-fn units_for(r: &RateParts, tractor: &RateParts, hours: u32) -> Result<u32, Error> {
+/// Centi tractor hours that `centi` hundredths of an hour on a machine at rate `r` use, rounded up.
+fn units_for(r: &RateParts, tractor: &RateParts, centi: u32) -> Result<u32, Error> {
     let t = total_per_hour(tractor);
     if t <= 0 {
         return Err(Error::NoRate);
     }
     let n = total_per_hour(r)
-        .checked_mul(i128::from(hours) * 100)
+        .checked_mul(i128::from(centi))
         .ok_or(Error::BadArg)?;
     u32::try_from((n + t - 1) / t).map_err(|_| Error::BadArg)
 }
@@ -591,9 +591,9 @@ impl MachineryContract {
         Ok(())
     }
 
-    /// D19: the owner scans her QR after the job and claims the hours worked (≤ `max_hours`, the
-    /// hours she signed for: her authorisation of (union, token_id, max_hours) is used once, its
-    /// expiry ledger ~48 h out). fund_core pays the prepay from senior money at once and books the
+    /// D19: the owner scans her QR after the job and claims the hours worked, `hours` in hundredths of
+    /// an hour (23 Oct), using ≤ `max_units` centi tractor hours, the units she signed for: her
+    /// authorisation of (union, token_id, max_units) is used once, its expiry ledger ~48 h out). fund_core pays the prepay from senior money at once and books the
     /// rest as pending (D18, R85).
     #[allow(clippy::too_many_arguments)]
     pub fn claim(
@@ -626,14 +626,15 @@ impl MachineryContract {
         let now = env.ledger().timestamp();
         let r = rate(&env, &union, m.machine_type).ok_or(Error::NoRate)?;
         let tractor = rate(&env, &union, TRACTOR_TYPE).ok_or(Error::NoRate)?;
-        // The hours worked on this machine, in tractor-hour units against her voucher.
+        // The hours worked on this machine (hundredths), in tractor-hour units against her voucher.
         let units = units_for(&r, &tractor, hours)?;
         if hours == 0 || units > max_units || units > v.hours - v.used {
             return Err(Error::TooManyHours);
         }
         let wk = DataKey::WeekUse(machine_id, now / WEEK);
         let week_used: u32 = env.storage().temporary().get(&wk).unwrap_or(0);
-        if week_used + hours > m.hours_per_week {
+        // The week counts hundredths of an hour; hours_per_week stays whole hours (L13).
+        if week_used + hours > m.hours_per_week.saturating_mul(100) {
             return Err(Error::TooManyHours);
         }
         // Temporary storage (C7): the count only matters for its week, then it is deleted by
@@ -643,8 +644,10 @@ impl MachineryContract {
             .temporary()
             .extend_ttl(&wk, WEEK_USE_LEDGERS, WEEK_USE_LEDGERS);
         let pre = prepay_per_hour(&r, prepay_driver_bp(&env, &union));
-        let prepay = pre * i128::from(hours);
-        let pending = (total_per_hour(&r) - pre) * i128::from(hours);
+        // Money for hundredths of an hour, rounded down; pending takes the rest so the two add up to
+        // the machine's rate × the time worked.
+        let prepay = pre * i128::from(hours) / 100;
+        let pending = total_per_hour(&r) * i128::from(hours) / 100 - prepay;
         // One claim per signature; the rest of her hours stay with her (R55).
         v.used += units;
         save_voucher(&env, &union, &token_id, &v);
@@ -695,6 +698,7 @@ impl MachineryContract {
             .get(&DataKey::Voucher(union, token_id))
     }
 
+    /// Hundredths of an hour worked on the machine this week (23 Oct).
     pub fn hours_this_week(env: Env, machine_id: u64) -> u32 {
         env.storage()
             .temporary()

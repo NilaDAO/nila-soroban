@@ -67,9 +67,27 @@ fn three_tiller_hours_use_137_centi_tractor_hours() {
         depreciation: 0,
         margin: 0,
     };
-    assert_eq!(units_for(&rate_of(500), &rate_of(1_100), 3), Ok(137));
-    assert_eq!(units_for(&rate_of(1_100), &rate_of(1_100), 3), Ok(300));
-    assert_eq!(units_for(&rate_of(500), &rate_of(0), 3), Err(Error::NoRate));
+    // Hours worked in hundredths (23 Oct).
+    assert_eq!(units_for(&rate_of(500), &rate_of(1_100), 300), Ok(137));
+    assert_eq!(units_for(&rate_of(1_100), &rate_of(1_100), 300), Ok(300));
+    assert_eq!(
+        units_for(&rate_of(500), &rate_of(0), 300),
+        Err(Error::NoRate)
+    );
+}
+
+#[test]
+fn a_fifth_of_a_tiller_hour_uses_a_tenth_of_a_tractor_hour() {
+    // 0.22 h of tiller: 22 × 500 / 1,100 = 10 units, 0.1 tractor hour.
+    let rate_of = |total: i128| RateParts {
+        driver: total * NIN,
+        diesel: 0,
+        maintenance: 0,
+        insurance: 0,
+        depreciation: 0,
+        margin: 0,
+    };
+    assert_eq!(units_for(&rate_of(500), &rate_of(1_100), 22), Ok(10));
 }
 
 #[test]

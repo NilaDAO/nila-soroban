@@ -2024,7 +2024,7 @@ fn voucher_draw_claim_repay_and_collect() {
 
     // A8a: she signs for up to 6 tractor hours (600 units); the owner works 4 and scans it.
     assert_eq!(
-        mc.claim(&v.owner, &v.machine, &fx.union, &id, &600, &4),
+        mc.claim(&v.owner, &v.machine, &fx.union, &id, &600, &400),
         (4 * PRE, 4 * PEND)
     );
     // Her own authorisation of (union, token, max hours) is what the claim used (23 Oct).
@@ -2101,34 +2101,34 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
             },
         }]);
         assert!(mc
-            .try_claim(&v.owner, &v.machine, &fx.union, &id, &1000, &1)
+            .try_claim(&v.owner, &v.machine, &fx.union, &id, &1000, &100)
             .is_err());
         fx.env.mock_all_auths();
     }
     // Not her machine; more than she signed for; more than her voucher; more than a machine's
     // hours a week.
     assert_eq!(
-        mc.try_claim(&fx.borrower, &v.machine, &fx.union, &id, &1000, &1),
+        mc.try_claim(&fx.borrower, &v.machine, &fx.union, &id, &1000, &100),
         Err(Ok(ME::NotOwner))
     );
     assert_eq!(
-        mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &1000, &11),
+        mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &1000, &1100),
         Err(Ok(ME::TooManyHours))
     );
     assert_eq!(
-        mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &1500, &15),
+        mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &1500, &1500),
         Err(Ok(ME::TooManyHours))
     );
     let small = mc.register_machine(&fx.leader, &fx.union, &v.owner, &1, &3, &id);
     mc.confirm_machine(&v.owner, &small);
     assert_eq!(
-        mc.try_claim(&v.owner, &small, &fx.union, &id, &1000, &4),
+        mc.try_claim(&v.owner, &small, &fx.union, &id, &1000, &400),
         Err(Ok(ME::TooManyHours))
     );
     // On hold (R83): no claims.
     mc.set_hold(&v.owner, &v.machine, &true, &1);
     assert_eq!(
-        mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &1000, &1),
+        mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &1000, &100),
         Err(Ok(ME::Unavailable))
     );
     mc.set_hold(&v.owner, &v.machine, &false, &0);
@@ -2168,7 +2168,7 @@ fn default_pays_the_owner_and_senior_from_her_investment_first() {
         &T0,
     );
     c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &200);
-    mc.claim(&v.owner, &v.machine, &fx.union, &id, &200, &2);
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &200, &200);
     c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
     fx.at(T0 + 111 * 86_400 + 1);
     c.mark_default(&fx.union, &id);
@@ -2196,7 +2196,7 @@ fn default_beyond_her_investment_owner_still_paid_senior_takes_its_loss() {
         &T0,
     );
     c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &400);
-    mc.claim(&v.owner, &v.machine, &fx.union, &id, &400, &4);
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &400, &400);
     c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
     fx.at(T0 + 111 * 86_400 + 1);
     c.mark_default(&fx.union, &id);
@@ -2230,7 +2230,7 @@ fn review_fixes_self_claim_rate_rise_earmarks_close_unused() {
     c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &400, &T0);
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &400);
     assert_eq!(
-        mc.try_claim(&fx.borrower, &mine, &fx.union, &id, &400, &1),
+        mc.try_claim(&fx.borrower, &mine, &fx.union, &id, &400, &100),
         Err(Ok(ME::SelfClaim))
     );
     // Another loan holds back 10 hours: 14 × ₹700 of the 10,000 senior nIN are earmarked.
@@ -2242,10 +2242,10 @@ fn review_fixes_self_claim_rate_rise_earmarks_close_unused() {
     // other loan's earmark, so the claim is refused.
     mc.set_rate(&fx.union, &1, &tractor(15_000_000));
     assert!(mc
-        .try_claim(&v.owner, &v.machine, &fx.union, &id, &400, &4)
+        .try_claim(&v.owner, &v.machine, &fx.union, &id, &400, &400)
         .is_err());
     mc.set_rate(&fx.union, &1, &tractor(NIN));
-    mc.claim(&v.owner, &v.machine, &fx.union, &id, &400, &4);
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &400, &400);
 
     // She releases the voucher she no longer needs: nothing owed, the earmark goes back.
     assert_eq!(
