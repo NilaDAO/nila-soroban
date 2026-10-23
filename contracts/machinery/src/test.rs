@@ -39,10 +39,11 @@ fn rate_table_is_the_unions_and_sets_the_prepay() {
     let union = Address::generate(&env);
     c.set_rate(&union, &1, &parts(400 * NIN));
     c.set_rate(&union, &2, &parts(600 * NIN));
-    // Diesel plus half the driver part by default (X32): the larger of the two types.
-    assert_eq!(c.max_prepay_per_hour(&union), 800 * NIN);
+    // Diesel plus half the driver part by default (X32), of the tractor (type 1): the voucher's
+    // unit is a tractor hour (executive decision 23 Oct).
+    assert_eq!(c.prepay_per_tractor_hour(&union), 700 * NIN);
     c.set_prepay_share(&union, &10_000);
-    assert_eq!(c.max_prepay_per_hour(&union), 1_100 * NIN);
+    assert_eq!(c.prepay_per_tractor_hour(&union), 900 * NIN);
     assert_eq!(
         c.try_set_prepay_share(&union, &10_001),
         Err(Ok(Error::BadArg))
@@ -53,6 +54,22 @@ fn rate_table_is_the_unions_and_sets_the_prepay() {
     // Only the union account (its leaders, 3 of 5) sets its rates.
     env.set_auths(&[]);
     assert!(c.try_set_rate(&union, &1, &parts(NIN)).is_err());
+}
+
+#[test]
+fn three_tiller_hours_use_137_centi_tractor_hours() {
+    // Tractor ₹1,100 an hour, power tiller ₹500: 3 × 500 / 1,100 = 1.3636… → 137 units (rounded up).
+    let rate_of = |total: i128| RateParts {
+        driver: total * NIN,
+        diesel: 0,
+        maintenance: 0,
+        insurance: 0,
+        depreciation: 0,
+        margin: 0,
+    };
+    assert_eq!(units_for(&rate_of(500), &rate_of(1_100), 3), Ok(137));
+    assert_eq!(units_for(&rate_of(1_100), &rate_of(1_100), 3), Ok(300));
+    assert_eq!(units_for(&rate_of(500), &rate_of(0), 3), Err(Error::NoRate));
 }
 
 #[test]
