@@ -121,13 +121,14 @@ pub trait FundCoreTrait {
     fn union_treasury(union: Address) -> i128;
     /// Senior cash held back for unclaimed voucher hours (the floor under Bring offers).
     fn senior_earmark(union: Address) -> i128;
-    /// machinery only: an owner claimed hours on her voucher; pay the prepay from senior and
-    /// book the rest as the owner's pending dues (D17, D18, R85).
+    /// machinery only: an owner claimed hours on her voucher (`units`: the centi tractor hours
+    /// they used); pay the prepay from senior and book the rest as the owner's pending dues
+    /// (D17, D18, R85).
     fn pay_voucher(
         union: Address,
         token_id: BytesN<32>,
         owner: Address,
-        hours: u32,
+        units: u32,
         prepay: i128,
         pending: i128,
     );
@@ -136,9 +137,9 @@ pub trait FundCoreTrait {
 /// What fund_core asks of the machinery contract (C5).
 #[contractclient(name = "MachineryClient")]
 pub trait MachineryTrait {
-    /// The most senior money one machine hour can need at the job, across the union's types.
-    fn max_prepay_per_hour(union: Address) -> i128;
-    /// A drawn loan's voucher part: hours of machinery for her (R36, R51).
+    /// The senior money one tractor hour (the voucher's unit) needs at the job.
+    fn prepay_per_tractor_hour(union: Address) -> i128;
+    /// A drawn loan's voucher part: centi tractor hours of machinery for her (R36, R51).
     fn grant(union: Address, member: Address, token_id: BytesN<32>, hours: u32);
     /// The loan closed or defaulted: unclaimed hours lapse.
     fn void(union: Address, token_id: BytesN<32>);

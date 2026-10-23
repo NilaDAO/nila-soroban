@@ -6,9 +6,14 @@
 //!   3 of 5); open and adjustable, like the prepay share (executive decision, 12 Oct).
 //! - **Machines** (D15, R82, R83): a leader registers a member's machine (L13); the owner
 //!   confirms (N9) and can put it on hold with a reason.
-//! - **Vouchers** (R51–R55): a loan's voucher part is hours of machinery, granted by fund_core at
-//!   the draw. Non-transferable by construction (C5). She opens a spend code (A8a, 48 h, capped);
-//!   the owner scans it and claims hours (D19), within the machine's hours a week (R84).
+//! - **Vouchers** (R51–R55): a loan's voucher part is machinery in **tractor hours** (executive
+//!   decision 23 Oct), held in hundredths (`units`, centi tractor hours): one tractor hour is the
+//!   rate of machine type 1 (tractor + rotavator); an hour of another machine uses its rate ÷ the
+//!   tractor rate (3 tiller hours at ₹500 against ₹1,100 use 137 units). Granted by fund_core at
+//!   the draw. Non-transferable by construction (C5). She signs a one-time authorisation for
+//!   `claim` up to X units (A8a QR; Soroban's nonce and expiry ledger, ~48 h; executive decision
+//!   23 Oct); the owner scans it and claims the whole hours worked (D19), within the machine's
+//!   hours a week (R84).
 //! - **Pay** (D18, R85): at the claim fund_core pays the owner the prepay (diesel plus a share of
 //!   the driver part, X32) from senior money; the rest is pending until she repays.
 //!
@@ -17,7 +22,7 @@
 use nila_common::{bump_instance, upgrade, FundCoreClient, LandTitleClient, RolesClient};
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contractmeta, contracttype, vec, Address,
-    Bytes, BytesN, Env, Vec,
+    BytesN, Env, IntoVal, Vec,
 };
 
 contractmeta!(key = "binver", val = "0.1.0");
@@ -44,8 +49,6 @@ pub const DAY: u64 = 86_400;
 #[cfg(feature = "testnet-short-windows")]
 pub const DAY: u64 = 10;
 
-/// A spend code lives 48 hours (R54).
-pub const CODE_TERM: u64 = 2 * DAY;
 pub const WEEK: u64 = 7 * DAY;
 /// How long a week's hour count lives, in ledgers (~5 s each): eight days covers any claim in
 /// that week, whatever day it was first written.
@@ -74,11 +77,8 @@ pub enum Error {
     TooManyTypes = 9,
     /// Not confirmed by the owner, or on hold.
     Unavailable = 10,
-    /// More hours than the code, the voucher or the machine's week allows.
+    /// More hours than her authorisation, the voucher or the machine's week allows.
     TooManyHours = 11,
-    BadCode = 12,
-    CodeExpired = 13,
-    CodeOpen = 14,
     Paused = 15,
     VoucherExists = 16,
     UpgradeNotReady = 17,
@@ -123,6 +123,7 @@ pub struct Voucher {
     pub used: u32,
     /// Lapsed when the loan closed or defaulted.
     pub void: bool,
+    /// Unused since the signed claim (23 Oct); kept so stored vouchers keep their layout.
     pub code_hash: Option<BytesN<32>>,
     pub code_max: u32,
     pub code_expires: u64,
@@ -194,16 +195,6 @@ pub struct VoucherGranted {
 }
 
 #[contractevent]
-pub struct CodeOpened {
-    #[topic]
-    pub union: Address,
-    #[topic]
-    pub token_id: BytesN<32>,
-    pub max_hours: u32,
-    pub expires: u64,
-}
-
-#[contractevent]
 pub struct VoucherClaimed {
     #[topic]
     pub union: Address,
@@ -211,7 +202,10 @@ pub struct VoucherClaimed {
     pub token_id: BytesN<32>,
     pub machine_id: u64,
     pub owner: Address,
+    /// Hours worked on the machine, in hundredths of an hour.
     pub hours: u32,
+    /// Centi tractor hours they used of her voucher.
+    pub units: u32,
     pub prepay: i128,
     pub pending: i128,
 }
@@ -303,6 +297,21 @@ fn prepay_per_hour(r: &RateParts, driver_bp: u32) -> i128 {
 
 fn total_per_hour(r: &RateParts) -> i128 {
     r.driver + r.diesel + r.maintenance + r.insurance + r.depreciation + r.margin
+}
+
+/// The machine type whose hour is the voucher's unit (executive decision 23 Oct).
+pub const TRACTOR_TYPE: u32 = 1;
+
+/// Centi tractor hours that `centi` hundredths of an hour on a machine at rate `r` use, rounded up.
+fn units_for(r: &RateParts, tractor: &RateParts, centi: u32) -> Result<u32, Error> {
+    let t = total_per_hour(tractor);
+    if t <= 0 {
+        return Err(Error::NoRate);
+    }
+    let n = total_per_hour(r)
+        .checked_mul(i128::from(centi))
+        .ok_or(Error::BadArg)?;
+    u32::try_from((n + t - 1) / t).map_err(|_| Error::BadArg)
 }
 
 fn load_machine(env: &Env, id: u64) -> Result<Machine, Error> {
@@ -570,7 +579,6 @@ impl MachineryContract {
         if let Ok(mut v) = load_voucher(&env, &union, &token_id) {
             if !v.void {
                 v.void = true;
-                v.code_hash = None;
                 save_voucher(&env, &union, &token_id, &v);
                 VoucherVoided {
                     union,
@@ -583,62 +591,10 @@ impl MachineryContract {
         Ok(())
     }
 
-    /// A8 → A8a: she opens a spend code for at most `max_hours`, valid 48 h; one at a time.
-    pub fn open_code(
-        env: Env,
-        member: Address,
-        union: Address,
-        token_id: BytesN<32>,
-        max_hours: u32,
-        code_hash: BytesN<32>,
-    ) -> Result<u64, Error> {
-        require_not_paused(&env)?;
-        member.require_auth();
-        let mut v = load_voucher(&env, &union, &token_id)?;
-        if v.member != member || v.void {
-            return Err(Error::NotFound);
-        }
-        let now = env.ledger().timestamp();
-        if v.code_hash.is_some() && now < v.code_expires {
-            return Err(Error::CodeOpen);
-        }
-        if max_hours == 0 || max_hours > v.hours - v.used {
-            return Err(Error::TooManyHours);
-        }
-        let expires = now + CODE_TERM;
-        v.code_hash = Some(code_hash);
-        v.code_max = max_hours;
-        v.code_expires = expires;
-        save_voucher(&env, &union, &token_id, &v);
-        CodeOpened {
-            union,
-            token_id,
-            max_hours,
-            expires,
-        }
-        .publish(&env);
-        Ok(expires)
-    }
-
-    /// A8: she cancels her open code.
-    pub fn cancel_code(
-        env: Env,
-        member: Address,
-        union: Address,
-        token_id: BytesN<32>,
-    ) -> Result<(), Error> {
-        member.require_auth();
-        let mut v = load_voucher(&env, &union, &token_id)?;
-        if v.member != member {
-            return Err(Error::NotFound);
-        }
-        v.code_hash = None;
-        save_voucher(&env, &union, &token_id, &v);
-        Ok(())
-    }
-
-    /// D19: the owner scans her code after the job and claims the hours worked. fund_core pays
-    /// the prepay from senior money at once and books the rest as pending (D18, R85).
+    /// D19: the owner scans her QR after the job and claims the hours worked, `hours` in hundredths of
+    /// an hour (23 Oct), using ≤ `max_units` centi tractor hours, the units she signed for: her
+    /// authorisation of (union, token_id, max_units) is used once, its expiry ledger ~48 h out). fund_core pays the prepay from senior money at once and books the
+    /// rest as pending (D18, R85).
     #[allow(clippy::too_many_arguments)]
     pub fn claim(
         env: Env,
@@ -646,7 +602,7 @@ impl MachineryContract {
         machine_id: u64,
         union: Address,
         token_id: BytesN<32>,
-        code: Bytes,
+        max_units: u32,
         hours: u32,
     ) -> Result<(i128, i128), Error> {
         require_not_paused(&env)?;
@@ -662,20 +618,23 @@ impl MachineryContract {
         if v.member == owner {
             return Err(Error::SelfClaim);
         }
-        let h: BytesN<32> = env.crypto().sha256(&code).into();
-        if v.void || v.code_hash != Some(h) {
-            return Err(Error::BadCode);
+        if v.void {
+            return Err(Error::NotFound);
         }
+        v.member
+            .require_auth_for_args((union.clone(), token_id.clone(), max_units).into_val(&env));
         let now = env.ledger().timestamp();
-        if now >= v.code_expires {
-            return Err(Error::CodeExpired);
-        }
-        if hours == 0 || hours > v.code_max || hours > v.hours - v.used {
+        let r = rate(&env, &union, m.machine_type).ok_or(Error::NoRate)?;
+        let tractor = rate(&env, &union, TRACTOR_TYPE).ok_or(Error::NoRate)?;
+        // The hours worked on this machine (hundredths), in tractor-hour units against her voucher.
+        let units = units_for(&r, &tractor, hours)?;
+        if hours == 0 || units > max_units || units > v.hours - v.used {
             return Err(Error::TooManyHours);
         }
         let wk = DataKey::WeekUse(machine_id, now / WEEK);
         let week_used: u32 = env.storage().temporary().get(&wk).unwrap_or(0);
-        if week_used + hours > m.hours_per_week {
+        // The week counts hundredths of an hour; hours_per_week stays whole hours (L13).
+        if week_used + hours > m.hours_per_week.saturating_mul(100) {
             return Err(Error::TooManyHours);
         }
         // Temporary storage (C7): the count only matters for its week, then it is deleted by
@@ -684,22 +643,23 @@ impl MachineryContract {
         env.storage()
             .temporary()
             .extend_ttl(&wk, WEEK_USE_LEDGERS, WEEK_USE_LEDGERS);
-        let r = rate(&env, &union, m.machine_type).ok_or(Error::NoRate)?;
         let pre = prepay_per_hour(&r, prepay_driver_bp(&env, &union));
-        let prepay = pre * i128::from(hours);
-        let pending = (total_per_hour(&r) - pre) * i128::from(hours);
-        // One claim per code; the rest of her hours stay with her (R55).
-        v.used += hours;
-        v.code_hash = None;
+        // Money for hundredths of an hour, rounded down; pending takes the rest so the two add up to
+        // the machine's rate × the time worked.
+        let prepay = pre * i128::from(hours) / 100;
+        let pending = total_per_hour(&r) * i128::from(hours) / 100 - prepay;
+        // One claim per signature; the rest of her hours stay with her (R55).
+        v.used += units;
         save_voucher(&env, &union, &token_id, &v);
         FundCoreClient::new(&env, &core_addr(&env)?)
-            .pay_voucher(&union, &token_id, &owner, &hours, &prepay, &pending);
+            .pay_voucher(&union, &token_id, &owner, &units, &prepay, &pending);
         VoucherClaimed {
             union,
             token_id,
             machine_id,
             owner,
             hours,
+            units,
             prepay,
             pending,
         }
@@ -710,21 +670,12 @@ impl MachineryContract {
 
     // ---------- views ----------
 
-    /// The most senior money one hour can need at the job, across the union's machine types.
-    pub fn max_prepay_per_hour(env: Env, union: Address) -> i128 {
-        let bp = prepay_driver_bp(&env, &union);
-        let types: Vec<u32> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Types(union.clone()))
-            .unwrap_or(vec![&env]);
-        let mut max = 0;
-        for t in types.iter() {
-            if let Some(r) = rate(&env, &union, t) {
-                max = core::cmp::max(max, prepay_per_hour(&r, bp));
-            }
-        }
-        max
+    /// The senior money one tractor hour (the voucher's unit) needs at the job: the prepay of
+    /// machine type 1. Another machine's hour uses fewer or more units at the same prepay ratio.
+    pub fn prepay_per_tractor_hour(env: Env, union: Address) -> i128 {
+        rate(&env, &union, TRACTOR_TYPE)
+            .map(|r| prepay_per_hour(&r, prepay_driver_bp(&env, &union)))
+            .unwrap_or(0)
     }
 
     pub fn rate(env: Env, union: Address, machine_type: u32) -> Option<RateParts> {
@@ -747,6 +698,7 @@ impl MachineryContract {
             .get(&DataKey::Voucher(union, token_id))
     }
 
+    /// Hundredths of an hour worked on the machine this week (23 Oct).
     pub fn hours_this_week(env: Env, machine_id: u64) -> u32 {
         env.storage()
             .temporary()

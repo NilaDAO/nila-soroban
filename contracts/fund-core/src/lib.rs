@@ -1199,7 +1199,7 @@ impl FundCore {
         member: Address,
         token_id: BytesN<32>,
         cash: i128,
-        hours: u32,
+        hours: u32, // centi tractor hours (executive decision 23 Oct)
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         member.require_auth();
@@ -1255,14 +1255,18 @@ impl FundCore {
         if cash > 0 && jm.cash < cash.checked_add(req).ok_or(Error::Overflow)? {
             return Err(Error::ReserveStop);
         }
-        // The voucher part: senior money held back for the prepay of every hour (R36, C8, N4).
+        // The voucher part, in centi tractor hours: senior money held back for the prepay of
+        // every tractor hour (R36, C8, N4; executive decision 23 Oct).
         if hours > 0 {
             let mac = cfg(&env).machinery.ok_or(Error::NotMachinery)?;
             let mc = MachineryClient::new(&env, &mac);
-            let per_hour = mc.max_prepay_per_hour(&union);
+            let per_hour = mc.prepay_per_tractor_hour(&union);
             let earmark = per_hour
                 .checked_mul(i128::from(hours))
-                .ok_or(Error::Overflow)?;
+                .ok_or(Error::Overflow)?
+                .checked_add(99)
+                .ok_or(Error::Overflow)?
+                / 100;
             let ek = Counter::Earmark(union.clone());
             if load_market(&env, false, &union).cash - i_get(&env, &ek) < earmark {
                 return Err(Error::NoSeniorBacking);
@@ -1509,7 +1513,7 @@ impl FundCore {
         union: Address,
         token_id: BytesN<32>,
         owner: Address,
-        hours: u32,
+        hours: u32, // centi tractor hours used by the claim
         prepay: i128,
         pending: i128,
     ) -> Result<(), Error> {
@@ -1531,7 +1535,8 @@ impl FundCore {
             b.earmark,
             b.earmark_per_hour
                 .checked_mul(i128::from(hours))
-                .ok_or(Error::Overflow)?,
+                .ok_or(Error::Overflow)?
+                / 100,
         );
         b.earmark -= release;
         let ek = Counter::Earmark(union.clone());
