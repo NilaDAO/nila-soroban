@@ -474,49 +474,7 @@ impl FxPoolContract {
         if expires <= now || expires > now + MAX_CASH_OUT_TERM {
             return Err(Error::BadExpiry);
         }
-        let mut ids = offers_of(&env, &union);
-        if ids.len() >= MAX_OPEN_OFFERS {
-            return Err(Error::TooManyOffers);
-        }
-        let id = env
-            .storage()
-            .instance()
-            .get(&DataKey::NextOffer)
-            .unwrap_or(0u64)
-            + 1;
-        env.storage().instance().set(&DataKey::NextOffer, &id);
-        let empty = String::from_str(&env, "");
-        save_offer(
-            &env,
-            id,
-            &Offer {
-                union: union.clone(),
-                kind,
-                inr,
-                expires,
-                state: OfferState::Open,
-                lp: None,
-                usdc: 0,
-                inr_per_usd: 0,
-                sep24_id: empty.clone(),
-                quote_id: empty,
-                from_lp: 0,
-                from_domestic: 0,
-                from_offshore: 0,
-            },
-        );
-        ids.push_back(id);
-        let k = DataKey::OffersOf(union.clone());
-        env.storage().persistent().set(&k, &ids);
-        bump(&env, &k);
-        OfferPosted {
-            union,
-            offer_id: id,
-            kind,
-            inr,
-            expires,
-        }
-        .publish(&env);
+        let id = open_offer(&env, &union, kind, inr, expires)?;
         bump_instance(&env);
         Ok(id)
     }
@@ -760,4 +718,58 @@ impl FxPoolContract {
     pub fn anchor(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::Anchor)
     }
+}
+
+/// An open offer of the union's rupees (post_offer, and the cash scan's own Collect over the treasury, 24 Oct).
+pub(crate) fn open_offer(
+    env: &Env,
+    union: &Address,
+    kind: OfferKind,
+    inr: i128,
+    expires: u64,
+) -> Result<u64, Error> {
+    let mut ids = offers_of(env, union);
+    if ids.len() >= MAX_OPEN_OFFERS {
+        return Err(Error::TooManyOffers);
+    }
+    let id = env
+        .storage()
+        .instance()
+        .get(&DataKey::NextOffer)
+        .unwrap_or(0u64)
+        + 1;
+    env.storage().instance().set(&DataKey::NextOffer, &id);
+    let empty = String::from_str(env, "");
+    save_offer(
+        env,
+        id,
+        &Offer {
+            union: union.clone(),
+            kind,
+            inr,
+            expires,
+            state: OfferState::Open,
+            lp: None,
+            usdc: 0,
+            inr_per_usd: 0,
+            sep24_id: empty.clone(),
+            quote_id: empty,
+            from_lp: 0,
+            from_domestic: 0,
+            from_offshore: 0,
+        },
+    );
+    ids.push_back(id);
+    let k = DataKey::OffersOf(union.clone());
+    env.storage().persistent().set(&k, &ids);
+    bump(env, &k);
+    OfferPosted {
+        union: union.clone(),
+        offer_id: id,
+        kind,
+        inr,
+        expires,
+    }
+    .publish(env);
+    Ok(id)
 }

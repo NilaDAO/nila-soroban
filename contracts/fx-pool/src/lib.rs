@@ -63,6 +63,8 @@ pub const DEFAULT_MAX_SCAN: i128 = 10_000 * 10_000_000;
 pub const MAX_OPEN_ESCROWS: u32 = 64;
 /// One unit of the INR/USD fix: 7 decimals, like nIN and USDC.
 pub const RATE_ONE: i128 = 10_000_000;
+/// One nIN (7 decimals): the cash scan's Collect offer is in whole rupees.
+const NIN_UNIT: i128 = 10_000_000;
 /// The attester's fix is valid at most 2 days (R77).
 pub const MAX_RATE_AGE: u64 = 2 * DAY;
 /// Default band for the attester's fix: at most 5% from the last one (R77); beyond, the trust
@@ -313,6 +315,8 @@ pub struct CashScanned {
     pub amount: i128,
     pub scan_hash: BytesN<32>,
     pub escrow_id: u64,
+    /// The Collect offer this scan opened for its cash above the treasury (24 Oct); 0 for none.
+    pub collect_offer: u64,
 }
 
 #[contractevent]
@@ -846,7 +850,12 @@ impl FxPoolContract {
         if purpose == Purpose::Treasury || purpose == Purpose::Bring {
             return Err(Error::Unauthorized);
         }
-        check_room(&env, &union, amount)?;
+        // Cash at hand may pass the treasury (executive decision 24 Oct): what this scan adds above it is offered to
+        // the union's LPs as a Collect (below). Only the open-escrow limit still refuses.
+        if open_escrows(&env, &union).len() >= MAX_OPEN_ESCROWS {
+            return Err(Error::TooManyEscrows);
+        }
+        let hand_before = cash_at_hand(&env, &union);
 
         let me = env.current_contract_address();
         let nin = nin_addr(&env);
@@ -881,8 +890,20 @@ impl FxPoolContract {
         }
 
         let mut escrow_id = 0u64;
+        let mut collect_offer = 0u64;
         if taken > 0 {
             escrow_id = open_escrow(&env, &union, &member, purpose, taken);
+            // The part of this scan above the treasury goes to an LP: a Collect offer, whole rupees, for as long as
+            // the cash batch lasts. A union whose offers are full gets none (the scan still stands).
+            let treasury = fc.union_treasury(&union);
+            let over = |h: i128| if h > treasury { h - treasury } else { 0 };
+            let add = over(cash_at_hand(&env, &union)) - over(hand_before);
+            if add > 0 {
+                let inr = (add + NIN_UNIT - 1) / NIN_UNIT * NIN_UNIT;
+                let expires = env.ledger().timestamp() + ESCROW_TERM;
+                collect_offer =
+                    lp::open_offer(&env, &union, OfferKind::Collect, inr, expires).unwrap_or(0);
+            }
         }
         CashScanned {
             union,
@@ -891,6 +912,7 @@ impl FxPoolContract {
             amount: taken,
             scan_hash,
             escrow_id,
+            collect_offer,
         }
         .publish(&env);
         bump_instance(&env);

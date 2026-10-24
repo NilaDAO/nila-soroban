@@ -943,16 +943,42 @@ impl Fx {
     }
 }
 
+/// Cash at hand may pass the treasury (executive decision 24 Oct): what a scan adds above it opens a Collect offer
+/// for the union's LPs, in whole rupees, for as long as the cash batch lasts; a scan within the treasury opens none.
+#[test]
+fn cash_over_the_treasury_opens_a_collect_offer() {
+    let fx = setup();
+    let c = fx.core();
+    let f = fx.fx();
+    fx.scan(Purpose::Treasury, &fx.leader, 1_500 * NIN, 1, None)
+        .unwrap();
+    fx.scan(Purpose::Invest, &fx.borrower, 1_000 * NIN, 2, None)
+        .unwrap();
+    assert_eq!(f.offers_of(&fx.union).len(), 0);
+    // 700 more: 200 above the treasury.
+    fx.scan(Purpose::Invest, &fx.neighbour, 700 * NIN, 3, None)
+        .unwrap();
+    assert_eq!(f.cash_at_hand(&fx.union), 1_700 * NIN);
+    assert_eq!(c.union_treasury(&fx.union), 1_500 * NIN);
+    let ids = f.offers_of(&fx.union);
+    assert_eq!(ids.len(), 1);
+    let o = f.offer(&ids.get(0).unwrap()).unwrap();
+    assert_eq!(o.kind, nila_fx_pool::OfferKind::Collect);
+    assert_eq!(o.inr, 200 * NIN);
+    // Another 100: only the new part above it gets an offer of its own.
+    fx.scan(Purpose::Invest, &fx.neighbour, 100 * NIN, 4, None)
+        .unwrap();
+    let ids = f.offers_of(&fx.union);
+    assert_eq!(ids.len(), 2);
+    assert_eq!(f.offer(&ids.get(1).unwrap()).unwrap().inr, 100 * NIN);
+    fx.assert_conserved();
+}
+
 #[test]
 fn cash_scan_invest_draw_repay_with_strict_auth() {
     let fx = setup();
     let c = fx.core();
     let f = fx.fx();
-    // Cash at hand may not exceed the treasury: the union funds it first (R15, R17).
-    assert_eq!(
-        fx.scan(Purpose::Invest, &fx.borrower, 1_000 * NIN, 1, None),
-        Err(FxError::AboveTreasury)
-    );
     assert_eq!(
         fx.scan(Purpose::Treasury, &fx.leader, 1_500 * NIN, 2, None),
         Ok(0)
@@ -966,10 +992,6 @@ fn cash_scan_invest_draw_repay_with_strict_auth() {
     assert_eq!(e1, 1);
     assert_eq!(c.position(&fx.union, &fx.borrower).invested, 1_000 * NIN);
     assert_eq!(f.cash_at_hand(&fx.union), 1_000 * NIN);
-    assert_eq!(
-        fx.scan(Purpose::Invest, &fx.neighbour, 501 * NIN, 4, None),
-        Err(FxError::AboveTreasury)
-    );
     fx.assert_fx_empty();
     fx.assert_conserved();
 
