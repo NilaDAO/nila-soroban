@@ -92,6 +92,7 @@ pub enum Error {
     NotMember = 10,
     /// Cash at hand would exceed the union's treasury (R15).
     AboveTreasury = 11,
+    /// Unused since 24 Oct (scan receipts are no longer stored); the code stays reserved.
     ScanUsed = 12,
     TooManyEscrows = 13,
     NotExpired = 14,
@@ -191,6 +192,7 @@ pub enum DataKey {
     /// Open escrow ids of a union, oldest first.
     EscrowsOf(Address),
     CashAtHand(Address),
+    /// Unused since 24 Oct (scan receipts are no longer stored); kept so the layout stays.
     Scan(BytesN<32>),
     CashOut(BytesN<32>),
     /// A code paid out or reclaimed: never accepted again (its preimage is public).
@@ -781,8 +783,10 @@ impl FxPoolContract {
 
     // ---------- cash scan (leader) ----------
 
-    /// The leader scanned rupees in (C6, L10, N11). `scan_hash` is the receipt's hash and
-    /// is used once. Invest, repay and recovery open a 7-day escrow on the union's cash at
+    /// The leader scanned rupees in (C6, L10, N11). `scan_hash` (the photo count's receipt) is
+    /// only published in the CashScanned event, never stored (executive decision 24 Oct: the
+    /// leader counting the notes is the trust signal; a stored receipt was rent for nothing).
+    /// Invest, repay and recovery open a 7-day escrow on the union's cash at
     /// hand, which may not exceed its treasury (R15). A repay larger than what she owes
     /// mints only what is owed; the leader hands back the change. Returns the escrow id.
     /// Treasury is refused (22 Oct): counted cash never goes into the treasury.
@@ -800,13 +804,6 @@ impl FxPoolContract {
         require_not_paused(&env)?;
         require_leader(&env, &union, &leader)?;
         check_amount(&env, amount)?;
-        let sk = DataKey::Scan(scan_hash.clone());
-        if env.storage().persistent().has(&sk) {
-            return Err(Error::ScanUsed);
-        }
-        env.storage().persistent().set(&sk, &true);
-        bump(&env, &sk);
-
         let core = core_addr(&env)?;
         let fc = FundCoreClient::new(&env, &core);
         // Counted cash never goes into the treasury (executive decision 22 Oct); a Bring is opened

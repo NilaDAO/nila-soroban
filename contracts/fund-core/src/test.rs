@@ -966,11 +966,6 @@ fn cash_scan_invest_draw_repay_with_strict_auth() {
     assert_eq!(e1, 1);
     assert_eq!(c.position(&fx.union, &fx.borrower).invested, 1_000 * NIN);
     assert_eq!(f.cash_at_hand(&fx.union), 1_000 * NIN);
-    // A receipt is used once.
-    assert_eq!(
-        fx.scan(Purpose::Invest, &fx.borrower, NIN, 3, None),
-        Err(FxError::ScanUsed)
-    );
     assert_eq!(
         fx.scan(Purpose::Invest, &fx.neighbour, 501 * NIN, 4, None),
         Err(FxError::AboveTreasury)
