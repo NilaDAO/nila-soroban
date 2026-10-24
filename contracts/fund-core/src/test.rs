@@ -995,7 +995,7 @@ fn cash_scan_invest_draw_repay_with_strict_auth() {
     c.draw_loan(&fx.union, &fx.borrower, &id, &(400 * NIN), &0);
     fx.env.mock_all_auths();
     assert_eq!(f.cash_at_hand(&fx.union), 600 * NIN);
-    assert_eq!(f.get_escrow(&e1).unwrap().remaining, 600 * NIN);
+    assert_eq!(f.get_escrow(&fx.union, &e1).unwrap().remaining, 600 * NIN);
     assert_eq!(fx.token().balance(&fx.borrower), 0);
 
     // Repay in cash, more than owed: only what she owes is minted; the leader gives change.
@@ -1005,7 +1005,10 @@ fn cash_scan_invest_draw_repay_with_strict_auth() {
         .scan(Purpose::Repay, &fx.borrower, 500 * NIN, 5, Some(id.clone()))
         .unwrap();
     assert!(c.get_loan(&fx.union, &id).unwrap().closed);
-    assert_eq!(f.get_escrow(&e2).unwrap().amount, 400 * NIN + interest);
+    assert_eq!(
+        f.get_escrow(&fx.union, &e2).unwrap().amount,
+        400 * NIN + interest
+    );
     assert_eq!(f.cash_at_hand(&fx.union), 1_000 * NIN + interest);
     assert_eq!(
         fx.scan(Purpose::Repay, &fx.borrower, NIN, 6, None),
@@ -1078,13 +1081,13 @@ fn unsettled_cash_at_hand_burns_treasury_after_7_days() {
         Err(Ok(Error::CashAtHand))
     );
     assert_eq!(
-        fx.fx().try_burn_expired_escrow(&e),
+        fx.fx().try_burn_expired_escrow(&fx.union, &e),
         Err(Ok(FxError::NotExpired))
     );
     fx.at(T0 + 7 * 86_400);
     // Anyone may call it once expired; the union kept the rupees.
     fx.env.set_auths(&[]);
-    assert_eq!(fx.fx().burn_expired_escrow(&e), 800 * NIN);
+    assert_eq!(fx.fx().burn_expired_escrow(&fx.union, &e), 800 * NIN);
     fx.env.mock_all_auths();
     assert_eq!(c.union_treasury(&fx.union), 200 * NIN);
     assert_eq!(fx.fx().cash_at_hand(&fx.union), 0);
@@ -1355,9 +1358,9 @@ fn fx_pool_slot_set_once_and_codes_used_once() {
         .unwrap();
     fx.at(T0 + 30 * 86_400);
     c.pause();
-    assert!(f.try_burn_expired_escrow(&e).is_err());
+    assert!(f.try_burn_expired_escrow(&fx.union, &e).is_err());
     c.unpause();
-    f.burn_expired_escrow(&e);
+    f.burn_expired_escrow(&fx.union, &e);
     fx.assert_conserved();
 }
 

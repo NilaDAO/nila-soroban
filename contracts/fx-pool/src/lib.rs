@@ -189,9 +189,11 @@ pub enum DataKey {
     Paused,
     NextEscrow,
     Escrow(u64),
-    /// Open escrow ids of a union, oldest first.
+    /// Open escrow ids of a union, oldest first. Before 24 Oct; moved into `OpenEscrows`.
     EscrowsOf(Address),
     CashAtHand(Address),
+    /// A union's open escrows, oldest first, in one entry (24 Oct).
+    OpenEscrows(Address),
     /// Unused since 24 Oct (scan receipts are no longer stored); kept so the layout stays.
     Scan(BytesN<32>),
     CashOut(BytesN<32>),
@@ -238,6 +240,20 @@ pub enum DataKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Escrow {
     pub union: Address,
+    pub member: Address,
+    pub purpose: Purpose,
+    pub amount: i128,
+    pub remaining: i128,
+    pub expires: u64,
+}
+
+/// One open batch of counted rupees at the union office, kept in the union's one list
+/// (`OpenEscrows`, 24 Oct): a scan adds a row instead of a record of its own, so it pays no
+/// rent for a new entry.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenEscrow {
+    pub id: u64,
     pub member: Address,
     pub purpose: Purpose,
     pub amount: i128,
@@ -545,29 +561,23 @@ fn open_escrow(
         .unwrap_or(0u64)
         + 1;
     env.storage().instance().set(&DataKey::NextEscrow, &id);
-    let k = DataKey::Escrow(id);
-    env.storage().persistent().set(
-        &k,
-        &Escrow {
-            union: union.clone(),
-            member: member.clone(),
-            purpose,
-            amount,
-            remaining: amount,
-            expires: env.ledger().timestamp() + ESCROW_TERM,
-        },
-    );
-    bump(env, &k);
-    let mut ids = escrows_of(env, union);
-    ids.push_back(id);
-    save_escrows_of(env, union, &ids);
+    let mut rows = open_escrows(env, union);
+    rows.push_back(OpenEscrow {
+        id,
+        member: member.clone(),
+        purpose,
+        amount,
+        remaining: amount,
+        expires: env.ledger().timestamp() + ESCROW_TERM,
+    });
+    save_open_escrows(env, union, &rows);
     set_cash_at_hand(env, union, cash_at_hand(env, union) + amount);
     id
 }
 
 /// Cash at hand may not exceed the union's treasury (R15), nor the open escrows the limit.
 fn check_room(env: &Env, union: &Address, amount: i128) -> Result<(), Error> {
-    if escrows_of(env, union).len() >= MAX_OPEN_ESCROWS {
+    if open_escrows(env, union).len() >= MAX_OPEN_ESCROWS {
         return Err(Error::TooManyEscrows);
     }
     if cash_at_hand(env, union) + amount
@@ -578,44 +588,69 @@ fn check_room(env: &Env, union: &Address, amount: i128) -> Result<(), Error> {
     Ok(())
 }
 
-fn escrows_of(env: &Env, union: &Address) -> Vec<u64> {
-    env.storage()
+/// A union's open escrows, oldest first. Escrows from before 24 Oct (one record each, their ids
+/// in `EscrowsOf`) are read into the list here; the caller's save moves them for good.
+fn open_escrows(env: &Env, union: &Address) -> Vec<OpenEscrow> {
+    let k = DataKey::OpenEscrows(union.clone());
+    if let Some(rows) = env.storage().persistent().get(&k) {
+        return rows;
+    }
+    let mut rows = vec![env];
+    let old: Vec<u64> = env
+        .storage()
         .persistent()
         .get(&DataKey::EscrowsOf(union.clone()))
-        .unwrap_or(vec![env])
+        .unwrap_or(vec![env]);
+    for id in old.iter() {
+        if let Some(e) = env
+            .storage()
+            .persistent()
+            .get::<_, Escrow>(&DataKey::Escrow(id))
+        {
+            rows.push_back(OpenEscrow {
+                id,
+                member: e.member,
+                purpose: e.purpose,
+                amount: e.amount,
+                remaining: e.remaining,
+                expires: e.expires,
+            });
+        }
+    }
+    rows
 }
 
-fn save_escrows_of(env: &Env, union: &Address, ids: &Vec<u64>) {
-    let k = DataKey::EscrowsOf(union.clone());
-    env.storage().persistent().set(&k, ids);
+fn save_open_escrows(env: &Env, union: &Address, rows: &Vec<OpenEscrow>) {
+    // The old layout goes once the list is written (24 Oct).
+    let old_k = DataKey::EscrowsOf(union.clone());
+    if let Some(old) = env.storage().persistent().get::<_, Vec<u64>>(&old_k) {
+        for id in old.iter() {
+            env.storage().persistent().remove(&DataKey::Escrow(id));
+        }
+        env.storage().persistent().remove(&old_k);
+    }
+    let k = DataKey::OpenEscrows(union.clone());
+    env.storage().persistent().set(&k, rows);
     bump(env, &k);
 }
 
 /// Takes `amount` off the union's open escrows, oldest first; returns what it took.
 fn settle(env: &Env, union: &Address, amount: i128) -> i128 {
-    let ids = escrows_of(env, union);
     let mut open = vec![env];
     let mut left = amount;
-    for id in ids.iter() {
-        let k = DataKey::Escrow(id);
+    for mut e in open_escrows(env, union).iter() {
         if left > 0 {
-            if let Some(mut e) = env.storage().persistent().get::<_, Escrow>(&k) {
-                let take = core::cmp::min(left, e.remaining);
-                e.remaining -= take;
-                left -= take;
-                if e.remaining == 0 {
-                    env.storage().persistent().remove(&k);
-                    continue;
-                }
-                env.storage().persistent().set(&k, &e);
-                bump(env, &k);
-            }
+            let take = core::cmp::min(left, e.remaining);
+            e.remaining -= take;
+            left -= take;
         }
-        open.push_back(id);
+        if e.remaining > 0 {
+            open.push_back(e);
+        }
     }
     let took = amount - left;
     if took > 0 {
-        save_escrows_of(env, union, &open);
+        save_open_escrows(env, union, &open);
         let hand = cash_at_hand(env, union) - took;
         set_cash_at_hand(env, union, hand);
         CashSettled {
@@ -864,24 +899,24 @@ impl FxPoolContract {
 
     /// Anyone, after expiry: the union kept rupees it neither lent nor settled, so the same
     /// amount of its treasury nIN is burned in fund_core (R15).
-    pub fn burn_expired_escrow(env: Env, escrow_id: u64) -> Result<i128, Error> {
+    pub fn burn_expired_escrow(env: Env, union: Address, escrow_id: u64) -> Result<i128, Error> {
         require_not_paused(&env)?;
-        let k = DataKey::Escrow(escrow_id);
-        let e: Escrow = env.storage().persistent().get(&k).ok_or(Error::NotFound)?;
+        let mut rows = open_escrows(&env, &union);
+        let i = rows
+            .iter()
+            .position(|r| r.id == escrow_id)
+            .ok_or(Error::NotFound)? as u32;
+        let e = rows.get(i).ok_or(Error::NotFound)?;
         if env.ledger().timestamp() < e.expires {
             return Err(Error::NotExpired);
         }
-        env.storage().persistent().remove(&k);
-        let mut ids = escrows_of(&env, &e.union);
-        if let Some(i) = ids.first_index_of(escrow_id) {
-            ids.remove(i);
-        }
-        save_escrows_of(&env, &e.union, &ids);
-        set_cash_at_hand(&env, &e.union, cash_at_hand(&env, &e.union) - e.remaining);
-        let covered = FundCoreClient::new(&env, &core_addr(&env)?)
-            .cover_expired_escrow(&e.union, &e.remaining);
+        rows.remove(i);
+        save_open_escrows(&env, &union, &rows);
+        set_cash_at_hand(&env, &union, cash_at_hand(&env, &union) - e.remaining);
+        let covered =
+            FundCoreClient::new(&env, &core_addr(&env)?).cover_expired_escrow(&union, &e.remaining);
         EscrowExpired {
-            union: e.union,
+            union,
             escrow_id,
             remaining: e.remaining,
             covered,
@@ -1567,11 +1602,22 @@ impl FxPoolContract {
     }
 
     pub fn escrows_of(env: Env, union: Address) -> Vec<u64> {
-        escrows_of(&env, &union)
+        let mut ids = vec![&env];
+        for r in open_escrows(&env, &union).iter() {
+            ids.push_back(r.id);
+        }
+        ids
     }
 
-    pub fn get_escrow(env: Env, escrow_id: u64) -> Option<Escrow> {
-        env.storage().persistent().get(&DataKey::Escrow(escrow_id))
+    /// All of the union's open escrows in one read (24 Oct).
+    pub fn open_escrows(env: Env, union: Address) -> Vec<OpenEscrow> {
+        open_escrows(&env, &union)
+    }
+
+    pub fn get_escrow(env: Env, union: Address, escrow_id: u64) -> Option<OpenEscrow> {
+        open_escrows(&env, &union)
+            .iter()
+            .find(|r| r.id == escrow_id)
     }
 
     pub fn cash_out(env: Env, code_hash: BytesN<32>) -> Option<CashOut> {
