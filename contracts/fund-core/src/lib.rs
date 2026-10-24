@@ -13,7 +13,7 @@ use nila_math::{
 };
 use soroban_sdk::{
     contract, contractimpl, contractmeta, contracttype, token::TokenClient, vec, Address, BytesN,
-    Env, Vec,
+    Env, IntoVal, Vec,
 };
 use types::{
     LoanState, Market, Milestone, UnionBook, FLAG_CLOSED, FLAG_DEFAULTED, FLAG_DRAWN, FLAG_OVERDUE,
@@ -1041,6 +1041,8 @@ impl FundCore {
     /// Her junior investment collected over the desk (executive decision 22 Oct): she and a leader of her
     /// union both sign; the claim's nIN is burned in fund_core and booked against the union's cash at hand,
     /// as `draw_loan` does for the cash part. No nIN reaches her wallet. The leader hands the notes.
+    /// Her signed QR (24 Oct): she authorises (union, max_shares) only, so any leader of her union may scan
+    /// and submit it once the cash is handed over; one use by its Soroban nonce, expiring at its ledger.
     pub fn claim_junior_cash(
         env: Env,
         union: Address,
@@ -1049,7 +1051,7 @@ impl FundCore {
         max_shares: i128,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
-        member.require_auth();
+        member.require_auth_for_args((union.clone(), max_shares).into_val(&env));
         require_leader(&env, &union, &leader)?;
         let amount = claim(&env, true, &union, &member, max_shares, false)?;
         nin(&env).burn(&env.current_contract_address(), &amount);

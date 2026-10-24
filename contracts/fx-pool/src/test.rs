@@ -112,10 +112,48 @@ fn upgrade_waits_out_the_timelock() {
     assert_eq!(f.upgrade_delay(), 72 * 3_600);
 }
 
+/// Escrows stored one record each (before 24 Oct, a testnet deployment upgraded in place) read as the
+/// union's list; the first save moves them into it and drops the old records.
+#[test]
+fn old_escrow_records_move_into_the_list() {
+    let (env, f, _) = setup();
+    let union = Address::generate(&env);
+    let member = Address::generate(&env);
+    let old = |amount: i128| Escrow {
+        union: union.clone(),
+        member: member.clone(),
+        purpose: Purpose::Invest,
+        amount,
+        remaining: amount,
+        expires: 1_700_000_000 + ESCROW_TERM,
+    };
+    env.as_contract(&f.address, || {
+        let p = env.storage().persistent();
+        p.set(&DataKey::Escrow(3), &old(100 * NIN));
+        p.set(&DataKey::Escrow(5), &old(40 * NIN));
+        p.set(
+            &DataKey::EscrowsOf(union.clone()),
+            &soroban_sdk::vec![&env, 3u64, 5u64],
+        );
+    });
+    assert_eq!(f.escrows_of(&union), soroban_sdk::vec![&env, 3u64, 5u64]);
+    assert_eq!(f.get_escrow(&union, &5).unwrap().remaining, 40 * NIN);
+    env.as_contract(&f.address, || {
+        let mut rows = open_escrows(&env, &union);
+        rows.remove(0);
+        save_open_escrows(&env, &union, &rows);
+        let p = env.storage().persistent();
+        assert!(!p.has(&DataKey::Escrow(3)) && !p.has(&DataKey::Escrow(5)));
+        assert!(!p.has(&DataKey::EscrowsOf(union.clone())));
+    });
+    assert_eq!(f.escrows_of(&union), soroban_sdk::vec![&env, 5u64]);
+}
+
 #[test]
 fn unknown_escrow_and_code() {
     let (env, f, _) = setup();
-    assert_eq!(f.try_burn_expired_escrow(&1), Err(Ok(Error::NotFound)));
+    let u = Address::generate(&env);
+    assert_eq!(f.try_burn_expired_escrow(&u, &1), Err(Ok(Error::NotFound)));
     let h = BytesN::from_array(&env, &[3; 32]);
     assert_eq!(f.try_reclaim_cash_out(&h), Err(Ok(Error::NotFound)));
     assert_eq!(f.cash_out(&h), None);
@@ -148,6 +186,7 @@ fn storage_layout_is_frozen() {
     v.push_back(DataKey::NextEscrow.into_val(&env));
     v.push_back(DataKey::Escrow(1).into_val(&env));
     v.push_back(DataKey::EscrowsOf(a.clone()).into_val(&env));
+    v.push_back(DataKey::OpenEscrows(a.clone()).into_val(&env));
     v.push_back(DataKey::CashAtHand(a.clone()).into_val(&env));
     v.push_back(DataKey::Scan(h.clone()).into_val(&env));
     v.push_back(DataKey::CashOut(h.clone()).into_val(&env));
@@ -266,6 +305,18 @@ fn storage_layout_is_frozen() {
         .into_val(&env),
     );
     v.push_back(nila_common::upgrade::PendingDelay { delay: 1, eta: 2 }.into_val(&env));
+    // A union's open escrows in one entry (24 Oct).
+    v.push_back(
+        OpenEscrow {
+            id: 1,
+            member: a.clone(),
+            purpose: Purpose::Invest,
+            amount: 1,
+            remaining: 1,
+            expires: 1,
+        }
+        .into_val(&env),
+    );
     let got: BytesN<32> = env.crypto().sha256(&v.to_xdr(&env)).into();
     let hex: std::string::String = got
         .to_array()
@@ -273,7 +324,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "618971da56d4b0d29bd82ed6479c7687965012f586dfd3d96a942d876d178e7d",
+        hex, "5fde18bac14a217352086fe6ff1f3b1062ca430386e60abeb0e2231e7e42fb59",
         "fx_pool storage layout changed"
     );
 }
