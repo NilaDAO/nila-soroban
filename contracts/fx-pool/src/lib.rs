@@ -337,6 +337,17 @@ pub struct CashOutPaid {
     pub amount: i128,
 }
 
+/// A signed cash-out at the desk (24 Oct): her nIN burned, the rupees counted out to her.
+#[contractevent]
+pub struct CashOutSigned {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub member: Address,
+    pub leader: Address,
+    pub amount: i128,
+}
+
 #[contractevent]
 pub struct CashOutReclaimed {
     #[topic]
@@ -1446,6 +1457,37 @@ impl FxPoolContract {
         .publish(&env);
         bump_instance(&env);
         Ok(co.amount)
+    }
+
+    /// The signed cash-out (executive decision 24 Oct; a machine owner's income): her QR carries her
+    /// authorisation of (union, amount), used once by its Soroban nonce, expiring at its ledger (~48 h); any
+    /// leader of her union scans it once the notes are handed over and submits. Her nIN is clawed back
+    /// (fx_pool is the nIN admin) and the rupees leave the union's cash at hand. No escrow, no code.
+    pub fn cash_out_signed(
+        env: Env,
+        leader: Address,
+        union: Address,
+        member: Address,
+        amount: i128,
+    ) -> Result<i128, Error> {
+        require_not_paused(&env)?;
+        require_leader(&env, &union, &leader)?;
+        member.require_auth_for_args((union.clone(), amount).into_val(&env));
+        check_amount(&env, amount)?;
+        if !is_member_or_leader(&env, &union, &member) {
+            return Err(Error::NotMember);
+        }
+        StellarAssetClient::new(&env, &nin_addr(&env)).clawback(&member, &amount);
+        settle(&env, &union, amount);
+        CashOutSigned {
+            union,
+            member,
+            leader,
+            amount,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(amount)
     }
 
     /// Anyone, after expiry: an uncollected cash-out goes back to her wallet.

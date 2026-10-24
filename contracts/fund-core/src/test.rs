@@ -851,8 +851,8 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
 
 use nila_fx_pool::{Error as FxError, Purpose};
 use soroban_sdk::{
-    testutils::{MockAuth, MockAuthInvoke},
-    Bytes, IntoVal,
+    testutils::{AuthorizedFunction, MockAuth, MockAuthInvoke},
+    Bytes, IntoVal, Symbol,
 };
 
 fn hash(env: &Env, b: u8) -> BytesN<32> {
@@ -1134,6 +1134,102 @@ fn trustline_opens_only_inside_the_payout() {
     assert_eq!(fx.token().balance(&fx.leader), 500 * NIN);
     assert!(!fx.authorized(&fx.leader));
     fx.assert_conserved();
+}
+
+/// The signed cash-out (24 Oct, a machine owner's income): she signs (union, amount) in her QR, any leader
+/// of her union submits it once the notes are handed over; her nIN is clawed back, cash at hand goes down.
+#[test]
+fn cash_out_signed_burns_her_nin_at_the_desk() {
+    let fx = setup();
+    let c = fx.core();
+    let f = fx.fx();
+    fx.scan(Purpose::Treasury, &fx.leader, 2_000 * NIN, 1, None)
+        .unwrap();
+    fx.scan(Purpose::Invest, &fx.neighbour, 1_000 * NIN, 2, None)
+        .unwrap();
+    // Her nIN in her wallet (in the app: a machine owner's prepay and collected dues).
+    fx.make_leader(&fx.neighbour);
+    c.request_unbond_junior(&fx.union, &fx.neighbour, &(600 * NIN));
+    fx.at(T0 + 14 * 86_400);
+    c.claim_junior(&fx.union, &fx.neighbour, &0);
+    assert_eq!(fx.token().balance(&fx.neighbour), 600 * NIN);
+
+    // Without her signature of (union, amount) a leader cannot burn her nIN.
+    fx.env.mock_auths(&[MockAuth {
+        address: &fx.leader,
+        invoke: &MockAuthInvoke {
+            contract: &fx.fx_id,
+            fn_name: "cash_out_signed",
+            args: (
+                fx.leader.clone(),
+                fx.union.clone(),
+                fx.neighbour.clone(),
+                250 * NIN,
+            )
+                .into_val(&fx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f
+        .try_cash_out_signed(&fx.leader, &fx.union, &fx.neighbour, &(250 * NIN))
+        .is_err());
+    // Her signature is for one amount: another amount is not authorised.
+    fx.env.mock_auths(&[
+        MockAuth {
+            address: &fx.neighbour,
+            invoke: &MockAuthInvoke {
+                contract: &fx.fx_id,
+                fn_name: "cash_out_signed",
+                args: (fx.union.clone(), 250 * NIN).into_val(&fx.env),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &fx.leader,
+            invoke: &MockAuthInvoke {
+                contract: &fx.fx_id,
+                fn_name: "cash_out_signed",
+                args: (
+                    fx.leader.clone(),
+                    fx.union.clone(),
+                    fx.neighbour.clone(),
+                    300 * NIN,
+                )
+                    .into_val(&fx.env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+    assert!(f
+        .try_cash_out_signed(&fx.leader, &fx.union, &fx.neighbour, &(300 * NIN))
+        .is_err());
+    fx.env.mock_all_auths();
+    assert_eq!(
+        f.try_cash_out_signed(&fx.borrower, &fx.union, &fx.neighbour, &(250 * NIN)),
+        Err(Ok(FxError::NotLeader))
+    );
+    let stranger = Address::generate(&fx.env);
+    assert_eq!(
+        f.try_cash_out_signed(&fx.leader, &fx.union, &stranger, &NIN),
+        Err(Ok(FxError::NotMember))
+    );
+    assert_eq!(
+        f.try_cash_out_signed(&fx.leader, &fx.union, &fx.neighbour, &(10_000 * NIN + 1)),
+        Err(Ok(FxError::CapExceeded))
+    );
+
+    let hand = f.cash_at_hand(&fx.union);
+    assert_eq!(
+        f.cash_out_signed(&fx.leader, &fx.union, &fx.neighbour, &(250 * NIN)),
+        250 * NIN
+    );
+    let auths = fx.env.auths();
+    assert!(auths.iter().any(|a| a.0 == fx.neighbour
+        && matches!(&a.1.function, AuthorizedFunction::Contract((_, f, args))
+            if *f == Symbol::new(&fx.env, "cash_out_signed") && args.len() == 2)));
+    assert_eq!(fx.token().balance(&fx.neighbour), 350 * NIN);
+    assert_eq!(f.cash_at_hand(&fx.union), hand - 250 * NIN);
+    fx.assert_fx_empty();
 }
 
 #[test]
@@ -2581,22 +2677,55 @@ fn claim_junior_cash_pays_over_the_desk() {
     assert!(c
         .try_claim_junior_cash(&fx.union, &fx.neighbour, &fx.leader, &0)
         .is_err());
-    // And the leader must sign too: she alone cannot collect cash at the desk.
+    // And the leader must sign too: she alone cannot collect cash at the desk. Her QR (24 Oct) signs
+    // (union, max_shares) only, so it names no leader.
     fx.env.mock_auths(&[MockAuth {
         address: &fx.neighbour,
         invoke: &MockAuthInvoke {
             contract: &fx.core_id,
             fn_name: "claim_junior_cash",
-            args: (
-                fx.union.clone(),
-                fx.neighbour.clone(),
-                fx.leader.clone(),
-                0i128,
-            )
-                .into_val(&fx.env),
+            args: (fx.union.clone(), 0i128).into_val(&fx.env),
             sub_invokes: &[],
         },
     }]);
+    assert!(c
+        .try_claim_junior_cash(&fx.union, &fx.neighbour, &fx.leader, &0)
+        .is_err());
+    fx.env.mock_all_auths();
+
+    // Her signature of the full call (with a leader in it) is not hers for this claim: the args differ.
+    fx.env.mock_auths(&[
+        MockAuth {
+            address: &fx.neighbour,
+            invoke: &MockAuthInvoke {
+                contract: &fx.core_id,
+                fn_name: "claim_junior_cash",
+                args: (
+                    fx.union.clone(),
+                    fx.neighbour.clone(),
+                    fx.leader.clone(),
+                    0i128,
+                )
+                    .into_val(&fx.env),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &fx.leader,
+            invoke: &MockAuthInvoke {
+                contract: &fx.core_id,
+                fn_name: "claim_junior_cash",
+                args: (
+                    fx.union.clone(),
+                    fx.neighbour.clone(),
+                    fx.leader.clone(),
+                    0i128,
+                )
+                    .into_val(&fx.env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
     assert!(c
         .try_claim_junior_cash(&fx.union, &fx.neighbour, &fx.leader, &0)
         .is_err());
@@ -2606,7 +2735,9 @@ fn claim_junior_cash_pays_over_the_desk() {
     let supply_core = fx.token().balance(&fx.core_id);
     c.claim_junior_cash(&fx.union, &fx.neighbour, &fx.leader, &0);
     let auths = fx.env.auths();
-    assert!(auths.iter().any(|a| a.0 == fx.neighbour));
+    assert!(auths.iter().any(|a| a.0 == fx.neighbour
+        && matches!(&a.1.function, AuthorizedFunction::Contract((_, f, args))
+            if *f == Symbol::new(&fx.env, "claim_junior_cash") && args.len() == 2)));
     assert!(auths.iter().any(|a| a.0 == fx.leader));
     assert_eq!(fx.token().balance(&fx.neighbour), 0);
     assert_eq!(fx.token().balance(&fx.core_id), supply_core - 400 * NIN);
