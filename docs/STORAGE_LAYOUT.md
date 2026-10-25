@@ -72,7 +72,7 @@ storage:
 | `Milestone(union, token_id)` | persistent | `Milestone{milestone, digest, ts}`: written only when the oracle reports one |
 | `LoansOf(union, member)` | persistent | Vec of open loans' token ids (max 32) |
 | `Union(union)` | persistent | `UnionBook{borrows, treasury, rainy, earmark, on_hold}`: one entry for the union's counters (C6) |
-| `FoodToken(union, token_id)` | persistent | `FoodToken{member, amount, hours, from_date, loan: LoanState}`. Amount and hours are the plan's recommendations; from_date is unused since 25 Oct (written 0; there is no floor on a draw). **The loan lives here** (C6): `LoanState{principal, rate_bp, drawdown_ts, maturity_ts, principal_paid, interest_paid, interest_accrued, last_accrual_ts, flags}`, flags = overdue 1, defaulted 2, closed 4, drawn 8. The token id is the loan id. |
+| `FoodToken(union, token_id)` | persistent | `FoodToken{member, amount, hours, from_date, loan: LoanState}`. Amount and hours are the plan's recommendations; from_date is the opening of its window since 25 Oct: six weeks before its last draw date (`OPEN_WINDOW`); a token attested before keeps its SOS. **The loan lives here** (C6): `LoanState{principal, rate_bp, drawdown_ts, maturity_ts, principal_paid, interest_paid, interest_accrued, last_accrual_ts, flags}`, flags = overdue 1, defaulted 2, closed 4, drawn 8. The token id is the loan id. |
 | `FoodTokenFinal(union, token_id)` | persistent | `FoodTokenFinal{final_date, lapsed}` (25 Oct): the last draw date (`draw_loan` refuses after it, `TooLate`) and whether the token lapsed unused (`lapse_food_token`, anyone, after the last date). A token without it has no last date (attested before 25 Oct). |
 | `Vouchers(union, token_id)` | persistent | `VoucherBook{hours, earmark, earmark_per_hour, senior_out, dues: Vec<Due{owner, amount}>}` (C5) |
 | `OwnerBalance(union, owner)` | persistent | i128 owner's settled pending parts, ready to collect |
@@ -140,7 +140,7 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
   place. `accept` takes three more arguments (`usdc`, `valid_until`, `sig`): callers change, storage does not.
   The frozen-layout hash changed only because the sample list grew.
 - **Final date (25 Oct, last draw date and lapse):** fund_core gained one key, `FoodTokenFinal(union, token_id)`
-  (persistent). Appended only: `FoodToken` entries keep their layout (its `from_date` stays, written 0), so a
+  (persistent). Appended only: `FoodToken` entries keep their layout (its `from_date` stays and now holds the window's opening), so a
   deployed fund_core can be upgraded in place. A field added to `FoodToken` would have broken decoding of the food
   tokens already stored, which is why the last date has its own key. `attest_food_token` takes `final_date` in place of
   `from_date`; `food_token` returns `FoodTokenView` (the stored fact plus `final_date`, `lapsed`).

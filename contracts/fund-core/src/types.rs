@@ -167,8 +167,8 @@ pub struct FoodToken {
     pub amount: i128,
     /// The plan's recommended machinery hours; a cap only with the same switch.
     pub hours: u32,
-    /// Unused since 25 Oct (written 0, read nowhere): there is no floor on a draw any more. Kept so the food
-    /// tokens already stored decode. The last draw date is `FoodTokenFinal`.
+    /// The opening of its window (25 Oct): six weeks before the last draw date (`FoodTokenFinal`); a token attested
+    /// before 25 Oct keeps its season's SOS here.
     pub from_date: u64,
     /// The loan drawn against it (C6: the loan lives here; the token id is the loan id).
     /// All zero until drawn; `FLAG_DRAWN` says a loan exists (one per token).

@@ -14,7 +14,11 @@ use soroban_sdk::{
 };
 
 const T0: u64 = 1_700_000_000;
-/// A last draw date no test reaches (25 Oct): tests about other rules are not limited by it.
+/// A last draw date whose six-week window is open now (25 Oct): tests about other rules are not limited by it.
+fn open_now(env: &Env) -> u64 {
+    env.ledger().timestamp() + OPEN_WINDOW
+}
+/// A last draw date far ahead, for the re-attest refusals (not drawn on).
 const FAR: u64 = u64::MAX;
 
 struct Fx {
@@ -83,7 +87,7 @@ impl Fx {
         self.core().repay_loan(&self.union, id, &amount)
     }
 
-    /// F2: the attester copies her food token, open from T0. Tests use the loan id as token id.
+    /// F2: the attester copies her food token, its window open now. Tests use the loan id as token id.
     fn attest(&self, member: &Address, token: &BytesN<32>, amount: i128) {
         self.core().attest_food_token(
             &self.attester,
@@ -92,7 +96,7 @@ impl Fx {
             member,
             &amount,
             &0,
-            &FAR,
+            &open_now(&self.env),
         );
     }
 
@@ -809,7 +813,7 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
             &fx.borrower,
             &(500 * NIN),
             &0,
-            &FAR
+            &open_now(&fx.env)
         )
         .unwrap_err(),
         Ok(Error::NotAttester)
@@ -822,7 +826,7 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
         &fx.borrower,
         &(500 * NIN),
         &0,
-        &FAR,
+        &open_now(&fx.env),
     );
     fx.at(T0 + 30 * DAY);
     // With the amount gate on, at most the attested amount.
@@ -848,7 +852,7 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
             &fx.borrower,
             &(500 * NIN),
             &0,
-            &FAR
+            &open_now(&fx.env)
         )
         .unwrap_err(),
         Ok(Error::FoodTokenUsed)
@@ -2147,7 +2151,7 @@ fn voucher_draw_claim_repay_and_collect() {
         &fx.borrower,
         &(400 * NIN),
         &1000,
-        &FAR,
+        &open_now(&fx.env),
     );
     c.draw_loan(&fx.union, &fx.borrower, &id, &(400 * NIN), &1000);
     assert_eq!(c.senior_earmark(&fx.union), 10 * PRE);
@@ -2210,7 +2214,15 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
     let v = vsetup();
     let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &1400, &FAR);
+    c.attest_food_token(
+        &fx.attester,
+        &fx.union,
+        &id,
+        &fx.borrower,
+        &0,
+        &1400,
+        &open_now(&fx.env),
+    );
     // A voucher-only loan: no cash part.
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &1400);
     assert_eq!(
@@ -2277,7 +2289,15 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
     );
     // Not enough senior money for the prepay of the hours asked.
     let id2 = loan_id(&fx.env, 2);
-    c.attest_food_token(&fx.attester, &fx.union, &id2, &fx.borrower, &0, &2000, &FAR);
+    c.attest_food_token(
+        &fx.attester,
+        &fx.union,
+        &id2,
+        &fx.borrower,
+        &0,
+        &2000,
+        &open_now(&fx.env),
+    );
     assert_eq!(
         c.try_draw_loan(&fx.union, &fx.borrower, &id2, &0, &2000),
         Err(Ok(Error::NoSeniorBacking))
@@ -2298,7 +2318,7 @@ fn default_pays_the_owner_and_senior_from_her_investment_first() {
         &fx.borrower,
         &(300 * NIN),
         &2,
-        &FAR,
+        &open_now(&fx.env),
     );
     c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &200);
     mc.claim(&v.owner, &v.machine, &fx.union, &id, &200, &200);
@@ -2326,7 +2346,7 @@ fn default_beyond_her_investment_owner_still_paid_senior_takes_its_loss() {
         &fx.borrower,
         &(300 * NIN),
         &4,
-        &FAR,
+        &open_now(&fx.env),
     );
     c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &400);
     mc.claim(&v.owner, &v.machine, &fx.union, &id, &400, &400);
@@ -2360,7 +2380,15 @@ fn review_fixes_self_claim_rate_rise_earmarks_close_unused() {
     );
     mc.confirm_machine(&fx.borrower, &mine);
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &400, &FAR);
+    c.attest_food_token(
+        &fx.attester,
+        &fx.union,
+        &id,
+        &fx.borrower,
+        &0,
+        &400,
+        &open_now(&fx.env),
+    );
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &400);
     assert_eq!(
         mc.try_claim(&fx.borrower, &mine, &fx.union, &id, &400, &100),
@@ -2368,7 +2396,15 @@ fn review_fixes_self_claim_rate_rise_earmarks_close_unused() {
     );
     // Another loan holds back 10 hours: 14 × ₹700 of the 10,000 senior nIN are earmarked.
     let id2 = loan_id(&fx.env, 2);
-    c.attest_food_token(&fx.attester, &fx.union, &id2, &fx.borrower, &0, &1000, &FAR);
+    c.attest_food_token(
+        &fx.attester,
+        &fx.union,
+        &id2,
+        &fx.borrower,
+        &0,
+        &1000,
+        &open_now(&fx.env),
+    );
     c.draw_loan(&fx.union, &fx.borrower, &id2, &0, &1000);
     assert_eq!(c.senior_earmark(&fx.union), 14 * PRE);
     // The union raises its tractor rate 50% after the draw: the higher prepay would eat the
@@ -2404,7 +2440,15 @@ fn bring_respects_the_daily_cap_and_the_voucher_earmark() {
     let (s24, q) = fx.ids();
     // 200 senior USDC at ₹50; a voucher earmarks 14 × ₹700 = 9,800 nIN = 196 USDC.
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &1400, &FAR);
+    c.attest_food_token(
+        &fx.attester,
+        &fx.union,
+        &id,
+        &fx.borrower,
+        &0,
+        &1400,
+        &open_now(&fx.env),
+    );
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &1400);
     // ₹250 → 5 USDC + 1% would cut into the 196 USDC held for the voucher.
     let b = f.post_offer(
@@ -2473,7 +2517,15 @@ fn close_unused_is_hers_only_and_evented() {
     let v = vsetup();
     let (fx, c) = (&v.fx, v.fx.core());
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &200, &FAR);
+    c.attest_food_token(
+        &fx.attester,
+        &fx.union,
+        &id,
+        &fx.borrower,
+        &0,
+        &200,
+        &open_now(&fx.env),
+    );
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &200);
     assert_eq!(
         c.try_close_unused(&fx.neighbour, &fx.union, &id),
@@ -3224,4 +3276,31 @@ fn last_draw_date_and_public_lapse() {
     // Undrawn and past its date but not lapsed yet: still lapsable.
     assert!(lapse(4).is_ok());
     fx.assert_conserved();
+}
+
+/// Usable in a window (executive decision 25 Oct): from six weeks before its last draw date up to it.
+#[test]
+fn a_crop_share_opens_six_weeks_before_its_last_date() {
+    let fx = setup();
+    let c = fx.core();
+    fx.invest(&fx.borrower, 3_000 * NIN);
+    let id = loan_id(&fx.env, 1);
+    let last = T0 + 100 * DAY;
+    c.attest_food_token(
+        &fx.attester,
+        &fx.union,
+        &id,
+        &fx.borrower,
+        &(100 * NIN),
+        &0,
+        &last,
+    );
+    let v = c.food_token(&fx.union, &id).unwrap();
+    assert_eq!((v.from_date, v.final_date), (last - OPEN_WINDOW, last));
+    let draw = || c.try_draw_loan(&fx.union, &fx.borrower, &id, &(100 * NIN), &0);
+    assert_eq!(draw().unwrap_err(), Ok(Error::NotOpenYet));
+    fx.at(last - OPEN_WINDOW - 1);
+    assert_eq!(draw().unwrap_err(), Ok(Error::NotOpenYet));
+    fx.at(last - OPEN_WINDOW);
+    assert!(draw().is_ok());
 }

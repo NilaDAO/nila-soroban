@@ -67,6 +67,8 @@ pub const UPGRADE_DELAY: u64 = 60;
 pub const UNBONDING: u64 = 14 * DAY;
 /// Repay window after the end of season (LOAN_RULES §1).
 pub const REPAY_WINDOW: u64 = 21 * DAY;
+/// A crop share opens this long before its last draw date (executive decision 25 Oct: six weeks).
+pub const OPEN_WINDOW: u64 = 42 * DAY;
 /// Open loans per member, for `loans_of` and the lock (R27, R43).
 pub const MAX_LOANS_PER_MEMBER: u32 = 32;
 
@@ -1184,11 +1186,12 @@ impl FundCore {
         if final_of(&env, &fk).is_some_and(|f| f.lapsed) {
             return Err(Error::FoodTokenLapsed);
         }
+        // Usable in a window (25 Oct): from six weeks before its last draw date up to it.
         let ft = FoodToken {
             member: member.clone(),
             amount,
             hours,
-            from_date: 0,
+            from_date: final_date.saturating_sub(OPEN_WINDOW),
             loan: LoanState::none(),
         };
         env.storage().persistent().set(&key, &ft);
@@ -1248,8 +1251,11 @@ impl FundCore {
         if ft.loan.drawn() {
             return Err(Error::FoodTokenUsed);
         }
-        // No floor (25 Oct): drawn from attestation up to its last draw date; a token attested before 25 Oct has
-        // none and is not limited.
+        // Its window (25 Oct): from its opening date (six weeks before the last draw date) up to the last date. A token
+        // attested before 25 Oct keeps its season's SOS as the opening and has no last date.
+        if env.ledger().timestamp() < ft.from_date {
+            return Err(Error::NotOpenYet);
+        }
         if let Some(f) = final_of(
             &env,
             &DataKey::FoodTokenFinal(union.clone(), token_id.clone()),
