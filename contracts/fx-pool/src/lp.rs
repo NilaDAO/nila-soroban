@@ -128,6 +128,18 @@ pub struct VoucherFloorSet {
     pub usdc: i128,
 }
 
+/// Rupees added to an open offer no LP has accepted yet (25 Oct): one offer grows instead of a new one each time.
+#[contractevent]
+pub struct OfferMerged {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub offer_id: u64,
+    pub added: i128,
+    pub inr: i128,
+    pub expires: u64,
+}
+
 #[contractevent]
 pub struct OfferPosted {
     #[topic]
@@ -721,6 +733,9 @@ impl FxPoolContract {
 }
 
 /// An open offer of the union's rupees (post_offer, and the cash scan's own Collect over the treasury, 24 Oct).
+/// Merged (25 Oct): while the union has an open offer of the same kind no LP has accepted yet, the rupees are added
+/// to it (up to the most one offer can be, the max scan) and its expiry moved to the later one, instead of a new
+/// offer; the id returned is that offer's.
 pub(crate) fn open_offer(
     env: &Env,
     union: &Address,
@@ -729,6 +744,29 @@ pub(crate) fn open_offer(
     expires: u64,
 ) -> Result<u64, Error> {
     let mut ids = offers_of(env, union);
+    let now = env.ledger().timestamp();
+    for oid in ids.iter() {
+        if let Ok(mut o) = load_offer(env, oid) {
+            if o.kind == kind
+                && o.state == OfferState::Open
+                && o.expires > now
+                && o.inr + inr <= max_scan(env)
+            {
+                o.inr += inr;
+                o.expires = core::cmp::max(o.expires, expires);
+                save_offer(env, oid, &o);
+                OfferMerged {
+                    union: union.clone(),
+                    offer_id: oid,
+                    added: inr,
+                    inr: o.inr,
+                    expires: o.expires,
+                }
+                .publish(env);
+                return Ok(oid);
+            }
+        }
+    }
     if ids.len() >= MAX_OPEN_OFFERS {
         return Err(Error::TooManyOffers);
     }

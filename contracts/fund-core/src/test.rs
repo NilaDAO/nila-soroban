@@ -969,6 +969,8 @@ impl Fx {
 
 /// Cash at hand may pass the treasury (executive decision 24 Oct): what a scan adds above it opens a Collect offer
 /// for the union's LPs, in whole rupees, for as long as the cash batch lasts; a scan within the treasury opens none.
+/// Merged (25 Oct): while that offer is open and no LP has accepted it, the next part above the treasury is added
+/// to it (up to the max scan) instead of a new offer; once an LP accepted it, a new one opens.
 #[test]
 fn cash_over_the_treasury_opens_a_collect_offer() {
     let fx = setup();
@@ -989,8 +991,15 @@ fn cash_over_the_treasury_opens_a_collect_offer() {
     let o = f.offer(&ids.get(0).unwrap()).unwrap();
     assert_eq!(o.kind, nila_fx_pool::OfferKind::Collect);
     assert_eq!(o.inr, 200 * NIN);
-    // Another 100: only the new part above it gets an offer of its own.
+    // Another 100: added to the open offer, no new one.
     fx.scan(Purpose::Invest, &fx.neighbour, 100 * NIN, 4, None)
+        .unwrap();
+    let ids = f.offers_of(&fx.union);
+    assert_eq!(ids.len(), 1);
+    assert_eq!(f.offer(&ids.get(0).unwrap()).unwrap().inr, 300 * NIN);
+    // Up to the max scan only: a part that would take it past gets an offer of its own.
+    f.set_max_scan(&(350 * NIN));
+    fx.scan(Purpose::Invest, &fx.neighbour, 100 * NIN, 5, None)
         .unwrap();
     let ids = f.offers_of(&fx.union);
     assert_eq!(ids.len(), 2);
@@ -1898,6 +1907,8 @@ fn bring_draws_senior_usdc_only_above_the_voucher_floor() {
         fx.try_acc(&lp, &big, &s24, &q),
         Err(Ok(FxError::BelowVoucherFloor))
     );
+    // Withdrawn, so the next amount is an offer of its own (an open one would take it, 25 Oct).
+    f.cancel_offer(&fx.leader, &big);
     // Only 10 USDC are free above the floor: ₹950 (10.1 USDC with the fee) is refused, ₹900 fits.
     let mid = f.post_offer(
         &fx.leader,
@@ -1910,6 +1921,7 @@ fn bring_draws_senior_usdc_only_above_the_voucher_floor() {
         fx.try_acc(&lp, &mid, &s24, &q),
         Err(Ok(FxError::BelowVoucherFloor))
     );
+    f.cancel_offer(&fx.leader, &mid);
     let ok = f.post_offer(
         &fx.leader,
         &fx.union,
@@ -2417,6 +2429,7 @@ fn bring_respects_the_daily_cap_and_the_voucher_earmark() {
         fx.try_acc(&v.owner, &b, &s24, &q),
         Err(Ok(FxError::BelowVoucherFloor))
     );
+    f.cancel_offer(&fx.leader, &b);
     // ₹150 → 3.03 USDC fits in the 4 free.
     let ok = f.post_offer(
         &fx.leader,

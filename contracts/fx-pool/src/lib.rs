@@ -513,7 +513,7 @@ fn nin_addr(env: &Env) -> Address {
     get(env, &DataKey::Nin)
 }
 
-fn max_scan(env: &Env) -> i128 {
+pub(crate) fn max_scan(env: &Env) -> i128 {
     env.storage()
         .instance()
         .get(&DataKey::MaxScan)
