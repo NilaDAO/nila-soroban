@@ -91,7 +91,7 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 
 ## D. Verify after deploy (read-only)
 
-- [ ] `upgrade_delay` = 172800 (48 h) on all five; `pending_upgrade` and `pending_delay` = null.
+- [ ] `upgrade_delay` = 172800 (48 h) on all six (with crop_calendar); `pending_upgrade` and `pending_delay` = null.
       The delay is stored at the constructor and survives upgrades, so check it on the
       deployed contract itself.
 - [ ] `admin` (roles, land_title, fund_viewer, fx_pool) and `get_config().admin` (fund_core) =
