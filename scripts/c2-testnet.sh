@@ -136,7 +136,7 @@ draw() { # loan_id cash token_id
 attest() { # token_id amount — open from now
   tx stellar contract invoke --id "$CORE" --source ${P}-attester -- \
     attest_food_token --attester ${P}-attester --union "$UNION" --token_id "$1" \
-    --member ${P}-member --amount "$2" --from_date 0
+    --member ${P}-member --amount "$2" --final_date 9999999999
 }
 
 log "food tokens (F2): the attester copies two of her FoodTokens, 400 and 300 nIN"

@@ -14,6 +14,8 @@ use soroban_sdk::{
 };
 
 const T0: u64 = 1_700_000_000;
+/// A last draw date no test reaches (25 Oct): tests about other rules are not limited by it.
+const FAR: u64 = u64::MAX;
 
 struct Fx {
     env: Env,
@@ -83,8 +85,15 @@ impl Fx {
 
     /// F2: the attester copies her food token, open from T0. Tests use the loan id as token id.
     fn attest(&self, member: &Address, token: &BytesN<32>, amount: i128) {
-        self.core()
-            .attest_food_token(&self.attester, &self.union, token, member, &amount, &0, &T0);
+        self.core().attest_food_token(
+            &self.attester,
+            &self.union,
+            token,
+            member,
+            &amount,
+            &0,
+            &FAR,
+        );
     }
 
     fn draw(&self, id: &BytesN<32>, cash: i128) {
@@ -800,12 +809,12 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
             &fx.borrower,
             &(500 * NIN),
             &0,
-            &T0
+            &FAR
         )
         .unwrap_err(),
         Ok(Error::NotAttester)
     );
-    // Corrected before use, open from day 30.
+    // Corrected before use; no floor (25 Oct): it can be drawn at once.
     c.attest_food_token(
         &fx.attester,
         &fx.union,
@@ -813,9 +822,8 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
         &fx.borrower,
         &(500 * NIN),
         &0,
-        &(T0 + 30 * DAY),
+        &FAR,
     );
-    assert_eq!(draw(&tok, &l1, NIN), Ok(Error::NotOpenYet));
     fx.at(T0 + 30 * DAY);
     // With the amount gate on, at most the attested amount.
     let mut uc = union_cfg();
@@ -840,7 +848,7 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
             &fx.borrower,
             &(500 * NIN),
             &0,
-            &T0
+            &FAR
         )
         .unwrap_err(),
         Ok(Error::FoodTokenUsed)
@@ -1415,9 +1423,18 @@ fn storage_layout_is_frozen() {
         DataKey::FoodToken(a.clone(), h.clone()),
         DataKey::Vouchers(a.clone(), h.clone()),
         DataKey::OwnerBalance(a.clone(), a.clone()),
+        DataKey::FoodTokenFinal(a.clone(), h.clone()),
     ] {
         v.push_back(k.into_val(&env));
     }
+    // Appended 25 Oct: the last draw date and lapse of a food token, beside its unchanged entry.
+    v.push_back(
+        FoodTokenFinal {
+            final_date: 1,
+            lapsed: false,
+        }
+        .into_val(&env),
+    );
     v.push_back(
         Config {
             admin: a.clone(),
@@ -1526,7 +1543,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "fe30eea98285703bcefcefc3fdcdf55b42dc5be5ac9fb1d23c5298323b9abb68",
+        hex, "c3276f8a1d13063b2505d3212cbc4fb64b0e1f3125b4c0d877477d1e09c8f710",
         "fund_core storage layout changed"
     );
 }
@@ -2130,7 +2147,7 @@ fn voucher_draw_claim_repay_and_collect() {
         &fx.borrower,
         &(400 * NIN),
         &1000,
-        &T0,
+        &FAR,
     );
     c.draw_loan(&fx.union, &fx.borrower, &id, &(400 * NIN), &1000);
     assert_eq!(c.senior_earmark(&fx.union), 10 * PRE);
@@ -2193,7 +2210,7 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
     let v = vsetup();
     let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &1400, &T0);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &1400, &FAR);
     // A voucher-only loan: no cash part.
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &1400);
     assert_eq!(
@@ -2260,7 +2277,7 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
     );
     // Not enough senior money for the prepay of the hours asked.
     let id2 = loan_id(&fx.env, 2);
-    c.attest_food_token(&fx.attester, &fx.union, &id2, &fx.borrower, &0, &2000, &T0);
+    c.attest_food_token(&fx.attester, &fx.union, &id2, &fx.borrower, &0, &2000, &FAR);
     assert_eq!(
         c.try_draw_loan(&fx.union, &fx.borrower, &id2, &0, &2000),
         Err(Ok(Error::NoSeniorBacking))
@@ -2281,7 +2298,7 @@ fn default_pays_the_owner_and_senior_from_her_investment_first() {
         &fx.borrower,
         &(300 * NIN),
         &2,
-        &T0,
+        &FAR,
     );
     c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &200);
     mc.claim(&v.owner, &v.machine, &fx.union, &id, &200, &200);
@@ -2309,7 +2326,7 @@ fn default_beyond_her_investment_owner_still_paid_senior_takes_its_loss() {
         &fx.borrower,
         &(300 * NIN),
         &4,
-        &T0,
+        &FAR,
     );
     c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &400);
     mc.claim(&v.owner, &v.machine, &fx.union, &id, &400, &400);
@@ -2343,7 +2360,7 @@ fn review_fixes_self_claim_rate_rise_earmarks_close_unused() {
     );
     mc.confirm_machine(&fx.borrower, &mine);
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &400, &T0);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &400, &FAR);
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &400);
     assert_eq!(
         mc.try_claim(&fx.borrower, &mine, &fx.union, &id, &400, &100),
@@ -2351,7 +2368,7 @@ fn review_fixes_self_claim_rate_rise_earmarks_close_unused() {
     );
     // Another loan holds back 10 hours: 14 × ₹700 of the 10,000 senior nIN are earmarked.
     let id2 = loan_id(&fx.env, 2);
-    c.attest_food_token(&fx.attester, &fx.union, &id2, &fx.borrower, &0, &1000, &T0);
+    c.attest_food_token(&fx.attester, &fx.union, &id2, &fx.borrower, &0, &1000, &FAR);
     c.draw_loan(&fx.union, &fx.borrower, &id2, &0, &1000);
     assert_eq!(c.senior_earmark(&fx.union), 14 * PRE);
     // The union raises its tractor rate 50% after the draw: the higher prepay would eat the
@@ -2387,7 +2404,7 @@ fn bring_respects_the_daily_cap_and_the_voucher_earmark() {
     let (s24, q) = fx.ids();
     // 200 senior USDC at ₹50; a voucher earmarks 14 × ₹700 = 9,800 nIN = 196 USDC.
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &1400, &T0);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &1400, &FAR);
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &1400);
     // ₹250 → 5 USDC + 1% would cut into the 196 USDC held for the voucher.
     let b = f.post_offer(
@@ -2456,7 +2473,7 @@ fn close_unused_is_hers_only_and_evented() {
     let v = vsetup();
     let (fx, c) = (&v.fx, v.fx.core());
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &200, &T0);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &200, &FAR);
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &200);
     assert_eq!(
         c.try_close_unused(&fx.neighbour, &fx.union, &id),
@@ -3107,4 +3124,104 @@ fn leader_swaps_usdc_to_nin_and_back_from_her_bucket_only() {
         f.try_swap_nin_to_usdc(&fx.leader, &fx.union, &NIN),
         Err(Ok(FxError::StaleOracle))
     );
+}
+
+/// The last draw date and the public lapse (executive decision 25 Oct): no floor, drawn up to and on its last
+/// date, too late after it; an undrawn token past its last date lapses by anyone and is never drawn or attested
+/// again; a drawn one cannot lapse; a voucher-only share lapses the same way.
+#[test]
+fn last_draw_date_and_public_lapse() {
+    let fx = setup();
+    let c = fx.core();
+    fx.invest(&fx.borrower, 3_000 * NIN);
+    let last = T0 + 10 * DAY;
+    let attest = |b: u8, amount: i128, hours: u32| {
+        c.attest_food_token(
+            &fx.attester,
+            &fx.union,
+            &loan_id(&fx.env, b),
+            &fx.borrower,
+            &amount,
+            &hours,
+            &last,
+        )
+    };
+    // A last date is required.
+    assert_eq!(
+        c.try_attest_food_token(
+            &fx.attester,
+            &fx.union,
+            &loan_id(&fx.env, 9),
+            &fx.borrower,
+            &(100 * NIN),
+            &0,
+            &0
+        )
+        .unwrap_err(),
+        Ok(Error::BadDates)
+    );
+    for b in 1..=4 {
+        attest(b, 100 * NIN, 0);
+    }
+    attest(5, 0, 300); // voucher-only
+    let draw = |b: u8| {
+        c.try_draw_loan(
+            &fx.union,
+            &fx.borrower,
+            &loan_id(&fx.env, b),
+            &(100 * NIN),
+            &0,
+        )
+    };
+    // No floor: drawn right after attestation.
+    assert!(draw(1).is_ok());
+    assert_eq!(
+        c.food_token(&fx.union, &loan_id(&fx.env, 1))
+            .unwrap()
+            .final_date,
+        last
+    );
+    // Not lapsed before or at its last date.
+    let lapse = |b: u8| c.try_lapse_food_token(&fx.union, &loan_id(&fx.env, b));
+    assert_eq!(lapse(2).unwrap_err(), Ok(Error::NotLapsedYet));
+    fx.at(last);
+    assert_eq!(lapse(2).unwrap_err(), Ok(Error::NotLapsedYet));
+    // On its last date: still drawn.
+    assert!(draw(2).is_ok());
+    // After it: too late, and anyone may lapse an undrawn one (no signature at all).
+    fx.at(last + 1);
+    assert_eq!(draw(3).unwrap_err(), Ok(Error::TooLate));
+    fx.env.set_auths(&[]);
+    c.lapse_food_token(&fx.union, &loan_id(&fx.env, 3));
+    c.lapse_food_token(&fx.union, &loan_id(&fx.env, 5));
+    fx.env.mock_all_auths();
+    let v = c.food_token(&fx.union, &loan_id(&fx.env, 3)).unwrap();
+    assert!(v.lapsed && !v.loan.drawn());
+    assert!(
+        c.food_token(&fx.union, &loan_id(&fx.env, 5))
+            .unwrap()
+            .lapsed
+    );
+    // Lapsed once only; never drawn or attested again.
+    assert_eq!(lapse(3).unwrap_err(), Ok(Error::FoodTokenLapsed));
+    assert_eq!(draw(3).unwrap_err(), Ok(Error::FoodTokenLapsed));
+    assert_eq!(
+        c.try_attest_food_token(
+            &fx.attester,
+            &fx.union,
+            &loan_id(&fx.env, 3),
+            &fx.borrower,
+            &(100 * NIN),
+            &0,
+            &FAR
+        )
+        .unwrap_err(),
+        Ok(Error::FoodTokenLapsed)
+    );
+    // A drawn token cannot lapse; an unknown one is not there.
+    assert_eq!(lapse(1).unwrap_err(), Ok(Error::FoodTokenUsed));
+    assert_eq!(lapse(77).unwrap_err(), Ok(Error::NoFoodToken));
+    // Undrawn and past its date but not lapsed yet: still lapsable.
+    assert!(lapse(4).is_ok());
+    fx.assert_conserved();
 }

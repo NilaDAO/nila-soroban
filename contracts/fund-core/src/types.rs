@@ -68,6 +68,14 @@ pub enum Error {
     /// Nothing is owed yet (a voucher-only loan before any claim).
     NothingOwed = 56,
     NotBorrower = 57,
+    /// A food token's last draw date may not be 0 (25 Oct).
+    BadDates = 58,
+    /// The food token lapsed unused after its last draw date (25 Oct): it can no longer be drawn or attested.
+    FoodTokenLapsed = 59,
+    /// After the food token's last draw date: too late for this cycle (25 Oct).
+    TooLate = 60,
+    /// The food token's last draw date has not passed yet (25 Oct).
+    NotLapsedYet = 61,
 }
 
 #[contracttype]
@@ -159,10 +167,35 @@ pub struct FoodToken {
     pub amount: i128,
     /// The plan's recommended machinery hours; a cap only with the same switch.
     pub hours: u32,
-    /// Loans accepted from this date: the season's SOS from the plan (N5).
+    /// Unused since 25 Oct (written 0, read nowhere): there is no floor on a draw any more. Kept so the food
+    /// tokens already stored decode. The last draw date is `FoodTokenFinal`.
     pub from_date: u64,
     /// The loan drawn against it (C6: the loan lives here; the token id is the loan id).
     /// All zero until drawn; `FLAG_DRAWN` says a loan exists (one per token).
+    pub loan: LoanState,
+}
+
+/// A food token's last draw date and whether it lapsed unused (executive decision 25 Oct). Its own key, so the
+/// `FoodToken` entries already stored keep their layout; a token without one has no last date.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FoodTokenFinal {
+    /// The last sowing date for the crop in its season: a loan may be drawn up to and including it.
+    pub final_date: u64,
+    /// Lapsed by anyone after `final_date` while undrawn: never drawn or attested again.
+    pub lapsed: bool,
+}
+
+/// What `food_token` returns: the stored fact with its last draw date (0 = none) and the lapsed flag.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FoodTokenView {
+    pub member: Address,
+    pub amount: i128,
+    pub hours: u32,
+    pub from_date: u64,
+    pub final_date: u64,
+    pub lapsed: bool,
     pub loan: LoanState,
 }
 

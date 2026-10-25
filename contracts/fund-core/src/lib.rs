@@ -19,7 +19,10 @@ use types::{
     LoanState, Market, Milestone, UnionBook, FLAG_CLOSED, FLAG_DEFAULTED, FLAG_DRAWN, FLAG_OVERDUE,
 };
 
-pub use types::{Config, Due, Error, FoodToken, Investor, Position, UnionConfig, VoucherBook};
+pub use types::{
+    Config, Due, Error, FoodToken, FoodTokenFinal, FoodTokenView, Investor, Position, UnionConfig,
+    VoucherBook,
+};
 
 contractmeta!(key = "binver", val = "0.2.0");
 
@@ -84,6 +87,8 @@ pub enum DataKey {
     Union(Address),
     /// Attested food token (union, Polygon token id) that a loan may be drawn against.
     FoodToken(Address, BytesN<32>),
+    /// Its last draw date and lapsed flag (25 Oct), apart so stored `FoodToken` entries keep their layout.
+    FoodTokenFinal(Address, BytesN<32>),
     /// A loan's voucher part (C5).
     Vouchers(Address, BytesN<32>),
     /// An owner's settled pending parts, ready to collect (union, owner).
@@ -102,6 +107,10 @@ fn cfg(env: &Env) -> Config {
 fn save_cfg(env: &Env, c: &Config) {
     env.storage().instance().set(&DataKey::Config, c);
     bump_instance(env);
+}
+
+fn final_of(env: &Env, key: &DataKey) -> Option<FoodTokenFinal> {
+    env.storage().persistent().get(key)
 }
 
 fn bump_key(env: &Env, key: &DataKey) {
@@ -1154,12 +1163,16 @@ impl FundCore {
         member: Address,
         amount: i128,
         hours: u32,
-        from_date: u64,
+        final_date: u64,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         require_attester(&env, &attester)?;
         if amount < 0 || (amount == 0 && hours == 0) {
             return Err(Error::AmountZero);
+        }
+        // A last draw date is required (25 Oct); there is no floor any more.
+        if final_date == 0 {
+            return Err(Error::BadDates);
         }
         let key = DataKey::FoodToken(union.clone(), token_id.clone());
         if let Some(old) = env.storage().persistent().get::<_, FoodToken>(&key) {
@@ -1167,22 +1180,34 @@ impl FundCore {
                 return Err(Error::FoodTokenUsed);
             }
         }
+        let fk = DataKey::FoodTokenFinal(union.clone(), token_id.clone());
+        if final_of(&env, &fk).is_some_and(|f| f.lapsed) {
+            return Err(Error::FoodTokenLapsed);
+        }
         let ft = FoodToken {
             member: member.clone(),
             amount,
             hours,
-            from_date,
+            from_date: 0,
             loan: LoanState::none(),
         };
         env.storage().persistent().set(&key, &ft);
         bump_key(&env, &key);
+        env.storage().persistent().set(
+            &fk,
+            &FoodTokenFinal {
+                final_date,
+                lapsed: false,
+            },
+        );
+        bump_key(&env, &fk);
         FoodTokenAttested {
             union,
             token_id,
             member,
             amount,
             hours,
-            from_date,
+            final_date,
         }
         .publish(&env);
         bump_instance(&env);
@@ -1223,8 +1248,18 @@ impl FundCore {
         if ft.loan.drawn() {
             return Err(Error::FoodTokenUsed);
         }
-        if env.ledger().timestamp() < ft.from_date {
-            return Err(Error::NotOpenYet);
+        // No floor (25 Oct): drawn from attestation up to its last draw date; a token attested before 25 Oct has
+        // none and is not limited.
+        if let Some(f) = final_of(
+            &env,
+            &DataKey::FoodTokenFinal(union.clone(), token_id.clone()),
+        ) {
+            if f.lapsed {
+                return Err(Error::FoodTokenLapsed);
+            }
+            if env.ledger().timestamp() > f.final_date {
+                return Err(Error::TooLate);
+            }
         }
 
         let uc = union_cfg(&env, &union)?;
@@ -1963,10 +1998,56 @@ impl FundCore {
         load_loan(&env, &union, &token_id).ok()
     }
 
-    pub fn food_token(env: Env, union: Address, token_id: BytesN<32>) -> Option<FoodToken> {
-        env.storage()
+    /// The food token with its last draw date (0: none) and whether it lapsed (25 Oct).
+    pub fn food_token(env: Env, union: Address, token_id: BytesN<32>) -> Option<FoodTokenView> {
+        let ft: FoodToken = env
+            .storage()
             .persistent()
-            .get(&DataKey::FoodToken(union, token_id))
+            .get(&DataKey::FoodToken(union.clone(), token_id.clone()))?;
+        let f = final_of(&env, &DataKey::FoodTokenFinal(union, token_id));
+        Some(FoodTokenView {
+            member: ft.member,
+            amount: ft.amount,
+            hours: ft.hours,
+            from_date: ft.from_date,
+            final_date: f.as_ref().map_or(0, |f| f.final_date),
+            lapsed: f.is_some_and(|f| f.lapsed),
+            loan: ft.loan,
+        })
+    }
+
+    /// Anyone, after the last draw date (25 Oct): an undrawn food token lapses. The entry stays, so the id is never
+    /// attested or drawn again; no funds move. The oracle relays it to Polygon (burnToken) after its own checks.
+    pub fn lapse_food_token(env: Env, union: Address, token_id: BytesN<32>) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        let ft: FoodToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FoodToken(union.clone(), token_id.clone()))
+            .ok_or(Error::NoFoodToken)?;
+        if ft.loan.drawn() {
+            return Err(Error::FoodTokenUsed);
+        }
+        let fk = DataKey::FoodTokenFinal(union.clone(), token_id.clone());
+        let mut f = final_of(&env, &fk).ok_or(Error::NotLapsedYet)?;
+        if f.lapsed {
+            return Err(Error::FoodTokenLapsed);
+        }
+        if env.ledger().timestamp() <= f.final_date {
+            return Err(Error::NotLapsedYet);
+        }
+        f.lapsed = true;
+        env.storage().persistent().set(&fk, &f);
+        bump_key(&env, &fk);
+        FoodTokenLapsed {
+            union,
+            token_id,
+            member: ft.member,
+            final_date: f.final_date,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(())
     }
 
     /// Open loans per union and borrower (R43); closed ones are in the events.

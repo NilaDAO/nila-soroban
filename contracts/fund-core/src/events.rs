@@ -62,7 +62,20 @@ pub struct FoodTokenAttested {
     pub member: Address,
     pub amount: i128,
     pub hours: u32,
-    pub from_date: u64,
+    /// The last draw date (25 Oct; was from_date, the SOS floor).
+    pub final_date: u64,
+}
+
+/// An undrawn food token past its last draw date, lapsed by anyone (25 Oct). The oracle then burns the Polygon
+/// FoodToken (burnToken) after its own checks, so its fields are free again for that season. No funds move.
+#[contractevent]
+pub struct FoodTokenLapsed {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub token_id: BytesN<32>,
+    pub member: Address,
+    pub final_date: u64,
 }
 
 /// For the attester's F3 fact (R31): the food token is now redeemed.
