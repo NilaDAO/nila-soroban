@@ -167,7 +167,7 @@ pub struct FoodToken {
     pub amount: i128,
     /// The plan's recommended machinery hours; a cap only with the same switch.
     pub hours: u32,
-    /// The opening of its window (25 Oct): six weeks before the last draw date (`FoodTokenFinal`); a token attested
+    /// The opening of its window (25 Oct): a week before its sowing window, attested (`FoodTokenFinal` ends it); a token attested
     /// before 25 Oct keeps its season's SOS here.
     pub from_date: u64,
     /// The loan drawn against it (C6: the loan lives here; the token id is the loan id).
