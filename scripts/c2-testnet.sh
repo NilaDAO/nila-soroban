@@ -133,10 +133,11 @@ draw() { # loan_id cash token_id
   tx stellar contract invoke --id "$CORE" --source ${P}-member -- \
     draw_loan --union "$UNION" --member ${P}-member --token_id "$3" --loan_id "$1" --cash "$2" --escrow_id 0
 }
-attest() { # token_id amount — open from now
+attest() { # token_id amount — its window comes from the crop calendar (25 Oct): the deployment needs one linked
+  # (fund_core.set_crop_calendar) and a token id whose crop and sowing fall in one of its windows, else BadDates
   tx stellar contract invoke --id "$CORE" --source ${P}-attester -- \
     attest_food_token --attester ${P}-attester --union "$UNION" --token_id "$1" \
-    --member ${P}-member --amount "$2" --final_date 9999999999
+    --member ${P}-member --amount "$2"
 }
 
 log "food tokens (F2): the attester copies two of her FoodTokens, 400 and 300 nIN"

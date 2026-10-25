@@ -130,7 +130,7 @@ L=$(printf '0a%.0s' {1..32})
 log "F2: her food token attested with the plan's recommendation (400 cash, 10 hours)"
 TX_ATTEST=$(tx stellar contract invoke --id "$CORE" --source ${P}-attester -- attest_food_token \
   --attester ${P}-attester --union "$UNION" --token_id "$L" --member ${P}-member \
-  --amount $((400 * NIN)) --hours 10 --final_date 9999999999)
+  --amount $((400 * NIN)) --hours 10)
 log "N10: she accepts the loan: 400 cash + 10 machine hours (senior earmarks 10 × ₹700)"
 TX_DRAW=$(tx stellar contract invoke --id "$CORE" --source ${P}-member -- draw_loan --union "$UNION" \
   --member ${P}-member --token_id "$L" --cash $((400 * NIN)) --hours 10)

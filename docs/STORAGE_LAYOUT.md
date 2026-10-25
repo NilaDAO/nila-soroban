@@ -76,6 +76,15 @@ storage:
 | `FoodTokenFinal(union, token_id)` | persistent | `FoodTokenFinal{final_date, lapsed}` (25 Oct): the last draw date (`draw_loan` refuses after it, `TooLate`) and whether the token lapsed unused (`lapse_food_token`, anyone, after the last date). A token without it has no last date (attested before 25 Oct). |
 | `Vouchers(union, token_id)` | persistent | `VoucherBook{hours, earmark, earmark_per_hour, senior_out, dues: Vec<Due{owner, amount}>}` (C5) |
 | `OwnerBalance(union, owner)` | persistent | i128 owner's settled pending parts, ready to collect |
+| `CropCalendar` | instance | Address of the crop_calendar contract (25 Oct) |
+
+## crop_calendar (25 Oct)
+
+| Key | Tier | Value |
+|---|---|---|
+| `Admin` | instance | Address (the trust) |
+| `Windows(family)` | persistent | `Vec<Window{first, last}>`: a crop family's sowing windows, months 1–12 (`first > last` runs over the new year); never overlapping |
+| upgrade keys | instance | `nila_common::upgrade` (48-hour timelock) |
 
 ## machinery
 
@@ -142,5 +151,10 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
 - **Final date (25 Oct, last draw date and lapse):** fund_core gained one key, `FoodTokenFinal(union, token_id)`
   (persistent). Appended only: `FoodToken` entries keep their layout (its `from_date` stays and now holds the window's opening), so a
   deployed fund_core can be upgraded in place. A field added to `FoodToken` would have broken decoding of the food
-  tokens already stored, which is why the last date has its own key. `attest_food_token` takes `final_date` in place of
-  `from_date`; `food_token` returns `FoodTokenView` (the stored fact plus `final_date`, `lapsed`).
+  tokens already stored, which is why the last date has its own key. `food_token` returns `FoodTokenView` (the stored
+  fact plus `final_date`, `lapsed`).
+- **Crop calendar (25 Oct, same day):** `attest_food_token` takes neither date any more: fund_core reads the window
+  (opening, last date) from the new `crop_calendar` contract by the token id's crop code and sowing date. fund_core
+  gained one instance key, `CropCalendar` (the calendar's address, set by the admin with `set_crop_calendar`), apart
+  from `Config` so the stored config keeps its layout. Until it is set, and the families' windows are set, every
+  attestation is refused (`BadDates`). The frozen-layout hash changed only because the sample list grew.

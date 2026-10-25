@@ -1449,6 +1449,7 @@ fn storage_layout_is_frozen() {
         DataKey::Vouchers(a.clone(), h.clone()),
         DataKey::OwnerBalance(a.clone(), a.clone()),
         DataKey::FoodTokenFinal(a.clone(), h.clone()),
+        DataKey::CropCalendar,
     ] {
         v.push_back(k.into_val(&env));
     }
@@ -1568,7 +1569,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "c3276f8a1d13063b2505d3212cbc4fb64b0e1f3125b4c0d877477d1e09c8f710",
+        hex, "b13ef5e118e62ad4d0e8a8a41ca0fa240953b21e7b898d599a0165411a84d16e",
         "fund_core storage layout changed"
     );
 }
