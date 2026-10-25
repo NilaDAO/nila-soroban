@@ -71,6 +71,23 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     - `enforce_token_amount` **off** (executive decision, 10 Oct): the attested amount mimics the field's
       yield, not a loan limit.
 15. Attester: `land_title.set_title` for each existing Polygon title (F1, the move).
+16. Deployer: `crop_calendar(admin = trust)` (25 Oct). Trust: `crop_calendar.set_windows(family, windows)` for every
+    crop family registered on Polygon, from the node's catalogue (`nila-sensing scripts/crop_calendar.py`, which
+    refuses a family whose crops have different windows; the demo's `DEMO_CALENDAR_OPEN_NOW` is never used here).
+    Trust: `fund_core.set_crop_calendar(crop_calendar)`. **Before the attester's first `attest_food_token`:** until
+    the calendar is linked and the families' windows are set, every attestation is refused (`BadDates`).
+
+### C2. Upgrading a deployment from before 25 Oct (instead of C. for an existing set)
+
+1. Pause the node's attester beat (`attest_food_token` would be refused between the upgrade and step 3).
+2. Trust: upgrade fund_core and fx_pool (48-hour timelock; `upgrade`, then `execute_upgrade`). fund_core leaves
+   about 2.9 KB under the 128 KiB gate: check the size gate on the exact wasm.
+3. Deploy the crop calendar, set every family's windows and link it (C. step 16).
+4. nila-anchor at `t1/anchor/offer-merge` or later **before** the fx_pool upgrade goes live: fx_pool now merges
+   new rupees into an open, unaccepted offer (`OfferMerged`), and the anchor ends a swap whose offer grew so the
+   LP takes a new quote (an accept at the old amount reverts, `QuoteChanged`).
+5. Unpause the attester. Food tokens attested before have no last date on-chain: they never lapse (the node's
+   lapse beat skips them).
 
 ## D. Verify after deploy (read-only)
 
@@ -85,6 +102,8 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
       Bring offers pay out in a day.
 - [ ] LP offers: `anchor` = the trust's anchor account (nila-anchor), `lp_fee` = 100 (1%),
       `voucher_floor` per union as decided.
+- [ ] `fund_core` has the crop calendar linked, and `crop_calendar.window(family × 1000, <a sowing date>)` gives the
+      catalogue's window for each family (one week before the sowing window up to its last day, UTC).
 - [ ] `swap_key` = the anchor's swap key (C9b; `set_swap_key`, admin). Without it every LP accept is
       refused (NotAnchor), also right after the C8 → C9b upgrade. The swap key is apart from the
       anchor account's key: the business server holds only the swap key, the anchor key stays with
