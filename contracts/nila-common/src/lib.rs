@@ -134,6 +134,13 @@ pub trait FundCoreTrait {
     );
 }
 
+/// The crop calendar (25 Oct): a crop share's window from its crop code and planned sowing.
+#[contractclient(name = "CropCalendarClient")]
+pub trait CropCalendarTrait {
+    /// (opening, last second of the last sowing day), or None outside every sowing window.
+    fn window(crop_code: u32, sos: u64) -> Option<(u64, u64)>;
+}
+
 /// What fund_core asks of the machinery contract (C5).
 #[contractclient(name = "MachineryClient")]
 pub trait MachineryTrait {

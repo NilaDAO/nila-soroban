@@ -5,8 +5,8 @@ mod types;
 
 use events::*;
 use nila_common::{
-    bump_instance, upgrade, FxPoolClient, LandTitleClient, Loan, MachineryClient, MarketLite, Role,
-    RolesClient, Tranche, TTL_BUMP, TTL_THRESHOLD,
+    bump_instance, upgrade, CropCalendarClient, FxPoolClient, LandTitleClient, Loan,
+    MachineryClient, MarketLite, Role, RolesClient, Tranche, TTL_BUMP, TTL_THRESHOLD,
 };
 use nila_math::{
     accrued_interest, haircut_index, index_bump, to_shares, to_underlying, BPS, DUST, RAY,
@@ -93,12 +93,27 @@ pub enum DataKey {
     Vouchers(Address, BytesN<32>),
     /// An owner's settled pending parts, ready to collect (union, owner).
     OwnerBalance(Address, Address),
+    /// The crop calendar contract (25 Oct), apart from `Config` so its stored layout stays.
+    CropCalendar,
 }
 
 #[contract]
 pub struct FundCore;
 
 // ---------- storage ----------
+
+/// The crop code (family × 1000 + variety) and planned sowing (unix) packed in a Polygon
+/// FoodToken id: bits 204–223 and 172–203 (FoodTokenUpgradeable.packTokenId).
+fn crop_and_sos(token_id: &BytesN<32>) -> (u32, u64) {
+    let b = token_id.to_array();
+    let mut hi = [0u8; 16];
+    hi.copy_from_slice(&b[..16]);
+    let hi = u128::from_be_bytes(hi);
+    (
+        ((hi >> 76) & 0xF_FFFF) as u32,
+        ((hi >> 44) & 0xFFFF_FFFF) as u64,
+    )
+}
 
 fn cfg(env: &Env) -> Config {
     env.storage().instance().get(&DataKey::Config).unwrap()
@@ -826,6 +841,16 @@ impl FundCore {
         Ok(())
     }
 
+    /// The crop calendar that sets a food token's window at attest (25 Oct). Admin; may be moved.
+    pub fn set_crop_calendar(env: Env, calendar: Address) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::CropCalendar, &calendar);
+        bump_instance(&env);
+        Ok(())
+    }
+
     /// Lending terms of one union (R26, R34, R37, R42, R76).
     pub fn set_union_config(env: Env, union: Address, uc: UnionConfig) -> Result<(), Error> {
         require_admin(&env)?;
@@ -1152,9 +1177,9 @@ impl FundCore {
     // ---------- loans ----------
 
     /// Food token fact (F2): the attester copies a Polygon FoodToken from the crop plan with
-    /// the amount that may be drawn against it and its window: `from_date` (a week before its
-    /// crop's sowing window in that season) up to `final_date` (the last sowing day). One loan
-    /// per token; it can be corrected until a loan is drawn against it.
+    /// the amount that may be drawn against it. Its window comes from the crop calendar by the
+    /// token id's crop and planned sowing (25 Oct): from a week before that sowing window up to
+    /// its last day. One loan per token; it can be corrected until a loan is drawn against it.
     #[allow(clippy::too_many_arguments)]
     pub fn attest_food_token(
         env: Env,
@@ -1164,18 +1189,22 @@ impl FundCore {
         member: Address,
         amount: i128,
         hours: u32,
-        from_date: u64,
-        final_date: u64,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         require_attester(&env, &attester)?;
         if amount < 0 || (amount == 0 && hours == 0) {
             return Err(Error::AmountZero);
         }
-        // A last draw date is required, and the window opens on or before it (25 Oct).
-        if final_date == 0 || from_date > final_date {
-            return Err(Error::BadDates);
-        }
+        // Its window from the calendar: no calendar, or a sowing outside every window, is refused.
+        let (from_date, final_date) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::CropCalendar)
+            .and_then(|c| {
+                let (crop, sos) = crop_and_sos(&token_id);
+                CropCalendarClient::new(&env, &c).window(&crop, &sos)
+            })
+            .ok_or(Error::BadDates)?;
         let key = DataKey::FoodToken(union.clone(), token_id.clone());
         if let Some(old) = env.storage().persistent().get::<_, FoodToken>(&key) {
             if old.loan.drawn() {

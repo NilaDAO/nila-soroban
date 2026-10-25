@@ -1,0 +1,22 @@
+[package]
+name = "nila-crop-calendar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Sowing windows per crop family: the lookup table for a crop share's window (25 Oct)."
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+nila-common = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+
+[features]
+# Demo builds only: a 60-second upgrade timelock (in-place upgrades keep the demo state). Never for mainnet.
+demo-upgrade-delay = []

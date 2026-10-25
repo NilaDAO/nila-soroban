@@ -9,6 +9,7 @@ members = [
     "contracts/fund-viewer",
     "contracts/fx-pool",
     "contracts/machinery",
+    "contracts/crop-calendar",
 ]
 
 [workspace.package]

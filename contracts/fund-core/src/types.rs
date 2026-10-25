@@ -68,7 +68,7 @@ pub enum Error {
     /// Nothing is owed yet (a voucher-only loan before any claim).
     NothingOwed = 56,
     NotBorrower = 57,
-    /// A food token's last draw date may not be 0 (25 Oct).
+    /// No crop calendar, or the planned sowing is in none of its crop's windows (25 Oct).
     BadDates = 58,
     /// The food token lapsed unused after its last draw date (25 Oct): it can no longer be drawn or attested.
     FoodTokenLapsed = 59,

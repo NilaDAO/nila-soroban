@@ -14,10 +14,6 @@ use soroban_sdk::{
 };
 
 const T0: u64 = 1_700_000_000;
-/// A last draw date ahead, with the window open from 0 (25 Oct): tests about other rules are not limited by it.
-fn open_now(env: &Env) -> u64 {
-    env.ledger().timestamp() + 42 * DAY
-}
 /// A last draw date far ahead, for the re-attest refusals (not drawn on).
 const FAR: u64 = u64::MAX;
 
@@ -35,7 +31,30 @@ struct Fx {
     usdc: Address,
     attester: Address,
     roles_id: Address,
+    cal_id: Address,
     next_title: core::cell::Cell<u64>,
+}
+
+/// A stand-in crop calendar (25 Oct): every token gets the window the test sets (`Fx::window`).
+mod mock_calendar {
+    use soroban_sdk::{contract, contractimpl, symbol_short, Env};
+
+    #[contract]
+    pub struct MockCalendar;
+
+    #[contractimpl]
+    impl MockCalendar {
+        pub fn set(env: Env, w: Option<(u64, u64)>) {
+            env.storage().instance().set(&symbol_short!("w"), &w);
+        }
+
+        pub fn window(env: Env, _crop_code: u32, _sos: u64) -> Option<(u64, u64)> {
+            env.storage()
+                .instance()
+                .get(&symbol_short!("w"))
+                .unwrap_or(None)
+        }
+    }
 }
 
 impl Fx {
@@ -53,6 +72,11 @@ impl Fx {
 
     /// `claim_junior` pays a leader's own investment to her wallet (members collect over the desk with
     /// `claim_junior_cash`, 22 Oct): tests of the wallet payout and the cash-out make the investor a leader.
+    /// The window the stand-in calendar gives every food token; None: no sowing window.
+    fn window(&self, w: Option<(u64, u64)>) {
+        mock_calendar::MockCalendarClient::new(&self.env, &self.cal_id).set(&w);
+    }
+
     fn make_leader(&self, who: &Address) {
         nila_roles::RolesContractClient::new(&self.env, &self.roles_id).set_leader(
             &self.union,
@@ -89,16 +113,8 @@ impl Fx {
 
     /// F2: the attester copies her food token, its window open now. Tests use the loan id as token id.
     fn attest(&self, member: &Address, token: &BytesN<32>, amount: i128) {
-        self.core().attest_food_token(
-            &self.attester,
-            &self.union,
-            token,
-            member,
-            &amount,
-            &0,
-            &0,
-            &open_now(&self.env),
-        );
+        self.core()
+            .attest_food_token(&self.attester, &self.union, token, member, &amount, &0);
     }
 
     fn draw(&self, id: &BytesN<32>, cash: i128) {
@@ -201,6 +217,7 @@ fn setup() -> Fx {
         &swap_key().verifying_key().to_bytes(),
     ));
 
+    let cal_id = env.register(mock_calendar::MockCalendar, ());
     let fx = Fx {
         env,
         oracle,
@@ -215,9 +232,13 @@ fn setup() -> Fx {
         usdc,
         attester,
         roles_id: roles_keep,
+        cal_id,
         next_title: core::cell::Cell::new(1),
     };
     fx.core().set_fx_pool(&fx.fx_id);
+    // The crop calendar: by default every share is usable now and has no last date in reach.
+    fx.core().set_crop_calendar(&fx.cal_id);
+    fx.window(Some((0, FAR)));
     fx.core().set_union_config(&fx.union, &union_cfg());
     fx.give_title(&fx.borrower);
     fx.give_title(&fx.neighbour);
@@ -807,17 +828,8 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
     assert_eq!(draw(&tok, &l1, NIN), Ok(Error::NoFoodToken));
     // Attester only.
     assert_eq!(
-        c.try_attest_food_token(
-            &fx.leader,
-            &fx.union,
-            &tok,
-            &fx.borrower,
-            &(500 * NIN),
-            &0,
-            &0,
-            &open_now(&fx.env)
-        )
-        .unwrap_err(),
+        c.try_attest_food_token(&fx.leader, &fx.union, &tok, &fx.borrower, &(500 * NIN), &0,)
+            .unwrap_err(),
         Ok(Error::NotAttester)
     );
     // Corrected before use; no floor (25 Oct): it can be drawn at once.
@@ -828,8 +840,6 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
         &fx.borrower,
         &(500 * NIN),
         &0,
-        &0,
-        &open_now(&fx.env),
     );
     fx.at(T0 + 30 * DAY);
     // With the amount gate on, at most the attested amount.
@@ -855,8 +865,6 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
             &fx.borrower,
             &(500 * NIN),
             &0,
-            &0,
-            &open_now(&fx.env)
         )
         .unwrap_err(),
         Ok(Error::FoodTokenUsed)
@@ -2155,8 +2163,6 @@ fn voucher_draw_claim_repay_and_collect() {
         &fx.borrower,
         &(400 * NIN),
         &1000,
-        &0,
-        &open_now(&fx.env),
     );
     c.draw_loan(&fx.union, &fx.borrower, &id, &(400 * NIN), &1000);
     assert_eq!(c.senior_earmark(&fx.union), 10 * PRE);
@@ -2219,16 +2225,7 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
     let v = vsetup();
     let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(
-        &fx.attester,
-        &fx.union,
-        &id,
-        &fx.borrower,
-        &0,
-        &1400,
-        &0,
-        &open_now(&fx.env),
-    );
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &1400);
     // A voucher-only loan: no cash part.
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &1400);
     assert_eq!(
@@ -2295,16 +2292,7 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
     );
     // Not enough senior money for the prepay of the hours asked.
     let id2 = loan_id(&fx.env, 2);
-    c.attest_food_token(
-        &fx.attester,
-        &fx.union,
-        &id2,
-        &fx.borrower,
-        &0,
-        &2000,
-        &0,
-        &open_now(&fx.env),
-    );
+    c.attest_food_token(&fx.attester, &fx.union, &id2, &fx.borrower, &0, &2000);
     assert_eq!(
         c.try_draw_loan(&fx.union, &fx.borrower, &id2, &0, &2000),
         Err(Ok(Error::NoSeniorBacking))
@@ -2318,16 +2306,7 @@ fn default_pays_the_owner_and_senior_from_her_investment_first() {
     let id = loan_id(&fx.env, 1);
     // Enough invested to cover all she will owe.
     fx.invest(&fx.borrower, 3_000 * NIN);
-    c.attest_food_token(
-        &fx.attester,
-        &fx.union,
-        &id,
-        &fx.borrower,
-        &(300 * NIN),
-        &2,
-        &0,
-        &open_now(&fx.env),
-    );
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &(300 * NIN), &2);
     c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &200);
     mc.claim(&v.owner, &v.machine, &fx.union, &id, &200, &200);
     c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
@@ -2347,16 +2326,7 @@ fn default_beyond_her_investment_owner_still_paid_senior_takes_its_loss() {
     let v = vsetup();
     let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(
-        &fx.attester,
-        &fx.union,
-        &id,
-        &fx.borrower,
-        &(300 * NIN),
-        &4,
-        &0,
-        &open_now(&fx.env),
-    );
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &(300 * NIN), &4);
     c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &400);
     mc.claim(&v.owner, &v.machine, &fx.union, &id, &400, &400);
     c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
@@ -2389,16 +2359,7 @@ fn review_fixes_self_claim_rate_rise_earmarks_close_unused() {
     );
     mc.confirm_machine(&fx.borrower, &mine);
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(
-        &fx.attester,
-        &fx.union,
-        &id,
-        &fx.borrower,
-        &0,
-        &400,
-        &0,
-        &open_now(&fx.env),
-    );
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &400);
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &400);
     assert_eq!(
         mc.try_claim(&fx.borrower, &mine, &fx.union, &id, &400, &100),
@@ -2406,16 +2367,7 @@ fn review_fixes_self_claim_rate_rise_earmarks_close_unused() {
     );
     // Another loan holds back 10 hours: 14 × ₹700 of the 10,000 senior nIN are earmarked.
     let id2 = loan_id(&fx.env, 2);
-    c.attest_food_token(
-        &fx.attester,
-        &fx.union,
-        &id2,
-        &fx.borrower,
-        &0,
-        &1000,
-        &0,
-        &open_now(&fx.env),
-    );
+    c.attest_food_token(&fx.attester, &fx.union, &id2, &fx.borrower, &0, &1000);
     c.draw_loan(&fx.union, &fx.borrower, &id2, &0, &1000);
     assert_eq!(c.senior_earmark(&fx.union), 14 * PRE);
     // The union raises its tractor rate 50% after the draw: the higher prepay would eat the
@@ -2451,16 +2403,7 @@ fn bring_respects_the_daily_cap_and_the_voucher_earmark() {
     let (s24, q) = fx.ids();
     // 200 senior USDC at ₹50; a voucher earmarks 14 × ₹700 = 9,800 nIN = 196 USDC.
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(
-        &fx.attester,
-        &fx.union,
-        &id,
-        &fx.borrower,
-        &0,
-        &1400,
-        &0,
-        &open_now(&fx.env),
-    );
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &1400);
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &1400);
     // ₹250 → 5 USDC + 1% would cut into the 196 USDC held for the voucher.
     let b = f.post_offer(
@@ -2529,16 +2472,7 @@ fn close_unused_is_hers_only_and_evented() {
     let v = vsetup();
     let (fx, c) = (&v.fx, v.fx.core());
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(
-        &fx.attester,
-        &fx.union,
-        &id,
-        &fx.borrower,
-        &0,
-        &200,
-        &0,
-        &open_now(&fx.env),
-    );
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &200);
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &200);
     assert_eq!(
         c.try_close_unused(&fx.neighbour, &fx.union, &id),
@@ -3200,6 +3134,7 @@ fn last_draw_date_and_public_lapse() {
     let c = fx.core();
     fx.invest(&fx.borrower, 3_000 * NIN);
     let last = T0 + 10 * DAY;
+    fx.window(Some((0, last)));
     let attest = |b: u8, amount: i128, hours: u32| {
         c.attest_food_token(
             &fx.attester,
@@ -3208,11 +3143,10 @@ fn last_draw_date_and_public_lapse() {
             &fx.borrower,
             &amount,
             &hours,
-            &0,
-            &last,
         )
     };
-    // A last date is required.
+    // A sowing in none of its crop's windows (or no calendar): refused.
+    fx.window(None);
     assert_eq!(
         c.try_attest_food_token(
             &fx.attester,
@@ -3221,12 +3155,11 @@ fn last_draw_date_and_public_lapse() {
             &fx.borrower,
             &(100 * NIN),
             &0,
-            &0,
-            &0
         )
         .unwrap_err(),
         Ok(Error::BadDates)
     );
+    fx.window(Some((0, last)));
     for b in 1..=4 {
         attest(b, 100 * NIN, 0);
     }
@@ -3280,8 +3213,6 @@ fn last_draw_date_and_public_lapse() {
             &fx.borrower,
             &(100 * NIN),
             &0,
-            &0,
-            &FAR
         )
         .unwrap_err(),
         Ok(Error::FoodTokenLapsed)
@@ -3294,8 +3225,8 @@ fn last_draw_date_and_public_lapse() {
     fx.assert_conserved();
 }
 
-/// Usable in its window (executive decision 25 Oct): from a week before its crop's sowing window
-/// (the attested from_date) up to its last sowing day; a window that ends before it opens is refused.
+/// Usable in its window (executive decision 25 Oct): from the crop calendar's opening (a week
+/// before its crop's sowing window) up to its last sowing day.
 #[test]
 fn a_crop_share_is_usable_only_in_its_attested_window() {
     let fx = setup();
@@ -3303,30 +3234,8 @@ fn a_crop_share_is_usable_only_in_its_attested_window() {
     fx.invest(&fx.borrower, 3_000 * NIN);
     let id = loan_id(&fx.env, 1);
     let (open, last) = (T0 + 40 * DAY, T0 + 100 * DAY);
-    assert_eq!(
-        c.try_attest_food_token(
-            &fx.attester,
-            &fx.union,
-            &id,
-            &fx.borrower,
-            &(100 * NIN),
-            &0,
-            &(last + 1),
-            &last
-        )
-        .unwrap_err(),
-        Ok(Error::BadDates)
-    );
-    c.attest_food_token(
-        &fx.attester,
-        &fx.union,
-        &id,
-        &fx.borrower,
-        &(100 * NIN),
-        &0,
-        &open,
-        &last,
-    );
+    fx.window(Some((open, last)));
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &(100 * NIN), &0);
     let v = c.food_token(&fx.union, &id).unwrap();
     assert_eq!((v.from_date, v.final_date), (open, last));
     let draw = || c.try_draw_loan(&fx.union, &fx.borrower, &id, &(100 * NIN), &0);
@@ -3334,4 +3243,46 @@ fn a_crop_share_is_usable_only_in_its_attested_window() {
     assert_eq!(draw().unwrap_err(), Ok(Error::NotOpenYet));
     fx.at(open);
     assert!(draw().is_ok());
+}
+
+/// The real crop calendar and a packed Polygon token id (25 Oct): maize (family 6) sown 20 Jun
+/// 2027 opens 25 May, a week before its Jun–Jul window, and closes at the end of 31 July.
+#[test]
+fn the_window_comes_from_the_crop_calendar_by_the_token_ids_crop_and_sowing() {
+    use nila_crop_calendar::{CropCalendarContract, CropCalendarContractClient, Window};
+    let fx = setup();
+    let c = fx.core();
+    let cal = fx
+        .env
+        .register(CropCalendarContract, (Address::generate(&fx.env),));
+    CropCalendarContractClient::new(&fx.env, &cal).set_windows(
+        &6,
+        &soroban_sdk::vec![&fx.env, Window { first: 6, last: 7 }],
+    );
+    c.set_crop_calendar(&cal);
+    // packTokenId(land 42, crop 6000, sos 2027-06-20, area 4000 m², fields 0b1)
+    let pack = |crop: u128, sos: u128| {
+        let hi: u128 = (42 << 96) | (crop << 76) | (sos << 44) | (4000 << 20);
+        let mut b = [0u8; 32];
+        b[..16].copy_from_slice(&hi.to_be_bytes());
+        b[16..].copy_from_slice(&(1u128 << 20).to_be_bytes());
+        BytesN::from_array(&fx.env, &b)
+    };
+    let id = pack(6000, 1_813_449_600);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &(100 * NIN), &0);
+    let v = c.food_token(&fx.union, &id).unwrap();
+    assert_eq!((v.from_date, v.final_date), (1_811_203_200, 1_817_078_399));
+    // April: not a maize sowing month here.
+    assert_eq!(
+        c.try_attest_food_token(
+            &fx.attester,
+            &fx.union,
+            &pack(6000, 1_806_537_600),
+            &fx.borrower,
+            &(100 * NIN),
+            &0,
+        )
+        .unwrap_err(),
+        Ok(Error::BadDates)
+    );
 }

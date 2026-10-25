@@ -1112,11 +1112,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nila-crop-calendar"
+version = "0.1.0"
+dependencies = [
+ "nila-common",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "nila-fund-core"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "nila-common",
+ "nila-crop-calendar",
  "nila-fx-pool",
  "nila-land-title",
  "nila-machinery",
