@@ -160,3 +160,26 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
   gained one instance key, `CropCalendar` (the calendar's address, set by the admin with `set_crop_calendar`), apart
   from `Config` so the stored config keeps its layout. Until it is set, and the families' windows are set, every
   attestation is refused (`BadDates`). The frozen-layout hash changed only because the sample list grew.
+
+## account (26 Oct): every Nila account (members, leaders, machine owners, LPs)
+
+| Key | Tier | Value |
+|---|---|---|
+| `Factory` | instance | Address of the union's account factory (settings) |
+| `Union` | instance | Address of the account's union (its leaders may run sessions and recover) |
+| `Signer` | instance | `Signer::P256(BytesN<65>)`: the phone's device key |
+| `Pending` | instance | `Pending{signer, at}`: a proposed recovery and when it may take effect |
+| `Session` | instance | u64: until when a leader of the union may sign for the account |
+
+## account_factory (26 Oct): one per union, admin = the union's multisig account
+
+| Key | Tier | Value |
+|---|---|---|
+| `Union` | instance | Address: the union account (admin) |
+| `Roles` | instance | Address of roles (who leads the union) |
+| `Recovery` | instance | Address of the node's recovery key (proposes a signer after the SMS check; creates accounts) |
+| `Wait` | instance | u64 seconds, 1 h – 30 days: the recovery wait |
+| `SessionLen` | instance | u64 seconds, 1–15 min |
+| `SessionContracts` | instance | `Vec<Address>`: what a leader session may call (fund_core, machinery) |
+| `AccountWasm` / `PendingWasm` | instance | the account code, and a proposed one with its time |
+| upgrade keys | instance | `nila_common::upgrade` (48-hour timelock) |

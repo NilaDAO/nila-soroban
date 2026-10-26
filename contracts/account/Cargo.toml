@@ -1,0 +1,23 @@
+[package]
+name = "nila-account"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Every Nila account (members, leaders, machine owners, LPs): one signer key, recovery on the same address (26 Oct)."
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+nila-common = { workspace = true }
+
+[features]
+# Demo builds only. Never for mainnet.
+demo-upgrade-delay = []
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+p256 = { version = "0.13.2", features = ["ecdsa"] }

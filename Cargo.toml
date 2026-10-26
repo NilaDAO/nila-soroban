@@ -10,6 +10,8 @@ members = [
     "contracts/fx-pool",
     "contracts/machinery",
     "contracts/crop-calendar",
+    "contracts/account",
+    "contracts/account-factory",
 ]
 
 [workspace.package]

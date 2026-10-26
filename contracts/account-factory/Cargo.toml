@@ -1,0 +1,22 @@
+[package]
+name = "nila-account-factory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "One per union: deploys its Nila accounts and holds their settings, governed by the union's multisig account (26 Oct)."
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+nila-common = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+
+[features]
+# Demo builds only: a 60-second timelock. Never for mainnet.
+demo-upgrade-delay = []
