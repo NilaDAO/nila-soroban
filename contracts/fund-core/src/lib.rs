@@ -1338,6 +1338,7 @@ impl FundCore {
         // The voucher part, in centi tractor hours (executive decision 26 Oct): its value (the
         // tractor hour's whole rate) is lent by senior and owed from now, with interest; senior
         // sets the money aside in the reserve, which pays the owners whenever she uses the hours.
+        let mut voucher = 0;
         if hours > 0 {
             let mac = cfg(&env).machinery.ok_or(Error::NotMachinery)?;
             let mc = MachineryClient::new(&env, &mac);
@@ -1356,6 +1357,7 @@ impl FundCore {
             sm.total_borrows += value;
             save_market(&env, false, &union, &sm);
             i_add(&env, &Counter::Earmark(union.clone()), value)?;
+            voucher = value;
             save_book(
                 &env,
                 &union,
@@ -1412,6 +1414,7 @@ impl FundCore {
             borrower: member,
             cash,
             hours,
+            voucher,
             rate_bp: uc.rate_bp,
             cash_settled: settled,
         }

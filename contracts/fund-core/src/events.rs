@@ -88,6 +88,8 @@ pub struct LoanDrawn {
     pub borrower: Address,
     pub cash: i128,
     pub hours: u32,
+    /// The voucher's value lent by senior with it (26 Oct): owed with the cash.
+    pub voucher: i128,
     pub rate_bp: u32,
     /// How much of the union's cash at hand in fx_pool the draw settled (D9).
     pub cash_settled: i128,
