@@ -99,3 +99,56 @@ fn windows_are_months_and_never_overlap() {
     c.set_windows(&1, &vec![&env]);
     assert_eq!(c.windows(&1).len(), 0);
 }
+
+/// A stand-in roles contract: `leader` leads `union`, nobody else leads anything.
+mod mock_roles {
+    use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
+    #[contracttype]
+    pub enum K {
+        Leader,
+        Union,
+    }
+    #[contract]
+    pub struct MockRoles;
+    #[contractimpl]
+    impl MockRoles {
+        pub fn __constructor(env: Env, union: Address, leader: Address) {
+            env.storage().instance().set(&K::Union, &union);
+            env.storage().instance().set(&K::Leader, &leader);
+        }
+        pub fn is_leader(env: Env, union: Address, account: Address) -> bool {
+            env.storage().instance().get::<_, Address>(&K::Union) == Some(union)
+                && env.storage().instance().get::<_, Address>(&K::Leader) == Some(account)
+        }
+    }
+}
+
+/// A leader of the union sets its local price per crop family (26 Oct); another union's
+/// price is its own, and a non-leader is refused.
+#[test]
+fn a_leader_sets_the_unions_local_price() {
+    let (env, c) = setup();
+    let union = Address::generate(&env);
+    let leader = Address::generate(&env);
+    let roles = env.register(mock_roles::MockRoles, (union.clone(), leader.clone()));
+    // No roles contract yet: nobody can set a price.
+    assert_eq!(
+        c.try_set_price(&leader, &union, &9, &6_780_u32),
+        Err(Ok(Error::NotLeader))
+    );
+    c.set_roles(&roles);
+    c.set_price(&leader, &union, &9, &6_780_u32);
+    let p = c.price(&union, &9).unwrap();
+    assert_eq!(p.paise_per_kg, 6_780);
+    // Another union, another crop: nothing set.
+    assert_eq!(c.price(&Address::generate(&env), &9), None);
+    assert_eq!(c.price(&union, &6), None);
+    // Not a leader of the union.
+    assert_eq!(
+        c.try_set_price(&Address::generate(&env), &union, &9, &1_u32),
+        Err(Ok(Error::NotLeader))
+    );
+    // 0 removes it.
+    c.set_price(&leader, &union, &9, &0_u32);
+    assert_eq!(c.price(&union, &9), None);
+}

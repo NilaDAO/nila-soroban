@@ -84,6 +84,8 @@ storage:
 |---|---|---|
 | `Admin` | instance | Address (the trust) |
 | `Windows(family)` | persistent | `Vec<Window{first, last}>`: a crop family's sowing windows, months 1–12 (`first > last` runs over the new year); never overlapping |
+| `Roles` | instance | Address of the roles contract (26 Oct): who leads a union, for `set_price` |
+| `Price(union, family)` | persistent | `Price{paise_per_kg, at}`: the union's local selling price of a crop family, set by a leader (26 Oct) |
 | upgrade keys | instance | `nila_common::upgrade` (48-hour timelock) |
 
 ## machinery

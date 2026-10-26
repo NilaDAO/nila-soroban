@@ -76,6 +76,8 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     refuses a family whose crops have different windows; the demo's `DEMO_CALENDAR_OPEN_NOW` is never used here).
     Trust: `fund_core.set_crop_calendar(crop_calendar)`. **Before the attester's first `attest_food_token`:** until
     the calendar is linked and the families' windows are set, every attestation is refused (`BadDates`).
+    Trust: `crop_calendar.set_roles(roles)` (26 Oct), so a union's leaders can set its local crop prices
+    (`set_price`); until then every `set_price` is refused (`NotLeader`).
 
 ### C2. Upgrading a deployment from before 25 Oct (instead of C. for an existing set)
 

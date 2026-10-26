@@ -3,8 +3,11 @@
 //! year, as month ranges set by the trust from the agronomy catalogue (Tamil Nadu seasons).
 //! fund_core reads it at attest: a crop share is usable from a week before the sowing window
 //! that holds its planned sowing up to the window's last day.
+//! It also keeps each union's local selling price per crop family (executive decision 26 Oct),
+//! set by a leader of the union from time to time; the standing Polygon batches are shared by
+//! every union, so a local price cannot live there.
 
-use nila_common::{bump_instance, upgrade, TTL_BUMP, TTL_THRESHOLD};
+use nila_common::{bump_instance, upgrade, RolesClient, TTL_BUMP, TTL_THRESHOLD};
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contractmeta, contracttype, Address,
     BytesN, Env, Vec,
@@ -21,7 +24,7 @@ soroban_sdk::contractmeta!(
 );
 contractmeta!(
     key = "desc",
-    val = "Nila crop calendar: sowing windows per crop family"
+    val = "Nila crop calendar: sowing windows per crop family, local prices per union"
 );
 
 const DAY: u64 = 86_400;
@@ -37,6 +40,8 @@ pub enum Error {
     BadDelay = 3,
     /// A month outside 1–12, or two windows that share a month.
     BadWindow = 4,
+    /// Not a leader of the union, or no roles contract set.
+    NotLeader = 5,
 }
 
 /// One sowing window: from the first day of `first` to the last day of `last` (months 1–12;
@@ -48,11 +53,21 @@ pub struct Window {
     pub last: u32,
 }
 
+/// A union's local selling price of a crop family: paise per kg, and when it was set (unix).
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Price {
+    pub paise_per_kg: u32,
+    pub at: u64,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
-    Windows(u32), // crop family → its windows
+    Windows(u32),        // crop family → its windows
+    Roles,               // the roles contract: who leads a union
+    Price(Address, u32), // (union, crop family) → its local price
 }
 
 #[contractevent]
@@ -60,6 +75,16 @@ pub struct WindowsSet {
     #[topic]
     pub family: u32,
     pub windows: Vec<Window>,
+}
+
+#[contractevent]
+pub struct PriceSet {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub family: u32,
+    pub leader: Address,
+    pub paise_per_kg: u32,
 }
 
 /// The trust's admin account changed.
@@ -197,6 +222,62 @@ impl CropCalendarContract {
     /// None when its family has no window holding that month.
     pub fn window(env: Env, crop_code: u32, sos: u64) -> Option<(u64, u64)> {
         window_of(&Self::windows(env, crop_code / 1000), sos)
+    }
+
+    /// The roles contract that names a union's leaders (the trust, once).
+    pub fn set_roles(env: Env, roles: Address) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Roles, &roles);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// A leader of the union sets its local price of a crop family (paise per kg); 0 removes it.
+    pub fn set_price(
+        env: Env,
+        leader: Address,
+        union: Address,
+        family: u32,
+        paise_per_kg: u32,
+    ) -> Result<(), Error> {
+        leader.require_auth();
+        let roles: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Roles)
+            .ok_or(Error::NotLeader)?;
+        if !RolesClient::new(&env, &roles).is_leader(&union, &leader) {
+            return Err(Error::NotLeader);
+        }
+        let key = DataKey::Price(union.clone(), family);
+        if paise_per_kg == 0 {
+            env.storage().persistent().remove(&key);
+        } else {
+            let at = env.ledger().timestamp();
+            env.storage()
+                .persistent()
+                .set(&key, &Price { paise_per_kg, at });
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+        }
+        PriceSet {
+            union,
+            family,
+            leader,
+            paise_per_kg,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    pub fn price(env: Env, union: Address, family: u32) -> Option<Price> {
+        let key = DataKey::Price(union, family);
+        let store = env.storage().persistent();
+        let p = store.get::<_, Price>(&key)?;
+        store.extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+        Some(p)
     }
 
     pub fn admin(env: Env) -> Address {
