@@ -2,11 +2,12 @@
 //! The account factory, one per union (executive decision 26 Oct): it deploys the union's
 //! Nila accounts (members, leaders, machine owners, LPs; nila-account) and holds the settings
 //! they read. No master key over all unions: its admin is the union's own account, a Stellar
-//! multisig (3 of 5, D12), which also names the union's leaders in roles. The admin sets the
-//! recovery key (the node's key that proposes a new signer after its SMS check), the recovery
-//! wait, the session length and the contracts a leader session reaches; a new account code
-//! and the factory's own code take effect only after the timelock (nila_common::upgrade).
-//! The node creates accounts (the recovery key authorizes `create`), at registration and L14.
+//! multisig (3 of 5, D12), which also names the union's leaders in roles and may propose an
+//! account's recovery. The admin sets the recovery wait, the session length and the contracts
+//! a leader session reaches; a new account code and the factory's own code take effect only
+//! after the timelock (nila_common::upgrade). Anyone may create an account (the member's app,
+//! a leader's app at L14): its union is this factory's and its address follows from the key,
+//! so creating one grants nothing (membership is the land title, leadership is roles).
 
 use nila_common::{bump_instance, upgrade};
 use soroban_sdk::{
@@ -67,7 +68,6 @@ pub struct PendingWasm {
 pub enum DataKey {
     Union, // admin: the union's multisig account
     Roles,
-    Recovery,
     Wait,
     SessionLen,
     SessionContracts,
@@ -114,7 +114,6 @@ impl AccountFactory {
         env: Env,
         union: Address,
         roles: Address,
-        recovery: Address,
         wait: u64,
         session_len: u64,
         session_contracts: Vec<Address>,
@@ -123,7 +122,6 @@ impl AccountFactory {
         let s = env.storage().instance();
         s.set(&DataKey::Union, &union);
         s.set(&DataKey::Roles, &roles);
-        s.set(&DataKey::Recovery, &recovery);
         s.set(&DataKey::Wait, &wait.clamp(WAIT_MIN, WAIT_MAX));
         s.set(
             &DataKey::SessionLen,
@@ -135,10 +133,9 @@ impl AccountFactory {
         bump_instance(&env);
     }
 
-    /// The node (the recovery key) deploys an account for `signer`; its address follows from
-    /// the key (`address_of`), so one key has one account.
+    /// Anyone deploys the account of `signer`; its address follows from the key
+    /// (`address_of`), so one key has one account.
     pub fn create(env: Env, signer: Signer) -> Address {
-        get::<Address>(&env, DataKey::Recovery).require_auth();
         let wasm: BytesN<32> = get(&env, DataKey::AccountWasm);
         let union: Address = get(&env, DataKey::Union);
         let account = env
@@ -164,12 +161,6 @@ impl AccountFactory {
     }
 
     // ---------- settings (the union's multisig) ----------
-
-    pub fn set_recovery(env: Env, recovery: Address) {
-        require_union(&env);
-        env.storage().instance().set(&DataKey::Recovery, &recovery);
-        bump_instance(&env);
-    }
 
     pub fn set_wait(env: Env, wait: u64) -> Result<(), Error> {
         require_union(&env);
@@ -233,9 +224,6 @@ impl AccountFactory {
     }
     pub fn roles(env: Env) -> Address {
         get(&env, DataKey::Roles)
-    }
-    pub fn recovery(env: Env) -> Address {
-        get(&env, DataKey::Recovery)
     }
     pub fn wait(env: Env) -> u64 {
         get(&env, DataKey::Wait)

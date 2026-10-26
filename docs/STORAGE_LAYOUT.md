@@ -175,9 +175,8 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
 
 | Key | Tier | Value |
 |---|---|---|
-| `Union` | instance | Address: the union account (admin) |
+| `Union` | instance | Address: the union account (admin; may propose an account's recovery) |
 | `Roles` | instance | Address of roles (who leads the union) |
-| `Recovery` | instance | Address of the node's recovery key (proposes a signer after the SMS check; creates accounts) |
 | `Wait` | instance | u64 seconds, 1 h – 30 days: the recovery wait |
 | `SessionLen` | instance | u64 seconds, 1–15 min |
 | `SessionContracts` | instance | `Vec<Address>`: what a leader session may call (fund_core, machinery) |

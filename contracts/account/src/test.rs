@@ -27,7 +27,7 @@ mod mocks {
             env.storage().instance().set(&K::Recovery, &recovery);
             env.storage().instance().set(&K::Allowed, &allowed);
         }
-        pub fn recovery(env: Env) -> Address {
+        pub fn union(env: Env) -> Address {
             env.storage().instance().get(&K::Recovery).unwrap()
         }
         pub fn roles(env: Env) -> Address {

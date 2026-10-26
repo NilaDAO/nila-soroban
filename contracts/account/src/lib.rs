@@ -9,11 +9,12 @@
 //! each signed by the leader's own account. A session reaches only the contracts the factory
 //! lists (fund_core, machinery), never this account itself or a token.
 //! Recovery replaces the signer on the same address, so titles, shares, investments and
-//! balances stay: proposed by the node's recovery key after its SMS check, or by two leaders
-//! of the union when the number is lost; it takes effect after the factory's wait, and the
-//! account's own signer can cancel it meanwhile. Neither can sign a task.
-//! Settings (recovery key, roles, wait, session length and contracts, the account code) come
-//! from the factory that deployed the account.
+//! balances stay: proposed by the union's multisig account, or by two leaders of the union;
+//! it takes effect after the factory's wait, and the account's own signer can cancel it
+//! meanwhile. Neither can sign a task. (A smartphone gets its Privy key back at login, so it
+//! needs none of this unless the member's number is lost.) The node holds no power here.
+//! Settings (roles, wait, session length and contracts, the account code) come from the
+//! factory that deployed the account, one per union.
 
 use nila_common::{bump_instance, RolesClient};
 use soroban_sdk::{
@@ -92,7 +93,7 @@ pub enum DataKey {
 /// What an account reads from its factory.
 #[contractclient(name = "FactoryClient")]
 pub trait FactoryTrait {
-    fn recovery(env: Env) -> Address;
+    fn union(env: Env) -> Address;
     fn roles(env: Env) -> Address;
     fn wait(env: Env) -> u64;
     fn session_len(env: Env) -> u64;
@@ -199,9 +200,9 @@ impl AccountContract {
         env.storage().instance().remove(&DataKey::Session);
     }
 
-    /// The node's recovery key, after its SMS check, proposes a new signer.
+    /// The union's multisig account proposes a new signer (e.g. a keypad member's new phone).
     pub fn recover(env: Env, signer: Signer) {
-        factory(&env).recovery().require_auth();
+        factory(&env).union().require_auth();
         propose(&env, signer);
     }
 
