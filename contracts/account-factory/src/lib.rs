@@ -51,6 +51,7 @@ pub enum Error {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Signer {
+    Ed25519(BytesN<32>),
     P256(BytesN<65>),
 }
 
@@ -96,8 +97,11 @@ fn require_union(env: &Env) {
 }
 
 fn salt(env: &Env, signer: &Signer) -> BytesN<32> {
-    let Signer::P256(pk) = signer;
-    env.crypto().sha256(&pk.clone().into()).into()
+    let key: soroban_sdk::Bytes = match signer {
+        Signer::Ed25519(pk) => pk.clone().into(),
+        Signer::P256(pk) => pk.clone().into(),
+    };
+    env.crypto().sha256(&key).into()
 }
 
 #[contract]

@@ -167,7 +167,7 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
 |---|---|---|
 | `Factory` | instance | Address of the union's account factory (settings) |
 | `Union` | instance | Address of the account's union (its leaders may run sessions and recover) |
-| `Signer` | instance | `Signer::P256(BytesN<65>)`: the phone's device key |
+| `Signer` | instance | `Signer::Ed25519(BytesN<32>)` (the Privy Stellar wallet, smartphones) or `Signer::P256(BytesN<65>)` (the keypad's device key) |
 | `Pending` | instance | `Pending{signer, at}`: a proposed recovery and when it may take effect |
 | `Session` | instance | u64: until when a leader of the union may sign for the account |
 

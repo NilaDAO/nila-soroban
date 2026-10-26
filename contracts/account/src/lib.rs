@@ -1,8 +1,9 @@
 #![no_std]
 //! A Nila account (executive decision 26 Oct): members, leaders, machine owners and LPs each
-//! hold one. Its signer is a P-256 key on the phone (WebCrypto device key: ECDSA over SHA-256
-//! of the authorization payload, r | s with s in the lower half); no key is stored anywhere
-//! else. The signer signs each task itself (self mode), or (assist and keypad mode) starts a
+//! hold one. Its signer is the member's Privy Stellar wallet on a smartphone (Ed25519; Privy
+//! keeps and restores it, so a new smartphone needs no recovery here) or a P-256 key on a
+//! keypad phone (WebCrypto device key: ECDSA over SHA-256 of the authorization payload,
+//! r | s with s in the lower half); no other copy of a key is kept. The signer signs each task itself (self mode), or (assist and keypad mode) starts a
 //! short session in which any leader of the account's union may sign for it: the member's
 //! phone shows one signed QR, the leader's app submits `start_session` and then the tasks,
 //! each signed by the leader's own account. A session reaches only the contracts the factory
@@ -45,19 +46,25 @@ pub enum Error {
     OutsideSession = 5,
     /// The member's session QR has expired.
     Expired = 6,
+    /// A signature of another key type than the signer's.
+    WrongKind = 7,
 }
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Signer {
-    /// SEC1 uncompressed public key (0x04 | x | y).
+    /// The Privy Stellar wallet (smartphones).
+    Ed25519(BytesN<32>),
+    /// The keypad's device key, SEC1 uncompressed public key (0x04 | x | y).
     P256(BytesN<65>),
 }
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Signature {
-    /// The signer's own: r | s, s in the lower half.
+    /// The signer's own, Ed25519.
+    Ed25519(BytesN<64>),
+    /// The signer's own, P-256: r | s, s in the lower half.
     P256(BytesN<64>),
     /// In a session: the leader who signs for the account (the leader's account authorizes it).
     Leader(Address),
@@ -285,11 +292,20 @@ impl CustomAccountInterface for AccountContract {
         auth_contexts: Vec<Context>,
     ) -> Result<(), Error> {
         match signature {
-            Signature::P256(sig) => {
-                let Signer::P256(pk) = get(&env, DataKey::Signer);
-                let digest = env.crypto().sha256(&signature_payload.into());
-                env.crypto().secp256r1_verify(&pk, &digest, &sig);
-            }
+            Signature::Ed25519(sig) => match get(&env, DataKey::Signer) {
+                Signer::Ed25519(pk) => {
+                    env.crypto()
+                        .ed25519_verify(&pk, &signature_payload.into(), &sig)
+                }
+                _ => return Err(Error::WrongKind),
+            },
+            Signature::P256(sig) => match get(&env, DataKey::Signer) {
+                Signer::P256(pk) => {
+                    let digest = env.crypto().sha256(&signature_payload.into());
+                    env.crypto().secp256r1_verify(&pk, &digest, &sig);
+                }
+                _ => return Err(Error::WrongKind),
+            },
             Signature::Leader(leader) => {
                 let until: Option<u64> = env.storage().instance().get(&DataKey::Session);
                 if until.is_none_or(|u| env.ledger().timestamp() > u) || !is_leader(&env, &leader) {

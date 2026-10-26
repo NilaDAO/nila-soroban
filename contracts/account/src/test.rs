@@ -165,6 +165,23 @@ fn the_signer_signs_and_no_other_key_does() {
     assert!(check(&t, [2; 32], sign(&t.env, &t.key, &[1; 32]), &ctx).is_err());
 }
 
+/// A smartphone's Privy wallet (Ed25519) signs for its account; a P-256 signature does not.
+#[test]
+fn a_privy_wallet_signs_its_account() {
+    use ed25519_dalek::{Signer as _, SigningKey as EdKey};
+    let t = setup();
+    let ed = EdKey::from_bytes(&[5u8; 32]);
+    let pk = BytesN::from_array(&t.env, &ed.verifying_key().to_bytes());
+    t.c.set_signer(&Signer::Ed25519(pk));
+    let ctx = call_on(&t.env, &t.fund_core);
+    let sig = Signature::Ed25519(BytesN::from_array(&t.env, &ed.sign(&[4; 32]).to_bytes()));
+    assert_eq!(check(&t, [4; 32], sig, &ctx), Ok(()));
+    assert_eq!(
+        check(&t, [4; 32], sign(&t.env, &t.key, &[4; 32]), &ctx),
+        Err(Ok(Error::WrongKind))
+    );
+}
+
 #[test]
 fn a_leader_signs_only_in_a_session_and_only_for_the_listed_contracts() {
     let t = setup();
