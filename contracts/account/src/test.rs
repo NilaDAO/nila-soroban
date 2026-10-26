@@ -30,6 +30,9 @@ mod mocks {
         pub fn union(env: Env) -> Address {
             env.storage().instance().get(&K::Recovery).unwrap()
         }
+        pub fn sms_key(env: Env) -> Address {
+            env.storage().instance().get(&K::Recovery).unwrap()
+        }
         pub fn roles(env: Env) -> Address {
             env.storage().instance().get(&K::Roles).unwrap()
         }
@@ -240,6 +243,14 @@ fn recovery_replaces_the_signer_on_the_same_address_after_the_wait() {
     // The member cancels from the old phone.
     t.c.cancel_recovery();
     assert_eq!(t.c.pending(), None);
+    // OTP: the union's SMS key and one leader.
+    assert_eq!(
+        t.c.try_recover_by_sms(&new, &Address::generate(&t.env)),
+        Err(Ok(Error::NotLeaders))
+    );
+    t.c.recover_by_sms(&new, &t.leaders[0]);
+    assert!(t.c.pending().is_some());
+    t.c.cancel_recovery();
     // Two leaders of the union, the number lost.
     assert_eq!(
         t.c.try_recover_by_leaders(&new, &t.leaders[0], &t.leaders[0]),

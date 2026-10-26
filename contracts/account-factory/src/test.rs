@@ -12,6 +12,7 @@ fn setup() -> (Env, AccountFactoryClient<'static>) {
         (
             a(&env),
             a(&env),
+            a(&env),
             1u64,
             99_999u64,
             vec![&env, a(&env)],

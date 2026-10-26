@@ -3,7 +3,8 @@
 //! Nila accounts (members, leaders, machine owners, LPs; nila-account) and holds the settings
 //! they read. No master key over all unions: its admin is the union's own account, a Stellar
 //! multisig (3 of 5, D12), which also names the union's leaders in roles and may propose an
-//! account's recovery. The admin sets the recovery wait, the session length and the contracts
+//! account's recovery. The admin sets the SMS key (the node's key that sends the one-time SMS
+//! link; with one leader it may propose a keypad member's new key), the recovery wait, the session length and the contracts
 //! a leader session reaches; a new account code and the factory's own code take effect only
 //! after the timelock (nila_common::upgrade). Anyone may create an account (the member's app,
 //! a leader's app at L14): its union is this factory's and its address follows from the key,
@@ -68,6 +69,7 @@ pub struct PendingWasm {
 pub enum DataKey {
     Union, // admin: the union's multisig account
     Roles,
+    SmsKey,
     Wait,
     SessionLen,
     SessionContracts,
@@ -114,6 +116,7 @@ impl AccountFactory {
         env: Env,
         union: Address,
         roles: Address,
+        sms_key: Address,
         wait: u64,
         session_len: u64,
         session_contracts: Vec<Address>,
@@ -122,6 +125,7 @@ impl AccountFactory {
         let s = env.storage().instance();
         s.set(&DataKey::Union, &union);
         s.set(&DataKey::Roles, &roles);
+        s.set(&DataKey::SmsKey, &sms_key);
         s.set(&DataKey::Wait, &wait.clamp(WAIT_MIN, WAIT_MAX));
         s.set(
             &DataKey::SessionLen,
@@ -161,6 +165,12 @@ impl AccountFactory {
     }
 
     // ---------- settings (the union's multisig) ----------
+
+    pub fn set_sms_key(env: Env, sms_key: Address) {
+        require_union(&env);
+        env.storage().instance().set(&DataKey::SmsKey, &sms_key);
+        bump_instance(&env);
+    }
 
     pub fn set_wait(env: Env, wait: u64) -> Result<(), Error> {
         require_union(&env);
@@ -224,6 +234,9 @@ impl AccountFactory {
     }
     pub fn roles(env: Env) -> Address {
         get(&env, DataKey::Roles)
+    }
+    pub fn sms_key(env: Env) -> Address {
+        get(&env, DataKey::SmsKey)
     }
     pub fn wait(env: Env) -> u64 {
         get(&env, DataKey::Wait)

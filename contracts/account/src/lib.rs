@@ -9,7 +9,9 @@
 //! each signed by the leader's own account. A session reaches only the contracts the factory
 //! lists (fund_core, machinery), never this account itself or a token.
 //! Recovery replaces the signer on the same address, so titles, shares, investments and
-//! balances stay: proposed by the union's multisig account, or by two leaders of the union;
+//! balances stay: proposed by one leader of the union together with the union's SMS key
+//! (after the member's one-time SMS link, so a keypad phone recovers by OTP too), by two
+//! leaders (the number is lost), or by the union's multisig account;
 //! it takes effect after the factory's wait, and the account's own signer can cancel it
 //! meanwhile. Neither can sign a task. (A smartphone gets its Privy key back at login, so it
 //! needs none of this unless the member's number is lost.) The node holds no power here.
@@ -94,6 +96,7 @@ pub enum DataKey {
 #[contractclient(name = "FactoryClient")]
 pub trait FactoryTrait {
     fn union(env: Env) -> Address;
+    fn sms_key(env: Env) -> Address;
     fn roles(env: Env) -> Address;
     fn wait(env: Env) -> u64;
     fn session_len(env: Env) -> u64;
@@ -204,6 +207,18 @@ impl AccountContract {
     pub fn recover(env: Env, signer: Signer) {
         factory(&env).union().require_auth();
         propose(&env, signer);
+    }
+
+    /// OTP recovery: the union's SMS key (after the member's one-time SMS link on the new phone)
+    /// and one leader of the union together propose the new phone's key.
+    pub fn recover_by_sms(env: Env, signer: Signer, leader: Address) -> Result<(), Error> {
+        factory(&env).sms_key().require_auth();
+        leader.require_auth();
+        if !is_leader(&env, &leader) {
+            return Err(Error::NotLeaders);
+        }
+        propose(&env, signer);
+        Ok(())
     }
 
     /// Two leaders of the account's union together propose a new signer (the number is lost).
