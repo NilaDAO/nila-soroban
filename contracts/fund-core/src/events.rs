@@ -101,9 +101,9 @@ pub struct LoanRepaid {
     pub token_id: BytesN<32>,
     pub interest_paid: i128,
     pub principal_paid: i128,
-    /// To machine owners' pending parts (paid first).
-    pub dues_paid: i128,
-    /// Back to the senior pool for the voucher prepay.
+    /// To the union treasury: the 5% fee of handed-back voucher hours (26 Oct).
+    pub fee_paid: i128,
+    /// To senior: the voucher's value (its interest is in interest_paid).
     pub senior_paid: i128,
     pub closed: bool,
 }
@@ -216,9 +216,13 @@ pub struct DuesCollected {
 
 /// She released a voucher loan that owed nothing: closed, unclaimed hours lapse.
 #[contractevent]
-pub struct LoanReleased {
+pub struct VoucherReturned {
     #[topic]
     pub union: Address,
     #[topic]
     pub token_id: BytesN<32>,
+    /// Centi tractor hours handed back, their value off her debt, and the 5% owed to the treasury.
+    pub units: u32,
+    pub value: i128,
+    pub fee: i128,
 }

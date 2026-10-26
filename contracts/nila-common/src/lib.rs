@@ -119,19 +119,12 @@ pub trait FundCoreTrait {
     /// An escrow expired unsettled: the union keeps the rupees, so its treasury nIN burns.
     fn cover_expired_escrow(union: Address, amount: i128) -> i128;
     fn union_treasury(union: Address) -> i128;
-    /// Senior cash held back for unclaimed voucher hours (the floor under Bring offers).
+    /// Senior money set aside for unclaimed voucher hours (the floor under Bring offers).
     fn senior_earmark(union: Address) -> i128;
-    /// machinery only: an owner claimed hours on her voucher (`units`: the centi tractor hours
-    /// they used); pay the prepay from senior and book the rest as the owner's pending dues
-    /// (D17, D18, R85).
-    fn pay_voucher(
-        union: Address,
-        token_id: BytesN<32>,
-        owner: Address,
-        units: u32,
-        prepay: i128,
-        pending: i128,
-    );
+    /// machinery only: an owner claimed hours on a voucher (`units`: the centi tractor hours they
+    /// used); pay the owner `amount` in full from the voucher's reserve (26 Oct: the voucher is
+    /// the member's, its debt is separate).
+    fn pay_voucher(union: Address, token_id: BytesN<32>, owner: Address, units: u32, amount: i128);
 }
 
 /// The crop calendar (25 Oct): a crop share's window from its crop code and planned sowing.
@@ -144,10 +137,12 @@ pub trait CropCalendarTrait {
 /// What fund_core asks of the machinery contract (C5).
 #[contractclient(name = "MachineryClient")]
 pub trait MachineryTrait {
-    /// The senior money one tractor hour (the voucher's unit) needs at the job.
-    fn prepay_per_tractor_hour(union: Address) -> i128;
+    /// The value of one tractor hour (the voucher's unit): machine type 1's whole rate (26 Oct).
+    fn value_per_tractor_hour(union: Address) -> i128;
     /// A drawn loan's voucher part: centi tractor hours of machinery for her (R36, R51).
     fn grant(union: Address, member: Address, token_id: BytesN<32>, hours: u32);
-    /// The loan closed or defaulted: unclaimed hours lapse.
+    /// The loan defaulted: unclaimed hours lapse.
     fn void(union: Address, token_id: BytesN<32>);
+    /// She hands back `units` unclaimed centi tractor hours (26 Oct, deducted from her debt).
+    fn take_back(union: Address, token_id: BytesN<32>, units: u32);
 }

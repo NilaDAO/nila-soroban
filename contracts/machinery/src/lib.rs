@@ -573,7 +573,7 @@ impl MachineryContract {
         Ok(())
     }
 
-    /// fund_core when the loan closes or defaults: the unclaimed hours lapse.
+    /// fund_core at a default: the unclaimed hours lapse (they never lapse otherwise, 26 Oct).
     pub fn void(env: Env, union: Address, token_id: BytesN<32>) -> Result<(), Error> {
         require_core(&env)?;
         if let Ok(mut v) = load_voucher(&env, &union, &token_id) {
@@ -588,6 +588,23 @@ impl MachineryContract {
                 .publish(&env);
             }
         }
+        Ok(())
+    }
+
+    /// fund_core: she hands back `units` unclaimed centi tractor hours (26 Oct); her debt drops.
+    pub fn take_back(
+        env: Env,
+        union: Address,
+        token_id: BytesN<32>,
+        units: u32,
+    ) -> Result<(), Error> {
+        require_core(&env)?;
+        let mut v = load_voucher(&env, &union, &token_id)?;
+        if v.void || units > v.hours - v.used {
+            return Err(Error::TooManyHours);
+        }
+        v.hours -= units;
+        save_voucher(&env, &union, &token_id, &v);
         Ok(())
     }
 
@@ -643,16 +660,15 @@ impl MachineryContract {
         env.storage()
             .temporary()
             .extend_ttl(&wk, WEEK_USE_LEDGERS, WEEK_USE_LEDGERS);
-        let pre = prepay_per_hour(&r, prepay_driver_bp(&env, &union));
-        // Money for hundredths of an hour, rounded down; pending takes the rest so the two add up to
-        // the machine's rate × the time worked.
-        let prepay = pre * i128::from(hours) / 100;
-        let pending = total_per_hour(&r) * i128::from(hours) / 100 - prepay;
+        // The owner is paid in full at the claim (26 Oct): the machine's rate × the time worked,
+        // from the voucher's reserve; her debt is separate.
+        let prepay = total_per_hour(&r) * i128::from(hours) / 100;
+        let pending = 0;
         // One claim per signature; the rest of her hours stay with her (R55).
         v.used += units;
         save_voucher(&env, &union, &token_id, &v);
         FundCoreClient::new(&env, &core_addr(&env)?)
-            .pay_voucher(&union, &token_id, &owner, &units, &prepay, &pending);
+            .pay_voucher(&union, &token_id, &owner, &units, &prepay);
         VoucherClaimed {
             union,
             token_id,
@@ -675,6 +691,14 @@ impl MachineryContract {
     pub fn prepay_per_tractor_hour(env: Env, union: Address) -> i128 {
         rate(&env, &union, TRACTOR_TYPE)
             .map(|r| prepay_per_hour(&r, prepay_driver_bp(&env, &union)))
+            .unwrap_or(0)
+    }
+
+    /// The value of one tractor hour (the voucher's unit, 26 Oct): machine type 1's whole rate.
+    /// fund_core lends it at the draw and pays owners from it.
+    pub fn value_per_tractor_hour(env: Env, union: Address) -> i128 {
+        rate(&env, &union, TRACTOR_TYPE)
+            .map(|r| total_per_hour(&r))
             .unwrap_or(0)
     }
 

@@ -74,8 +74,8 @@ storage:
 | `Union(union)` | persistent | `UnionBook{borrows, treasury, rainy, earmark, on_hold}`: one entry for the union's counters (C6) |
 | `FoodToken(union, token_id)` | persistent | `FoodToken{member, amount, hours, from_date, loan: LoanState}`. Amount and hours are the plan's recommendations; from_date is the opening of its window since 25 Oct, attested: a week before its crop's sowing window in that season; a token attested before keeps its SOS or six weeks before its last date. **The loan lives here** (C6): `LoanState{principal, rate_bp, drawdown_ts, maturity_ts, principal_paid, interest_paid, interest_accrued, last_accrual_ts, flags}`, flags = overdue 1, defaulted 2, closed 4, drawn 8. The token id is the loan id. |
 | `FoodTokenFinal(union, token_id)` | persistent | `FoodTokenFinal{final_date, lapsed}` (25 Oct): the last draw date (`draw_loan` refuses after it, `TooLate`) and whether the token lapsed unused (`lapse_food_token`, anyone, after the last date). A token without it has no last date (attested before 25 Oct). |
-| `Vouchers(union, token_id)` | persistent | `VoucherBook{hours, earmark, earmark_per_hour, senior_out, dues: Vec<Due{owner, amount}>}` (C5) |
-| `OwnerBalance(union, owner)` | persistent | i128 owner's settled pending parts, ready to collect |
+| `Vouchers(union, token_id)` | persistent | `VoucherBook{hours, per_hour, value, repaid, interest_accrued, interest_paid, last_accrual_ts, reserve, fee_due}` (26 Oct: the voucher's value is senior's loan from the draw, with interest; `reserve` pays owners in full at the claim, also after repayment; `fee_due` is 5% of handed-back hours, the union treasury's) |
+| `OwnerBalance(union, owner)` | persistent | i128 owner's balance to collect (no longer credited since 26 Oct: owners are paid at the claim) |
 | `CropCalendar` | instance | Address of the crop_calendar contract (25 Oct) |
 
 ## crop_calendar (25 Oct)
