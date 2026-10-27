@@ -545,9 +545,21 @@ impl MachineryContract {
         hours: u32,
     ) -> Result<(), Error> {
         require_core(&env)?;
-        let k = DataKey::Voucher(union.clone(), token_id.clone());
-        if env.storage().persistent().has(&k) {
-            return Err(Error::VoucherExists);
+        // Hours added to a share already taken up (27 Oct, fund_core.add_vouchers): onto its open voucher.
+        if let Ok(mut v) = load_voucher(&env, &union, &token_id) {
+            if v.void || v.member != member {
+                return Err(Error::VoucherExists);
+            }
+            v.hours = v.hours.checked_add(hours).ok_or(Error::VoucherExists)?;
+            save_voucher(&env, &union, &token_id, &v);
+            VoucherGranted {
+                union,
+                token_id,
+                member,
+                hours,
+            }
+            .publish(&env);
+            return Ok(());
         }
         save_voucher(
             &env,

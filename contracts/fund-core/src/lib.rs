@@ -774,6 +774,58 @@ fn void_vouchers(
     Ok(back)
 }
 
+/// The voucher part of a crop share, at the draw or added later (27 Oct): `hours` (centi tractor hours) at the
+/// tractor hour's value, lent by senior (which must back it), set aside in the reserve and owed from `now` with
+/// interest; the hours go onto her voucher. Returns the value.
+fn lend_vouchers(
+    env: &Env,
+    union: &Address,
+    member: &Address,
+    token_id: &BytesN<32>,
+    hours: u32,
+    rate_bp: u32,
+    now: u64,
+) -> Result<i128, Error> {
+    let mc = MachineryClient::new(env, &cfg(env).machinery.ok_or(Error::NotMachinery)?);
+    let per_hour = mc.value_per_tractor_hour(union);
+    let value = per_hour
+        .checked_mul(i128::from(hours))
+        .ok_or(Error::Overflow)?
+        .checked_add(99)
+        .ok_or(Error::Overflow)?
+        / 100;
+    let mut sm = load_market(env, false, union);
+    if sm.cash < value {
+        return Err(Error::NoSeniorBacking);
+    }
+    sm.cash -= value;
+    sm.total_borrows += value;
+    save_market(env, false, union, &sm);
+    i_add(env, &Counter::Earmark(union.clone()), value)?;
+    let mut b = load_book(env, union, token_id).unwrap_or(VoucherBook {
+        hours: 0,
+        per_hour,
+        value: 0,
+        repaid: 0,
+        interest_accrued: 0,
+        interest_paid: 0,
+        last_accrual_ts: now,
+        reserve: 0,
+        fee_due: 0,
+    });
+    accrue_voucher(env, &mut b, rate_bp, now)?;
+    // One rate per voucher for a returned hour: the hours' average.
+    let all = b.hours.checked_add(hours).ok_or(Error::Overflow)?;
+    b.per_hour =
+        (b.per_hour * i128::from(b.hours) + per_hour * i128::from(hours)) / i128::from(all);
+    b.hours = all;
+    b.value += value;
+    b.reserve += value;
+    save_book(env, union, token_id, &b);
+    mc.grant(union, member, token_id, &hours);
+    Ok(value)
+}
+
 fn tranche(junior: bool) -> Tranche {
     if junior {
         Tranche::Junior
@@ -1285,7 +1337,11 @@ impl FundCore {
         if ft.member != member {
             return Err(Error::NoFoodToken);
         }
-        if ft.loan.drawn() {
+        // A share already taken up takes more machine hours only (executive decision 27 Oct: the union may have more
+        // machines by then): cash 0, its loan open, up to its last draw date below.
+        let more = ft.loan.drawn();
+        if more && (cash != 0 || hours == 0 || ft.loan.flags & (FLAG_CLOSED | FLAG_DEFAULTED) != 0)
+        {
             return Err(Error::FoodTokenUsed);
         }
         // Its window (25 Oct): from its opening date (a week before its sowing window, attested) up to the last date. A token
@@ -1308,6 +1364,20 @@ impl FundCore {
         let uc = union_cfg(&env, &union)?;
         if on_hold(&env, &union) > 0 {
             return Err(Error::LendingOnHold);
+        }
+        if more {
+            // The added hours show in machinery's VoucherGranted; their value in voucher_book.
+            lend_vouchers(
+                &env,
+                &union,
+                &member,
+                &token_id,
+                hours,
+                ft.loan.rate_bp,
+                env.ledger().timestamp(),
+            )?;
+            bump_instance(&env);
+            return Ok(());
         }
         if cash > uc.max_loan {
             return Err(Error::CapExceeded);
@@ -1340,41 +1410,15 @@ impl FundCore {
         // sets the money aside in the reserve, which pays the owners whenever she uses the hours.
         let mut voucher = 0;
         if hours > 0 {
-            let mac = cfg(&env).machinery.ok_or(Error::NotMachinery)?;
-            let mc = MachineryClient::new(&env, &mac);
-            let per_hour = mc.value_per_tractor_hour(&union);
-            let value = per_hour
-                .checked_mul(i128::from(hours))
-                .ok_or(Error::Overflow)?
-                .checked_add(99)
-                .ok_or(Error::Overflow)?
-                / 100;
-            let mut sm = load_market(&env, false, &union);
-            if sm.cash < value {
-                return Err(Error::NoSeniorBacking);
-            }
-            sm.cash -= value;
-            sm.total_borrows += value;
-            save_market(&env, false, &union, &sm);
-            i_add(&env, &Counter::Earmark(union.clone()), value)?;
-            voucher = value;
-            save_book(
+            voucher = lend_vouchers(
                 &env,
                 &union,
+                &member,
                 &token_id,
-                &VoucherBook {
-                    hours,
-                    per_hour,
-                    value,
-                    repaid: 0,
-                    interest_accrued: 0,
-                    interest_paid: 0,
-                    last_accrual_ts: env.ledger().timestamp(),
-                    reserve: value,
-                    fee_due: 0,
-                },
-            );
-            mc.grant(&union, &member, &token_id, &hours);
+                hours,
+                uc.rate_bp,
+                env.ledger().timestamp(),
+            )?;
         }
         jm.cash -= cash;
         jm.total_borrows += cash;

@@ -2226,6 +2226,46 @@ fn voucher_is_debt_from_the_draw_and_its_hours_stay_hers() {
     v.assert_conserved();
 }
 
+/// Executive decision 27 Oct: more machine hours on a share already taken up (draw_loan again, cash 0): on the
+/// same voucher, owed from then, the earlier hours' interest accrued first; more cash is refused.
+#[test]
+fn hours_can_be_added_to_a_share_taken_up() {
+    let v = vsetup();
+    let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
+    let id = loan_id(&fx.env, 1);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &(400 * NIN), &0);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &(400 * NIN), &0);
+    assert!(c.voucher_book(&fx.union, &id).is_none());
+    // A second draw with cash, or with nothing, is refused.
+    assert!(c
+        .try_draw_loan(&fx.union, &fx.borrower, &id, &(100 * NIN), &0)
+        .is_err());
+    assert!(c
+        .try_draw_loan(&fx.union, &fx.borrower, &id, &(100 * NIN), &200)
+        .is_err());
+    assert!(c
+        .try_draw_loan(&fx.union, &fx.borrower, &id, &0, &0)
+        .is_err());
+    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &300);
+    assert_eq!(mc.voucher(&fx.union, &id).unwrap().hours, 300);
+    assert_eq!(c.senior_earmark(&fx.union), 3 * HOUR);
+    v.assert_conserved();
+    // A month on, 2 more hours: the same voucher, the first 3 hours' interest accrued to then.
+    fx.at(T0 + 30 * 86_400);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &200);
+    assert_eq!(mc.voucher(&fx.union, &id).unwrap().hours, 500);
+    let b = c.voucher_book(&fx.union, &id).unwrap();
+    assert_eq!((b.hours, b.value, b.reserve), (500, 5 * HOUR, 5 * HOUR));
+    assert!(b.interest_accrued > 0);
+    assert_eq!(c.senior_earmark(&fx.union), 5 * HOUR);
+    let sm = c.get_senior_market(&fx.union);
+    assert_eq!(
+        (sm.cash, sm.total_borrows),
+        (10_000 * NIN - 5 * HOUR, 5 * HOUR)
+    );
+    v.assert_conserved();
+}
+
 #[test]
 fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
     let v = vsetup();
