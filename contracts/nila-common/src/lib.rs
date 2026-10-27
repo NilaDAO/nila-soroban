@@ -121,7 +121,7 @@ pub trait FundCoreTrait {
     fn union_treasury(union: Address) -> i128;
     /// Senior money set aside for unclaimed voucher hours (the floor under Bring offers).
     fn senior_earmark(union: Address) -> i128;
-    /// machinery only: an owner claimed hours on a voucher (`units`: the centi tractor hours they
+    /// machinery only: an owner claimed work on a voucher (`units`: the centi tractor acres they
     /// used); pay the owner `amount` in full from the voucher's reserve (26 Oct: the voucher is
     /// the member's, its debt is separate).
     fn pay_voucher(union: Address, token_id: BytesN<32>, owner: Address, units: u32, amount: i128);
@@ -137,12 +137,12 @@ pub trait CropCalendarTrait {
 /// What fund_core asks of the machinery contract (C5).
 #[contractclient(name = "MachineryClient")]
 pub trait MachineryTrait {
-    /// The value of one tractor hour (the voucher's unit): machine type 1's whole rate (26 Oct).
-    fn value_per_tractor_hour(union: Address) -> i128;
-    /// A drawn loan's voucher part: centi tractor hours of machinery for her (R36, R51).
-    fn grant(union: Address, member: Address, token_id: BytesN<32>, hours: u32);
-    /// The loan defaulted: unclaimed hours lapse.
+    /// The value of one tractor acre (the voucher's unit): machine type 1's whole price an acre (27 Oct).
+    fn value_per_tractor_acre(union: Address) -> i128;
+    /// A drawn loan's voucher part: centi tractor acres of machinery for her (R36, R51; acres since 27 Oct).
+    fn grant(union: Address, member: Address, token_id: BytesN<32>, units: u32);
+    /// The loan defaulted: unclaimed work lapses.
     fn void(union: Address, token_id: BytesN<32>);
-    /// She hands back `units` unclaimed centi tractor hours (26 Oct, deducted from her debt).
+    /// She hands back `units` unclaimed centi tractor acres (26 Oct, deducted from her debt).
     fn take_back(union: Address, token_id: BytesN<32>, units: u32);
 }

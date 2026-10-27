@@ -41,9 +41,9 @@ fn rate_table_is_the_unions_and_sets_the_prepay() {
     c.set_rate(&union, &2, &parts(600 * NIN));
     // Diesel plus half the driver part by default (X32), of the tractor (type 1): the voucher's
     // unit is a tractor hour (executive decision 23 Oct).
-    assert_eq!(c.prepay_per_tractor_hour(&union), 700 * NIN);
+    assert_eq!(c.prepay_per_tractor_acre(&union), 700 * NIN);
     c.set_prepay_share(&union, &10_000);
-    assert_eq!(c.prepay_per_tractor_hour(&union), 900 * NIN);
+    assert_eq!(c.prepay_per_tractor_acre(&union), 900 * NIN);
     assert_eq!(
         c.try_set_prepay_share(&union, &10_001),
         Err(Ok(Error::BadArg))
@@ -146,6 +146,7 @@ fn storage_layout_is_frozen() {
         DataKey::Machine(1),
         DataKey::Voucher(a.clone(), h.clone()),
         DataKey::WeekUse(1, 2),
+        DataKey::CropRate(a.clone(), 9, 2),
     ] {
         v.push_back(k.into_val(&env));
     }
@@ -155,7 +156,7 @@ fn storage_layout_is_frozen() {
             union: a.clone(),
             owner: a.clone(),
             machine_type: 1,
-            hours_per_week: 2,
+            acres_per_week: 2,
             photos_hash: h.clone(),
             confirmed: true,
             on_hold: false,
@@ -166,7 +167,7 @@ fn storage_layout_is_frozen() {
     v.push_back(
         Voucher {
             member: a.clone(),
-            hours: 1,
+            units: 1,
             used: 2,
             void: false,
             code_hash: Some(h.clone()),
@@ -189,7 +190,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "5b52a85e199e7518d1ae4aac82299ae67706a6d11b5f76beba6fadf131d2b57e",
+        hex, "087ff61db3496835463e9190c95049c48e2ac3acd7e96f776fbc7cd1d4c0a997",
         "machinery storage layout changed"
     );
 }
@@ -208,5 +209,5 @@ fn weekly_hours_live_in_temporary_storage_and_lapse_after_the_week() {
         assert!(!env.storage().persistent().has(&key));
         assert!(env.storage().temporary().get_ttl(&key) >= WEEK_USE_LEDGERS - 1);
     });
-    assert_eq!(c.hours_this_week(&7), 5);
+    assert_eq!(c.acres_this_week(&7), 5);
 }
