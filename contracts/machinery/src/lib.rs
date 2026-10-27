@@ -331,7 +331,7 @@ fn token_bits(t: &BytesN<32>, shift: u32, width: u32) -> u64 {
 fn share_of(t: &BytesN<32>) -> (u32, u64) {
     let family = (token_bits(t, 204, 20) / 1000) as u32;
     let m2 = token_bits(t, 148, 24);
-    (family, (m2 * 1_000_000 + 40_468_563) / 40_468_564)
+    (family, (m2 * 1_000_000).div_ceil(40_468_564))
 }
 
 /// Paid at the job, per acre: diesel plus the union's share of the driver part (D18).
