@@ -250,26 +250,28 @@ pub struct Investor {
     pub pending_principal_snap: i128,
 }
 
-/// An owner's pending part for work done on one loan (D18, R85).
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Due {
-    pub owner: Address,
-    pub amount: i128,
-}
-
-/// A loan's voucher part (C5): no interest (D6). Senior money pays the prepay (N4, C8).
+/// A loan's voucher part (executive decision 26 Oct, revises D6): its value is lent by senior at
+/// the draw and is debt from then on, with interest that senior earns (senior keeps USDC on-chain
+/// to back it). The hours are hers to use whenever she likes: owners are paid in full from the
+/// reserve, also after the loan is repaid. Handing hours back takes their whole value off her
+/// debt and adds 5% of it owed to the union treasury.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VoucherBook {
     pub hours: u32,
-    /// Senior cash still held back for hours not yet claimed.
-    pub earmark: i128,
-    pub earmark_per_hour: i128,
-    /// Senior prepay paid to owners and not yet repaid by her.
-    pub senior_out: i128,
-    /// Owners' pending parts, paid from her repayments first.
-    pub dues: soroban_sdk::Vec<Due>,
+    /// The value of one centi tractor hour ×100 (one tractor hour) at the draw.
+    pub per_hour: i128,
+    /// Lent at the draw (hours × per_hour / 100), the senior principal.
+    pub value: i128,
+    /// Senior principal repaid or taken off by handed-back hours.
+    pub repaid: i128,
+    pub interest_accrued: i128,
+    pub interest_paid: i128,
+    pub last_accrual_ts: u64,
+    /// Senior money set aside for her unclaimed hours (pays owners; outside senior cash).
+    pub reserve: i128,
+    /// 5% of handed-back hours' value, owed to the union treasury.
+    pub fee_due: i128,
 }
 
 /// One union's counters in one entry (C6): fewer entries, less rent per call.

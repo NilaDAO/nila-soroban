@@ -1537,16 +1537,14 @@ fn storage_layout_is_frozen() {
     v.push_back(
         VoucherBook {
             hours: 1,
-            earmark: 2,
-            earmark_per_hour: 3,
-            senior_out: 4,
-            dues: soroban_sdk::vec![
-                &env,
-                Due {
-                    owner: a.clone(),
-                    amount: 5,
-                },
-            ],
+            per_hour: 2,
+            value: 3,
+            repaid: 4,
+            interest_accrued: 5,
+            interest_paid: 6,
+            last_accrual_ts: 7,
+            reserve: 8,
+            fee_due: 9,
         }
         .into_val(&env),
     );
@@ -1569,7 +1567,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "b13ef5e118e62ad4d0e8a8a41ca0fa240953b21e7b898d599a0165411a84d16e",
+        hex, "4e78348ff1d40aff87d6a38344bb18cf3ba661585e63a90dde1697035b413440",
         "fund_core storage layout changed"
     );
 }
@@ -2100,6 +2098,7 @@ fn tractor(k: i128) -> RateParts {
     }
 }
 const PEND: i128 = 750 * NIN; // the other half of driver, maintenance, insurance, depreciation
+const HOUR: i128 = PRE + PEND; // a tractor hour's whole value: what a voucher hour is lent at (26 Oct)
 
 struct Vx {
     fx: Fx,
@@ -2113,7 +2112,7 @@ impl Vx {
         MachineryContractClient::new(&self.fx.env, &self.m)
     }
 
-    /// fund_core nIN = pools + treasury + rainy + the owner's collectable balance.
+    /// fund_core nIN = pools + treasury + rainy + the voucher reserve + the owner's balance.
     fn assert_conserved(&self) {
         let c = self.fx.core();
         let u = &self.fx.union;
@@ -2121,6 +2120,7 @@ impl Vx {
             + c.get_senior_market(u).cash
             + c.union_treasury(u)
             + c.union_rainy_day(u)
+            + c.senior_earmark(u)
             + c.owner_balance(u, &self.owner);
         assert_eq!(self.fx.token().balance(&self.fx.core_id), books);
     }
@@ -2163,74 +2163,154 @@ fn vsetup() -> Vx {
     }
 }
 
+/// Executive decision 26 Oct: the voucher's value is debt from the draw, with interest that senior
+/// earns; owners are paid in full at the claim; repaying never touches the hours, which stay hers.
 #[test]
-fn voucher_draw_claim_repay_and_collect() {
+fn voucher_is_debt_from_the_draw_and_its_hours_stay_hers() {
     let v = vsetup();
     let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
     let id = loan_id(&fx.env, 1);
-    // The plan recommends 400 cash and 10 hours (not caps, 9 Oct).
     c.attest_food_token(
         &fx.attester,
         &fx.union,
         &id,
         &fx.borrower,
         &(400 * NIN),
-        &1000,
+        &600,
     );
-    c.draw_loan(&fx.union, &fx.borrower, &id, &(400 * NIN), &1000);
-    assert_eq!(c.senior_earmark(&fx.union), 10 * PRE);
-    assert_eq!(mc.voucher(&fx.union, &id).unwrap().hours, 1000);
-    // Senior cash held back is not claimable by seniors.
-    assert_eq!(c.get_senior_market(&fx.union).cash, 10_000 * NIN);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &(400 * NIN), &600);
+    // 6 tractor hours lent by senior at the draw: out of senior cash into the reserve, owed by her.
+    let value = 6 * HOUR;
+    assert_eq!(c.senior_earmark(&fx.union), value);
+    let sm = c.get_senior_market(&fx.union);
+    assert_eq!((sm.cash, sm.total_borrows), (10_000 * NIN - value, value));
+    assert_eq!(mc.voucher(&fx.union, &id).unwrap().units, 600);
+    // Her lock counts the voucher's value too (R27): she owes more than her 2,000.
+    let p = c.position(&fx.union, &fx.borrower);
+    assert_eq!(p.locked, p.invested);
+    v.assert_conserved();
 
-    // A8a: she signs for up to 6 tractor hours (600 units); the owner works 4 and scans it.
-    assert_eq!(
-        mc.claim(&v.owner, &v.machine, &fx.union, &id, &600, &400),
-        (4 * PRE, 4 * PEND)
-    );
-    // Her own authorisation of (union, token, max hours) is what the claim used (23 Oct).
+    // A8a: she signs for up to 6 hours; the owner works 4 and is paid all of it at once.
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &600, &400);
     use soroban_sdk::{testutils::AuthorizedFunction, IntoVal, Symbol};
     let signed: soroban_sdk::Vec<soroban_sdk::Val> =
         (fx.union.clone(), id.clone(), 600u32).into_val(&fx.env);
     assert!(fx.env.auths().iter().any(|(a, inv)| *a == fx.borrower
         && matches!(&inv.function, AuthorizedFunction::Contract((c, f, args))
             if *c == mc.address && *f == Symbol::new(&fx.env, "claim") && *args == signed)));
-    // The prepay is in the owner's wallet at once, from senior money (D18, N4).
-    assert_eq!(fx.token().balance(&v.owner), 4 * PRE);
-    assert!(!fx.authorized(&v.owner));
-    assert_eq!(c.get_senior_market(&fx.union).cash, 10_000 * NIN - 4 * PRE);
-    assert_eq!(c.senior_earmark(&fx.union), 6 * PRE);
-    let b = c.voucher_book(&fx.union, &id).unwrap();
-    assert_eq!(
-        (b.senior_out, b.dues.get(0).unwrap().amount),
-        (4 * PRE, 4 * PEND)
-    );
-    // The rest of her hours stay with her (one claim per signature: Soroban's nonce).
-    assert_eq!(mc.voucher(&fx.union, &id).unwrap().used, 400);
-    // Her lock counts the voucher part too (R27): she owes more than her 2,000, so all of it.
-    let p = c.position(&fx.union, &fx.borrower);
-    assert_eq!(p.locked, p.invested);
+    assert_eq!(fx.token().balance(&v.owner), 4 * HOUR);
+    assert_eq!(c.senior_earmark(&fx.union), 2 * HOUR);
+    // The claim changes nothing in what she owes or what senior lent.
+    assert_eq!(c.get_senior_market(&fx.union).total_borrows, value);
     v.assert_conserved();
 
-    // She repays everything: owners first, then interest, principal, the senior prepay.
+    // Half a year on she repays everything: the voucher's interest and value to senior, then
+    // junior's interest and principal. Interest runs on the whole (₹400 cash and ₹8,700 vouchers).
     fx.at(T0 + YEAR / 2);
-    let interest = 400 * NIN * 1250 / 10_000 / 2;
-    let total = 4 * PEND + interest + 400 * NIN + 4 * PRE;
+    let j_int = 400 * NIN * 1250 / 10_000 / 2;
+    let v_int = value * 1250 / 10_000 / 2;
+    let total = v_int + value + j_int + 400 * NIN;
     StellarAssetClient::new(&fx.env, &fx.nin).mint(&fx.fx_id, &(total + 50 * NIN));
     assert!(c.repay_loan(&fx.union, &id, &(total + 50 * NIN)));
-    assert_eq!(c.owner_balance(&fx.union, &v.owner), 4 * PEND);
-    assert_eq!(c.get_senior_market(&fx.union).cash, 10_000 * NIN);
-    assert_eq!(c.get_senior_market(&fx.union).total_borrows, 0);
-    // Closed: the unclaimed 6 hours lapse and their earmark is released.
+    let sm = c.get_senior_market(&fx.union);
+    assert_eq!((sm.cash, sm.total_borrows), (10_000 * NIN + v_int, 0));
+    // Closed, and her 2 unused hours stay hers, with their reserve.
+    assert_eq!(c.senior_earmark(&fx.union), 2 * HOUR);
+    assert!(!mc.voucher(&fx.union, &id).unwrap().void);
+    v.assert_conserved();
+    // She uses them after the loan is repaid: the owner is paid from the reserve.
+    fx.at(T0 + YEAR / 2 + 8 * 86_400);
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &200, &200);
+    assert_eq!(fx.token().balance(&v.owner), 6 * HOUR);
     assert_eq!(c.senior_earmark(&fx.union), 0);
-    assert!(mc.voucher(&fx.union, &id).unwrap().void);
     v.assert_conserved();
+}
 
-    // A13: the owner collects her settled part to her wallet.
-    assert_eq!(c.collect_dues(&v.owner, &fx.union), 4 * PEND);
-    assert_eq!(fx.token().balance(&v.owner), 4 * PRE + 4 * PEND);
-    assert!(!fx.authorized(&v.owner));
+/// Executive decision 27 Oct: more machine hours on a share already taken up (draw_loan again, cash 0): on the
+/// same voucher, owed from then, the earlier hours' interest accrued first; more cash is refused.
+#[test]
+fn hours_can_be_added_to_a_share_taken_up() {
+    let v = vsetup();
+    let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
+    let id = loan_id(&fx.env, 1);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &(400 * NIN), &0);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &(400 * NIN), &0);
+    assert!(c.voucher_book(&fx.union, &id).is_none());
+    // A second draw with cash, or with nothing, is refused.
+    assert!(c
+        .try_draw_loan(&fx.union, &fx.borrower, &id, &(100 * NIN), &0)
+        .is_err());
+    assert!(c
+        .try_draw_loan(&fx.union, &fx.borrower, &id, &(100 * NIN), &200)
+        .is_err());
+    assert!(c
+        .try_draw_loan(&fx.union, &fx.borrower, &id, &0, &0)
+        .is_err());
+    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &300);
+    assert_eq!(mc.voucher(&fx.union, &id).unwrap().units, 300);
+    assert_eq!(c.senior_earmark(&fx.union), 3 * HOUR);
     v.assert_conserved();
+    // A month on, 2 more hours: the same voucher, the first 3 hours' interest accrued to then.
+    fx.at(T0 + 30 * 86_400);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &200);
+    assert_eq!(mc.voucher(&fx.union, &id).unwrap().units, 500);
+    let b = c.voucher_book(&fx.union, &id).unwrap();
+    assert_eq!((b.hours, b.value, b.reserve), (500, 5 * HOUR, 5 * HOUR));
+    assert!(b.interest_accrued > 0);
+    assert_eq!(c.senior_earmark(&fx.union), 5 * HOUR);
+    let sm = c.get_senior_market(&fx.union);
+    assert_eq!(
+        (sm.cash, sm.total_borrows),
+        (10_000 * NIN - 5 * HOUR, 5 * HOUR)
+    );
+    v.assert_conserved();
+}
+
+/// A crop share's token id as FoodToken packs it: crop code at bit 204, area in m² at bit 148; `tag` in the low byte.
+fn share_token(env: &Env, crop_code: u64, m2: u64, tag: u8) -> BytesN<32> {
+    let mut b = [0u8; 32];
+    b[31] = tag;
+    for (shift, width, v) in [(204u32, 20u32, crop_code), (148, 24, m2)] {
+        for i in 0..width {
+            if (v >> i) & 1 == 1 {
+                let bit = shift + i;
+                b[31 - (bit / 8) as usize] |= 1 << (bit % 8);
+            }
+        }
+    }
+    BytesN::from_array(env, &b)
+}
+
+/// Executive decision 27 Oct: vouchers count acres; a claim never exceeds the crop share's own area (read from its
+/// token id), and the union's price for the crop (trailer × sugarcane) beats the type's price.
+#[test]
+fn acres_are_capped_by_the_shares_area_and_priced_by_its_crop() {
+    let v = vsetup();
+    let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
+    let id = share_token(&fx.env, 2000, 4046, 1); // sugarcane (family 2), one acre: 100 centi acres
+    assert_eq!(mc.share_of(&id), (2, 100));
+    c.attest_food_token(
+        &fx.attester,
+        &fx.union,
+        &id,
+        &fx.borrower,
+        &(400 * NIN),
+        &600,
+    );
+    c.draw_loan(&fx.union, &fx.borrower, &id, &(400 * NIN), &600); // 6 tractor acres
+                                                                   // More than the share's area is refused, whatever she signed.
+    assert!(mc
+        .try_claim(&v.owner, &v.machine, &fx.union, &id, &600, &101)
+        .is_err());
+    // The union prices tractor work on sugarcane at twice the acre: one acre uses two tractor acres.
+    mc.set_crop_rate(&fx.union, &1, &2, &Some(tractor(2 * NIN)));
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &600, &100);
+    assert_eq!(mc.voucher(&fx.union, &id).unwrap().used, 200);
+    assert_eq!(fx.token().balance(&v.owner), 2 * HOUR);
+    v.assert_conserved();
+    // Removing the crop's price brings the type's back.
+    mc.set_crop_rate(&fx.union, &1, &2, &None);
+    assert_eq!(mc.rate_for_crop(&fx.union, &1, &2), mc.rate(&fx.union, &1));
 }
 
 #[test]
@@ -2238,13 +2318,9 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
     let v = vsetup();
     let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &1400);
-    // A voucher-only loan: no cash part.
-    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &1400);
-    assert_eq!(
-        c.try_repay_loan(&fx.union, &id, &NIN),
-        Err(Ok(Error::NothingOwed))
-    );
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &600);
+    // A voucher-only loan: no cash part, but the voucher's value is owed (26 Oct).
+    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &600);
     use nila_machinery::Error as ME;
     // The owner alone cannot claim: her own authorisation is required.
     {
@@ -2274,17 +2350,17 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
     );
     assert_eq!(
         mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &1000, &1100),
-        Err(Ok(ME::TooManyHours))
+        Err(Ok(ME::TooMuchWork))
     );
     assert_eq!(
         mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &1500, &1500),
-        Err(Ok(ME::TooManyHours))
+        Err(Ok(ME::TooMuchWork))
     );
     let small = mc.register_machine(&fx.leader, &fx.union, &v.owner, &1, &3, &id);
     mc.confirm_machine(&v.owner, &small);
     assert_eq!(
         mc.try_claim(&v.owner, &small, &fx.union, &id, &1000, &400),
-        Err(Ok(ME::TooManyHours))
+        Err(Ok(ME::TooMuchWork))
     );
     // On hold (R83): no claims.
     mc.set_hold(&v.owner, &v.machine, &true, &1);
@@ -2303,7 +2379,7 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
         mc.try_register_machine(&fx.leader, &fx.union, &stranger, &1, &40, &id),
         Err(Ok(ME::NotMember))
     );
-    // Not enough senior money for the prepay of the hours asked.
+    // Not enough senior money for the value of the hours asked.
     let id2 = loan_id(&fx.env, 2);
     c.attest_food_token(&fx.attester, &fx.union, &id2, &fx.borrower, &0, &2000);
     assert_eq!(
@@ -2313,51 +2389,68 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
 }
 
 #[test]
-fn default_pays_the_owner_and_senior_from_her_investment_first() {
+fn default_takes_the_voucher_value_from_her_investment_first() {
     let v = vsetup();
     let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
     let id = loan_id(&fx.env, 1);
     // Enough invested to cover all she will owe.
     fx.invest(&fx.borrower, 3_000 * NIN);
-    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &(300 * NIN), &2);
+    c.attest_food_token(
+        &fx.attester,
+        &fx.union,
+        &id,
+        &fx.borrower,
+        &(300 * NIN),
+        &200,
+    );
     c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &200);
     mc.claim(&v.owner, &v.machine, &fx.union, &id, &200, &200);
     c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
     fx.at(T0 + 111 * 86_400 + 1);
     c.mark_default(&fx.union, &id);
-    // Her 2,000 covers everything: owners in full, principal, interest, the senior prepay.
-    assert_eq!(c.owner_balance(&fx.union, &v.owner), 2 * PEND);
+    // Her investment covers it all: the voucher's value and interest to senior, junior in full.
+    assert_eq!(fx.token().balance(&v.owner), 2 * HOUR);
     let sm = c.get_senior_market(&fx.union);
-    assert_eq!((sm.cash, sm.total_borrows), (10_000 * NIN, 0));
+    assert_eq!(sm.total_borrows, 0);
+    assert!(sm.cash > 10_000 * NIN);
     assert!(mc.voucher(&fx.union, &id).unwrap().void);
     assert_eq!(c.senior_earmark(&fx.union), 0);
     v.assert_conserved();
 }
 
 #[test]
-fn default_beyond_her_investment_owner_still_paid_senior_takes_its_loss() {
+fn default_unused_hours_go_back_to_senior_and_it_takes_the_rest() {
     let v = vsetup();
     let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &(300 * NIN), &4);
+    c.attest_food_token(
+        &fx.attester,
+        &fx.union,
+        &id,
+        &fx.borrower,
+        &(300 * NIN),
+        &400,
+    );
     c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &400);
-    mc.claim(&v.owner, &v.machine, &fx.union, &id, &400, &400);
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &200, &200);
     c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
     fx.at(T0 + 111 * 86_400 + 1);
     c.mark_default(&fx.union, &id);
-    // She owed 3,000 dues + 300 + interest + 2,800 prepay against 2,000 invested. The owner is
-    // paid in full (D17); the senior prepay her investment could not cover is senior's loss.
-    assert_eq!(c.owner_balance(&fx.union, &v.owner), 4 * PEND);
-    assert_eq!(c.voucher_book(&fx.union, &id).unwrap().dues.len(), 0);
+    // Her 2 unused hours lapse and their reserve takes ₹2,900 off the ₹5,800 she owed senior. Her
+    // 2,000 invested goes to senior first, as far as the junior pool holds cash (₹1,700 after the
+    // ₹300 draw), then to her junior principal; senior loses the rest.
+    assert_eq!(fx.token().balance(&v.owner), 2 * HOUR);
+    assert!(mc.voucher(&fx.union, &id).unwrap().void);
+    assert_eq!(c.senior_earmark(&fx.union), 0);
     let sm = c.get_senior_market(&fx.union);
     assert_eq!(sm.total_borrows, 0);
-    assert!(sm.cash < 10_000 * NIN);
+    assert_eq!(sm.cash, 10_000 * NIN - 2 * HOUR + 1_700 * NIN);
     assert_eq!(c.position(&fx.union, &fx.borrower).invested, 0);
     v.assert_conserved();
 }
 
 #[test]
-fn review_fixes_self_claim_rate_rise_earmarks_close_unused() {
+fn self_claim_rate_rise_and_handing_hours_back() {
     let v = vsetup();
     let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
     use nila_machinery::Error as ME;
@@ -2378,28 +2471,51 @@ fn review_fixes_self_claim_rate_rise_earmarks_close_unused() {
         mc.try_claim(&fx.borrower, &mine, &fx.union, &id, &400, &100),
         Err(Ok(ME::SelfClaim))
     );
-    // Another loan holds back 10 hours: 14 × ₹700 of the 10,000 senior nIN are earmarked.
-    let id2 = loan_id(&fx.env, 2);
-    c.attest_food_token(&fx.attester, &fx.union, &id2, &fx.borrower, &0, &1000);
-    c.draw_loan(&fx.union, &fx.borrower, &id2, &0, &1000);
-    assert_eq!(c.senior_earmark(&fx.union), 14 * PRE);
-    // The union raises its tractor rate 50% after the draw: the higher prepay would eat the
-    // other loan's earmark, so the claim is refused.
+    // The union raises its tractor rate 50% after the draw: the owner is paid what the voucher
+    // set aside, never another voucher's reserve.
     mc.set_rate(&fx.union, &1, &tractor(15_000_000));
-    assert!(mc
-        .try_claim(&v.owner, &v.machine, &fx.union, &id, &400, &400)
-        .is_err());
+    let id2 = loan_id(&fx.env, 2);
     mc.set_rate(&fx.union, &1, &tractor(NIN));
+    c.attest_food_token(&fx.attester, &fx.union, &id2, &fx.borrower, &0, &200);
+    c.draw_loan(&fx.union, &fx.borrower, &id2, &0, &200);
+    mc.set_rate(&fx.union, &1, &tractor(15_000_000));
     mc.claim(&v.owner, &v.machine, &fx.union, &id, &400, &400);
+    assert_eq!(fx.token().balance(&v.owner), 4 * HOUR);
+    assert_eq!(c.senior_earmark(&fx.union), 2 * HOUR);
+    mc.set_rate(&fx.union, &1, &tractor(NIN));
 
-    // She releases the voucher she no longer needs: nothing owed, the earmark goes back.
+    // She hands back 1 of her 2 unused hours on loan 2: ₹1,450 off what she owes senior, its
+    // reserve back to senior cash, and 5% (₹72.5) owed to the union treasury.
+    let sm0 = c.get_senior_market(&fx.union);
     assert_eq!(
-        c.try_close_unused(&fx.borrower, &fx.union, &id),
-        Err(Ok(Error::BadState))
+        c.return_voucher(&fx.borrower, &fx.union, &id2, &100),
+        HOUR * 95 / 100
     );
-    c.close_unused(&fx.borrower, &fx.union, &id2);
-    assert_eq!(c.senior_earmark(&fx.union), 0);
-    assert!(mc.voucher(&fx.union, &id2).unwrap().void);
+    let sm1 = c.get_senior_market(&fx.union);
+    assert_eq!(
+        (sm1.cash - sm0.cash, sm0.total_borrows - sm1.total_borrows),
+        (HOUR, HOUR)
+    );
+    assert_eq!(mc.voucher(&fx.union, &id2).unwrap().units, 100);
+    assert_eq!(c.senior_earmark(&fx.union), HOUR);
+    // Not more than she has unclaimed.
+    assert!(c
+        .try_return_voucher(&fx.borrower, &fx.union, &id2, &200)
+        .is_err());
+    // Repaying loan 2: the rest of the voucher's value to senior, the 5% to the treasury.
+    let t0 = c.union_treasury(&fx.union);
+    let owed = HOUR + HOUR * 5 / 100;
+    StellarAssetClient::new(&fx.env, &fx.nin).mint(&fx.fx_id, &owed);
+    assert!(c.repay_loan(&fx.union, &id2, &owed));
+    assert_eq!(c.union_treasury(&fx.union) - t0, HOUR * 5 / 100);
+    // Nothing owed any more: handing back is refused, the hour stays hers.
+    assert!(c
+        .try_return_voucher(&fx.borrower, &fx.union, &id2, &100)
+        .is_err());
+    assert_eq!(
+        mc.voucher(&fx.union, &id2).unwrap().units - mc.voucher(&fx.union, &id2).unwrap().used,
+        100
+    );
     v.assert_conserved();
 }
 
@@ -2414,10 +2530,10 @@ fn bring_respects_the_daily_cap_and_the_voucher_earmark() {
     fx.scan(Purpose::Treasury, &fx.leader, 5_000 * NIN, 1, None)
         .unwrap();
     let (s24, q) = fx.ids();
-    // 200 senior USDC at ₹50; a voucher earmarks 14 × ₹700 = 9,800 nIN = 196 USDC.
+    // 200 senior USDC at ₹50; a voucher of 6.76 tractor hours sets aside ₹9,802 = 196.04 USDC.
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &1400);
-    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &1400);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &676);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &676);
     // ₹250 → 5 USDC + 1% would cut into the 196 USDC held for the voucher.
     let b = f.post_offer(
         &fx.leader,
@@ -2482,21 +2598,22 @@ fn a_title_in_any_union_makes_her_junior_never_senior() {
 }
 
 #[test]
-fn close_unused_is_hers_only_and_evented() {
+fn handing_hours_back_is_hers_only() {
     let v = vsetup();
     let (fx, c) = (&v.fx, v.fx.core());
     let id = loan_id(&fx.env, 1);
     c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &200);
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &200);
     assert_eq!(
-        c.try_close_unused(&fx.neighbour, &fx.union, &id),
+        c.try_return_voucher(&fx.neighbour, &fx.union, &id, &100),
         Err(Ok(Error::NotBorrower))
     );
-    c.close_unused(&fx.borrower, &fx.union, &id);
-    assert!(c.get_loan(&fx.union, &id).unwrap().closed);
+    // All of it back: her debt is the 5% for the treasury only.
+    c.return_voucher(&fx.borrower, &fx.union, &id, &200);
+    let b = c.voucher_book(&fx.union, &id).unwrap();
     assert_eq!(
-        c.try_close_unused(&fx.borrower, &fx.union, &id),
-        Err(Ok(Error::LoanClosed))
+        (b.value - b.repaid, b.fee_due, b.reserve),
+        (0, 2 * HOUR * 5 / 100, 0)
     );
 }
 

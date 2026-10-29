@@ -74,8 +74,8 @@ storage:
 | `Union(union)` | persistent | `UnionBook{borrows, treasury, rainy, earmark, on_hold}`: one entry for the union's counters (C6) |
 | `FoodToken(union, token_id)` | persistent | `FoodToken{member, amount, hours, from_date, loan: LoanState}`. Amount and hours are the plan's recommendations; from_date is the opening of its window since 25 Oct, attested: a week before its crop's sowing window in that season; a token attested before keeps its SOS or six weeks before its last date. **The loan lives here** (C6): `LoanState{principal, rate_bp, drawdown_ts, maturity_ts, principal_paid, interest_paid, interest_accrued, last_accrual_ts, flags}`, flags = overdue 1, defaulted 2, closed 4, drawn 8. The token id is the loan id. |
 | `FoodTokenFinal(union, token_id)` | persistent | `FoodTokenFinal{final_date, lapsed}` (25 Oct): the last draw date (`draw_loan` refuses after it, `TooLate`) and whether the token lapsed unused (`lapse_food_token`, anyone, after the last date). A token without it has no last date (attested before 25 Oct). |
-| `Vouchers(union, token_id)` | persistent | `VoucherBook{hours, earmark, earmark_per_hour, senior_out, dues: Vec<Due{owner, amount}>}` (C5) |
-| `OwnerBalance(union, owner)` | persistent | i128 owner's settled pending parts, ready to collect |
+| `Vouchers(union, token_id)` | persistent | `VoucherBook{hours, per_hour, value, repaid, interest_accrued, interest_paid, last_accrual_ts, reserve, fee_due}` (26 Oct: the voucher's value is senior's loan from the draw, with interest; `reserve` pays owners in full at the claim, also after repayment; `fee_due` is 5% of handed-back hours, the union treasury's) |
+| `OwnerBalance(union, owner)` | persistent | i128 owner's balance to collect (no longer credited since 26 Oct: owners are paid at the claim) |
 | `CropCalendar` | instance | Address of the crop_calendar contract (25 Oct) |
 
 ## crop_calendar (25 Oct)
@@ -93,12 +93,13 @@ storage:
 | Key | Tier | Value |
 |---|---|---|
 | `Admin`, `Roles`, `LandTitle`, `FundCore`, `Paused`, `NextMachine` | instance | Address ×4, bool, u64 |
-| `Rate(union, machine_type)` | persistent | `RateParts{driver, diesel, maintenance, insurance, depreciation, margin}` per hour, set by the union account (R57) |
+| `Rate(union, machine_type)` | persistent | `RateParts{driver, diesel, maintenance, insurance, depreciation, margin}` **per acre** (27 Oct; was per hour), set by the union account (R57) |
+| `CropRate(union, machine_type, crop_family)` | persistent | `RateParts` per acre for one crop family (27 Oct; optional, else `Rate`) |
 | `Types(union)` | persistent | Vec<u32> machine types with a rate (max 16) |
 | `PrepayDriverBp(union)` | persistent | u32 share of the driver part paid at the job (X32) |
-| `Machine(id)` | persistent | `Machine{union, owner, machine_type, hours_per_week, photos_hash, confirmed, on_hold, hold_reason}` |
-| `Voucher(union, token_id)` | persistent | `Voucher{member, hours, used, void, code_hash: Option, code_max, code_expires}` (the three code fields unused since the signed claim, 23 Oct; kept for the layout) |
-| `WeekUse(machine_id, week)` | **temporary** | u32 hours worked that week; lives ~8 days, then the network deletes it (C7) |
+| `Machine(id)` | persistent | `Machine{union, owner, machine_type, acres_per_week, photos_hash, confirmed, on_hold, hold_reason}` |
+| `Voucher(union, token_id)` | persistent | `Voucher{member, units, used, void, code_hash: Option, code_max, code_expires}` (the three code fields unused since the signed claim, 23 Oct; kept for the layout) |
+| `WeekUse(machine_id, week)` | **temporary** | u32 centi acres worked that week; lives ~8 days, then the network deletes it (C7) |
 
 ## fx_pool
 
@@ -146,6 +147,11 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
 - **C8 (16 Oct, the move):** fx_pool gained two keys, `Moved(BytesN<32>)` (persistent, a Polygon burn
   already minted on Stellar) and `MoveBudget` (instance, i128: what the attester may still mint for the move). Appended only: existing keys and values encode as before, so a C7 fx_pool
   can be upgraded in place. The frozen-layout hash changed only because the sample list grew.
+- **Acre vouchers (27 Oct, executive decision):** machinery counts **acres**, not hours: `Machine.hours_per_week` →
+  `acres_per_week`, `Voucher.hours` → `units` (centi tractor acres), `WeekUse` counts centi acres, `Rate` is per acre,
+  and the new key `CropRate(union, type, family)`. Field names are part of the stored encoding, so a machinery holding
+  machines or vouchers **cannot be upgraded in place: redeploy** (testnet only; nothing on mainnet). fund_core's
+  layout is unchanged (it calls `value_per_tractor_acre`).
 - **C9b (19 Oct, the anchor's signed accept):** fx_pool gained one key, `SwapKey` (instance, BytesN<32>: the
   anchor's ed25519 swap key that signs each LP accept, C16). Appended only; a C8 fx_pool can be upgraded in
   place. `accept` takes three more arguments (`usdc`, `valid_until`, `sig`): callers change, storage does not.
