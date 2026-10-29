@@ -9,9 +9,9 @@
 //! each signed by the leader's own account. A session reaches only the contracts the factory
 //! lists (fund_core, machinery), never this account itself or a token.
 //! Recovery replaces the signer on the same address, so titles, shares, investments and
-//! balances stay: proposed by one leader of the union together with the union's SMS key
-//! (after the member's one-time SMS link, so a keypad phone recovers by OTP too), by two
-//! leaders (the number is lost), or by the union's multisig account;
+//! balances stay: proposed by two leaders of the union (a lost phone, smartphone or keypad;
+//! executive decision 29 Oct, no SMS key: Nila holds no key with any power here) or by the
+//! union's multisig account;
 //! it takes effect after the factory's wait. A pending recovery freezes the account
 //! (executive decision 29 Oct, a stolen phone): the current signer signs nothing, no task and
 //! no session, and cannot cancel; only the union's multisig account cancels, so a member
@@ -100,7 +100,6 @@ pub enum DataKey {
 #[contractclient(name = "FactoryClient")]
 pub trait FactoryTrait {
     fn union(env: Env) -> Address;
-    fn sms_key(env: Env) -> Address;
     fn roles(env: Env) -> Address;
     fn wait(env: Env) -> u64;
     fn session_len(env: Env) -> u64;
@@ -225,19 +224,7 @@ impl AccountContract {
         propose(&env, signer);
     }
 
-    /// OTP recovery: the union's SMS key (after the member's one-time SMS link on the new phone)
-    /// and one leader of the union together propose the new phone's key.
-    pub fn recover_by_sms(env: Env, signer: Signer, leader: Address) -> Result<(), Error> {
-        factory(&env).sms_key().require_auth();
-        leader.require_auth();
-        if !is_leader(&env, &leader) {
-            return Err(Error::NotLeaders);
-        }
-        propose(&env, signer);
-        Ok(())
-    }
-
-    /// Two leaders of the account's union together propose a new signer (the number is lost).
+    /// Two leaders of the account's union together propose a new signer (a lost phone).
     pub fn recover_by_leaders(
         env: Env,
         signer: Signer,

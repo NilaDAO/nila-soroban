@@ -181,7 +181,10 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
 refuses every signature (`Frozen`, error 8), `start_session` and `set_signer` are refused, and a proposal removes
 `Session`. `cancel_recovery` takes the union's multisig account (the factory's `union`), no longer the account's
 signer. Running accounts get the code through the factory's timelocked `propose_account_wasm` / `apply_account_wasm`,
-then `upgrade` on each account.
+then `upgrade` on each account. **No SMS key** (executive decision 29 Oct): `recover_by_sms`, the factory's
+`set_sms_key` / `sms_key` and its constructor's `sms_key` are gone; a lost phone (smartphone or keypad) is recovered by
+two leaders (`recover_by_leaders`) or the union's multisig (`recover`). A factory already deployed keeps a stale
+`SmsKey` entry that nothing reads.
 
 ## account_factory (26 Oct): one per union, admin = the union's multisig account
 
@@ -189,7 +192,6 @@ then `upgrade` on each account.
 |---|---|---|
 | `Union` | instance | Address: the union account (admin; may propose an account's recovery) |
 | `Roles` | instance | Address of roles (who leads the union) |
-| `SmsKey` | instance | Address of the node's SMS key: with one leader, proposes a new key after the member's SMS link (OTP recovery) |
 | `Wait` | instance | u64 seconds, 1 h – 30 days: the recovery wait |
 | `SessionLen` | instance | u64 seconds, 1–15 min |
 | `SessionContracts` | instance | `Vec<Address>`: what a leader session may call (fund_core, machinery) |

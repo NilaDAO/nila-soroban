@@ -30,9 +30,6 @@ mod mocks {
         pub fn union(env: Env) -> Address {
             env.storage().instance().get(&K::Recovery).unwrap()
         }
-        pub fn sms_key(env: Env) -> Address {
-            env.storage().instance().get(&K::Recovery).unwrap()
-        }
         pub fn roles(env: Env) -> Address {
             env.storage().instance().get(&K::Roles).unwrap()
         }
@@ -76,7 +73,7 @@ struct T {
     key: SigningKey,
     leaders: [Address; 2],
     fund_core: Address,
-    /// The union's multisig account as the factory names it (the mock's union and SMS key).
+    /// The union's multisig account as the factory names it (the mock's union).
     union_ms: Address,
 }
 
@@ -243,15 +240,7 @@ fn recovery_replaces_the_signer_on_the_same_address_after_the_wait() {
     // The union's multisig account cancels it.
     t.c.cancel_recovery();
     assert_eq!(t.c.pending(), None);
-    // OTP: the union's SMS key and one leader.
-    assert_eq!(
-        t.c.try_recover_by_sms(&new, &Address::generate(&t.env)),
-        Err(Ok(Error::NotLeaders))
-    );
-    t.c.recover_by_sms(&new, &t.leaders[0]);
-    assert!(t.c.pending().is_some());
-    t.c.cancel_recovery();
-    // Two leaders of the union, the number lost.
+    // Two leaders of the union (a lost phone).
     assert_eq!(
         t.c.try_recover_by_leaders(&new, &t.leaders[0], &t.leaders[0]),
         Err(Ok(Error::NotLeaders))
