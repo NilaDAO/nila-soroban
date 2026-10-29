@@ -68,6 +68,14 @@ pub enum Error {
     /// Nothing is owed yet (a voucher-only loan before any claim).
     NothingOwed = 56,
     NotBorrower = 57,
+    /// No crop calendar, or the planned sowing is in none of its crop's windows (25 Oct).
+    BadDates = 58,
+    /// The food token lapsed unused after its last draw date (25 Oct): it can no longer be drawn or attested.
+    FoodTokenLapsed = 59,
+    /// After the food token's last draw date: too late for this cycle (25 Oct).
+    TooLate = 60,
+    /// The food token's last draw date has not passed yet (25 Oct).
+    NotLapsedYet = 61,
 }
 
 #[contracttype]
@@ -159,10 +167,35 @@ pub struct FoodToken {
     pub amount: i128,
     /// The plan's recommended machinery hours; a cap only with the same switch.
     pub hours: u32,
-    /// Loans accepted from this date: the season's SOS from the plan (N5).
+    /// The opening of its window (25 Oct): a week before its sowing window, attested (`FoodTokenFinal` ends it); a token attested
+    /// before 25 Oct keeps its season's SOS here.
     pub from_date: u64,
     /// The loan drawn against it (C6: the loan lives here; the token id is the loan id).
     /// All zero until drawn; `FLAG_DRAWN` says a loan exists (one per token).
+    pub loan: LoanState,
+}
+
+/// A food token's last draw date and whether it lapsed unused (executive decision 25 Oct). Its own key, so the
+/// `FoodToken` entries already stored keep their layout; a token without one has no last date.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FoodTokenFinal {
+    /// The last sowing date for the crop in its season: a loan may be drawn up to and including it.
+    pub final_date: u64,
+    /// Lapsed by anyone after `final_date` while undrawn: never drawn or attested again.
+    pub lapsed: bool,
+}
+
+/// What `food_token` returns: the stored fact with its last draw date (0 = none) and the lapsed flag.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FoodTokenView {
+    pub member: Address,
+    pub amount: i128,
+    pub hours: u32,
+    pub from_date: u64,
+    pub final_date: u64,
+    pub lapsed: bool,
     pub loan: LoanState,
 }
 
@@ -217,26 +250,28 @@ pub struct Investor {
     pub pending_principal_snap: i128,
 }
 
-/// An owner's pending part for work done on one loan (D18, R85).
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Due {
-    pub owner: Address,
-    pub amount: i128,
-}
-
-/// A loan's voucher part (C5): no interest (D6). Senior money pays the prepay (N4, C8).
+/// A loan's voucher part (executive decision 26 Oct, revises D6): its value is lent by senior at
+/// the draw and is debt from then on, with interest that senior earns (senior keeps USDC on-chain
+/// to back it). The hours are hers to use whenever she likes: owners are paid in full from the
+/// reserve, also after the loan is repaid. Handing hours back takes their whole value off her
+/// debt and adds 5% of it owed to the union treasury.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VoucherBook {
     pub hours: u32,
-    /// Senior cash still held back for hours not yet claimed.
-    pub earmark: i128,
-    pub earmark_per_hour: i128,
-    /// Senior prepay paid to owners and not yet repaid by her.
-    pub senior_out: i128,
-    /// Owners' pending parts, paid from her repayments first.
-    pub dues: soroban_sdk::Vec<Due>,
+    /// The value of one centi tractor hour ×100 (one tractor hour) at the draw.
+    pub per_hour: i128,
+    /// Lent at the draw (hours × per_hour / 100), the senior principal.
+    pub value: i128,
+    /// Senior principal repaid or taken off by handed-back hours.
+    pub repaid: i128,
+    pub interest_accrued: i128,
+    pub interest_paid: i128,
+    pub last_accrual_ts: u64,
+    /// Senior money set aside for her unclaimed hours (pays owners; outside senior cash).
+    pub reserve: i128,
+    /// 5% of handed-back hours' value, owed to the union treasury.
+    pub fee_due: i128,
 }
 
 /// One union's counters in one entry (C6): fewer entries, less rent per call.

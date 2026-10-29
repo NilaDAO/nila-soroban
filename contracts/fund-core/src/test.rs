@@ -14,6 +14,8 @@ use soroban_sdk::{
 };
 
 const T0: u64 = 1_700_000_000;
+/// A last draw date far ahead, for the re-attest refusals (not drawn on).
+const FAR: u64 = u64::MAX;
 
 struct Fx {
     env: Env,
@@ -29,7 +31,30 @@ struct Fx {
     usdc: Address,
     attester: Address,
     roles_id: Address,
+    cal_id: Address,
     next_title: core::cell::Cell<u64>,
+}
+
+/// A stand-in crop calendar (25 Oct): every token gets the window the test sets (`Fx::window`).
+mod mock_calendar {
+    use soroban_sdk::{contract, contractimpl, symbol_short, Env};
+
+    #[contract]
+    pub struct MockCalendar;
+
+    #[contractimpl]
+    impl MockCalendar {
+        pub fn set(env: Env, w: Option<(u64, u64)>) {
+            env.storage().instance().set(&symbol_short!("w"), &w);
+        }
+
+        pub fn window(env: Env, _crop_code: u32, _sos: u64) -> Option<(u64, u64)> {
+            env.storage()
+                .instance()
+                .get(&symbol_short!("w"))
+                .unwrap_or(None)
+        }
+    }
 }
 
 impl Fx {
@@ -47,6 +72,11 @@ impl Fx {
 
     /// `claim_junior` pays a leader's own investment to her wallet (members collect over the desk with
     /// `claim_junior_cash`, 22 Oct): tests of the wallet payout and the cash-out make the investor a leader.
+    /// The window the stand-in calendar gives every food token; None: no sowing window.
+    fn window(&self, w: Option<(u64, u64)>) {
+        mock_calendar::MockCalendarClient::new(&self.env, &self.cal_id).set(&w);
+    }
+
     fn make_leader(&self, who: &Address) {
         nila_roles::RolesContractClient::new(&self.env, &self.roles_id).set_leader(
             &self.union,
@@ -81,10 +111,10 @@ impl Fx {
         self.core().repay_loan(&self.union, id, &amount)
     }
 
-    /// F2: the attester copies her food token, open from T0. Tests use the loan id as token id.
+    /// F2: the attester copies her food token, its window open now. Tests use the loan id as token id.
     fn attest(&self, member: &Address, token: &BytesN<32>, amount: i128) {
         self.core()
-            .attest_food_token(&self.attester, &self.union, token, member, &amount, &0, &T0);
+            .attest_food_token(&self.attester, &self.union, token, member, &amount, &0);
     }
 
     fn draw(&self, id: &BytesN<32>, cash: i128) {
@@ -187,6 +217,7 @@ fn setup() -> Fx {
         &swap_key().verifying_key().to_bytes(),
     ));
 
+    let cal_id = env.register(mock_calendar::MockCalendar, ());
     let fx = Fx {
         env,
         oracle,
@@ -201,9 +232,13 @@ fn setup() -> Fx {
         usdc,
         attester,
         roles_id: roles_keep,
+        cal_id,
         next_title: core::cell::Cell::new(1),
     };
     fx.core().set_fx_pool(&fx.fx_id);
+    // The crop calendar: by default every share is usable now and has no last date in reach.
+    fx.core().set_crop_calendar(&fx.cal_id);
+    fx.window(Some((0, FAR)));
     fx.core().set_union_config(&fx.union, &union_cfg());
     fx.give_title(&fx.borrower);
     fx.give_title(&fx.neighbour);
@@ -793,19 +828,11 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
     assert_eq!(draw(&tok, &l1, NIN), Ok(Error::NoFoodToken));
     // Attester only.
     assert_eq!(
-        c.try_attest_food_token(
-            &fx.leader,
-            &fx.union,
-            &tok,
-            &fx.borrower,
-            &(500 * NIN),
-            &0,
-            &T0
-        )
-        .unwrap_err(),
+        c.try_attest_food_token(&fx.leader, &fx.union, &tok, &fx.borrower, &(500 * NIN), &0,)
+            .unwrap_err(),
         Ok(Error::NotAttester)
     );
-    // Corrected before use, open from day 30.
+    // Corrected before use; no floor (25 Oct): it can be drawn at once.
     c.attest_food_token(
         &fx.attester,
         &fx.union,
@@ -813,9 +840,7 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
         &fx.borrower,
         &(500 * NIN),
         &0,
-        &(T0 + 30 * DAY),
     );
-    assert_eq!(draw(&tok, &l1, NIN), Ok(Error::NotOpenYet));
     fx.at(T0 + 30 * DAY);
     // With the amount gate on, at most the attested amount.
     let mut uc = union_cfg();
@@ -840,7 +865,6 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
             &fx.borrower,
             &(500 * NIN),
             &0,
-            &T0
         )
         .unwrap_err(),
         Ok(Error::FoodTokenUsed)
@@ -851,8 +875,8 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
 
 use nila_fx_pool::{Error as FxError, Purpose};
 use soroban_sdk::{
-    testutils::{MockAuth, MockAuthInvoke},
-    Bytes, IntoVal,
+    testutils::{AuthorizedFunction, MockAuth, MockAuthInvoke},
+    Bytes, IntoVal, Symbol,
 };
 
 fn hash(env: &Env, b: u8) -> BytesN<32> {
@@ -943,16 +967,51 @@ impl Fx {
     }
 }
 
+/// Cash at hand may pass the treasury (executive decision 24 Oct): what a scan adds above it opens a Collect offer
+/// for the union's LPs, in whole rupees, for as long as the cash batch lasts; a scan within the treasury opens none.
+/// Merged (25 Oct): while that offer is open and no LP has accepted it, the next part above the treasury is added
+/// to it (up to the max scan) instead of a new offer; once an LP accepted it, a new one opens.
+#[test]
+fn cash_over_the_treasury_opens_a_collect_offer() {
+    let fx = setup();
+    let c = fx.core();
+    let f = fx.fx();
+    fx.scan(Purpose::Treasury, &fx.leader, 1_500 * NIN, 1, None)
+        .unwrap();
+    fx.scan(Purpose::Invest, &fx.borrower, 1_000 * NIN, 2, None)
+        .unwrap();
+    assert_eq!(f.offers_of(&fx.union).len(), 0);
+    // 700 more: 200 above the treasury.
+    fx.scan(Purpose::Invest, &fx.neighbour, 700 * NIN, 3, None)
+        .unwrap();
+    assert_eq!(f.cash_at_hand(&fx.union), 1_700 * NIN);
+    assert_eq!(c.union_treasury(&fx.union), 1_500 * NIN);
+    let ids = f.offers_of(&fx.union);
+    assert_eq!(ids.len(), 1);
+    let o = f.offer(&ids.get(0).unwrap()).unwrap();
+    assert_eq!(o.kind, nila_fx_pool::OfferKind::Collect);
+    assert_eq!(o.inr, 200 * NIN);
+    // Another 100: added to the open offer, no new one.
+    fx.scan(Purpose::Invest, &fx.neighbour, 100 * NIN, 4, None)
+        .unwrap();
+    let ids = f.offers_of(&fx.union);
+    assert_eq!(ids.len(), 1);
+    assert_eq!(f.offer(&ids.get(0).unwrap()).unwrap().inr, 300 * NIN);
+    // Up to the max scan only: a part that would take it past gets an offer of its own.
+    f.set_max_scan(&(350 * NIN));
+    fx.scan(Purpose::Invest, &fx.neighbour, 100 * NIN, 5, None)
+        .unwrap();
+    let ids = f.offers_of(&fx.union);
+    assert_eq!(ids.len(), 2);
+    assert_eq!(f.offer(&ids.get(1).unwrap()).unwrap().inr, 100 * NIN);
+    fx.assert_conserved();
+}
+
 #[test]
 fn cash_scan_invest_draw_repay_with_strict_auth() {
     let fx = setup();
     let c = fx.core();
     let f = fx.fx();
-    // Cash at hand may not exceed the treasury: the union funds it first (R15, R17).
-    assert_eq!(
-        fx.scan(Purpose::Invest, &fx.borrower, 1_000 * NIN, 1, None),
-        Err(FxError::AboveTreasury)
-    );
     assert_eq!(
         fx.scan(Purpose::Treasury, &fx.leader, 1_500 * NIN, 2, None),
         Ok(0)
@@ -966,15 +1025,6 @@ fn cash_scan_invest_draw_repay_with_strict_auth() {
     assert_eq!(e1, 1);
     assert_eq!(c.position(&fx.union, &fx.borrower).invested, 1_000 * NIN);
     assert_eq!(f.cash_at_hand(&fx.union), 1_000 * NIN);
-    // A receipt is used once.
-    assert_eq!(
-        fx.scan(Purpose::Invest, &fx.borrower, NIN, 3, None),
-        Err(FxError::ScanUsed)
-    );
-    assert_eq!(
-        fx.scan(Purpose::Invest, &fx.neighbour, 501 * NIN, 4, None),
-        Err(FxError::AboveTreasury)
-    );
     fx.assert_fx_empty();
     fx.assert_conserved();
 
@@ -1000,7 +1050,7 @@ fn cash_scan_invest_draw_repay_with_strict_auth() {
     c.draw_loan(&fx.union, &fx.borrower, &id, &(400 * NIN), &0);
     fx.env.mock_all_auths();
     assert_eq!(f.cash_at_hand(&fx.union), 600 * NIN);
-    assert_eq!(f.get_escrow(&e1).unwrap().remaining, 600 * NIN);
+    assert_eq!(f.get_escrow(&fx.union, &e1).unwrap().remaining, 600 * NIN);
     assert_eq!(fx.token().balance(&fx.borrower), 0);
 
     // Repay in cash, more than owed: only what she owes is minted; the leader gives change.
@@ -1010,7 +1060,10 @@ fn cash_scan_invest_draw_repay_with_strict_auth() {
         .scan(Purpose::Repay, &fx.borrower, 500 * NIN, 5, Some(id.clone()))
         .unwrap();
     assert!(c.get_loan(&fx.union, &id).unwrap().closed);
-    assert_eq!(f.get_escrow(&e2).unwrap().amount, 400 * NIN + interest);
+    assert_eq!(
+        f.get_escrow(&fx.union, &e2).unwrap().amount,
+        400 * NIN + interest
+    );
     assert_eq!(f.cash_at_hand(&fx.union), 1_000 * NIN + interest);
     assert_eq!(
         fx.scan(Purpose::Repay, &fx.borrower, NIN, 6, None),
@@ -1083,13 +1136,13 @@ fn unsettled_cash_at_hand_burns_treasury_after_7_days() {
         Err(Ok(Error::CashAtHand))
     );
     assert_eq!(
-        fx.fx().try_burn_expired_escrow(&e),
+        fx.fx().try_burn_expired_escrow(&fx.union, &e),
         Err(Ok(FxError::NotExpired))
     );
     fx.at(T0 + 7 * 86_400);
     // Anyone may call it once expired; the union kept the rupees.
     fx.env.set_auths(&[]);
-    assert_eq!(fx.fx().burn_expired_escrow(&e), 800 * NIN);
+    assert_eq!(fx.fx().burn_expired_escrow(&fx.union, &e), 800 * NIN);
     fx.env.mock_all_auths();
     assert_eq!(c.union_treasury(&fx.union), 200 * NIN);
     assert_eq!(fx.fx().cash_at_hand(&fx.union), 0);
@@ -1134,6 +1187,102 @@ fn trustline_opens_only_inside_the_payout() {
     assert_eq!(fx.token().balance(&fx.leader), 500 * NIN);
     assert!(!fx.authorized(&fx.leader));
     fx.assert_conserved();
+}
+
+/// The signed cash-out (24 Oct, a machine owner's income): she signs (union, amount) in her QR, any leader
+/// of her union submits it once the notes are handed over; her nIN is clawed back, cash at hand goes down.
+#[test]
+fn cash_out_signed_burns_her_nin_at_the_desk() {
+    let fx = setup();
+    let c = fx.core();
+    let f = fx.fx();
+    fx.scan(Purpose::Treasury, &fx.leader, 2_000 * NIN, 1, None)
+        .unwrap();
+    fx.scan(Purpose::Invest, &fx.neighbour, 1_000 * NIN, 2, None)
+        .unwrap();
+    // Her nIN in her wallet (in the app: a machine owner's prepay and collected dues).
+    fx.make_leader(&fx.neighbour);
+    c.request_unbond_junior(&fx.union, &fx.neighbour, &(600 * NIN));
+    fx.at(T0 + 14 * 86_400);
+    c.claim_junior(&fx.union, &fx.neighbour, &0);
+    assert_eq!(fx.token().balance(&fx.neighbour), 600 * NIN);
+
+    // Without her signature of (union, amount) a leader cannot burn her nIN.
+    fx.env.mock_auths(&[MockAuth {
+        address: &fx.leader,
+        invoke: &MockAuthInvoke {
+            contract: &fx.fx_id,
+            fn_name: "cash_out_signed",
+            args: (
+                fx.leader.clone(),
+                fx.union.clone(),
+                fx.neighbour.clone(),
+                250 * NIN,
+            )
+                .into_val(&fx.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f
+        .try_cash_out_signed(&fx.leader, &fx.union, &fx.neighbour, &(250 * NIN))
+        .is_err());
+    // Her signature is for one amount: another amount is not authorised.
+    fx.env.mock_auths(&[
+        MockAuth {
+            address: &fx.neighbour,
+            invoke: &MockAuthInvoke {
+                contract: &fx.fx_id,
+                fn_name: "cash_out_signed",
+                args: (fx.union.clone(), 250 * NIN).into_val(&fx.env),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &fx.leader,
+            invoke: &MockAuthInvoke {
+                contract: &fx.fx_id,
+                fn_name: "cash_out_signed",
+                args: (
+                    fx.leader.clone(),
+                    fx.union.clone(),
+                    fx.neighbour.clone(),
+                    300 * NIN,
+                )
+                    .into_val(&fx.env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+    assert!(f
+        .try_cash_out_signed(&fx.leader, &fx.union, &fx.neighbour, &(300 * NIN))
+        .is_err());
+    fx.env.mock_all_auths();
+    assert_eq!(
+        f.try_cash_out_signed(&fx.borrower, &fx.union, &fx.neighbour, &(250 * NIN)),
+        Err(Ok(FxError::NotLeader))
+    );
+    let stranger = Address::generate(&fx.env);
+    assert_eq!(
+        f.try_cash_out_signed(&fx.leader, &fx.union, &stranger, &NIN),
+        Err(Ok(FxError::NotMember))
+    );
+    assert_eq!(
+        f.try_cash_out_signed(&fx.leader, &fx.union, &fx.neighbour, &(10_000 * NIN + 1)),
+        Err(Ok(FxError::CapExceeded))
+    );
+
+    let hand = f.cash_at_hand(&fx.union);
+    assert_eq!(
+        f.cash_out_signed(&fx.leader, &fx.union, &fx.neighbour, &(250 * NIN)),
+        250 * NIN
+    );
+    let auths = fx.env.auths();
+    assert!(auths.iter().any(|a| a.0 == fx.neighbour
+        && matches!(&a.1.function, AuthorizedFunction::Contract((_, f, args))
+            if *f == Symbol::new(&fx.env, "cash_out_signed") && args.len() == 2)));
+    assert_eq!(fx.token().balance(&fx.neighbour), 350 * NIN);
+    assert_eq!(f.cash_at_hand(&fx.union), hand - 250 * NIN);
+    fx.assert_fx_empty();
 }
 
 #[test]
@@ -1264,9 +1413,9 @@ fn fx_pool_slot_set_once_and_codes_used_once() {
         .unwrap();
     fx.at(T0 + 30 * 86_400);
     c.pause();
-    assert!(f.try_burn_expired_escrow(&e).is_err());
+    assert!(f.try_burn_expired_escrow(&fx.union, &e).is_err());
     c.unpause();
-    f.burn_expired_escrow(&e);
+    f.burn_expired_escrow(&fx.union, &e);
     fx.assert_conserved();
 }
 
@@ -1299,9 +1448,19 @@ fn storage_layout_is_frozen() {
         DataKey::FoodToken(a.clone(), h.clone()),
         DataKey::Vouchers(a.clone(), h.clone()),
         DataKey::OwnerBalance(a.clone(), a.clone()),
+        DataKey::FoodTokenFinal(a.clone(), h.clone()),
+        DataKey::CropCalendar,
     ] {
         v.push_back(k.into_val(&env));
     }
+    // Appended 25 Oct: the last draw date and lapse of a food token, beside its unchanged entry.
+    v.push_back(
+        FoodTokenFinal {
+            final_date: 1,
+            lapsed: false,
+        }
+        .into_val(&env),
+    );
     v.push_back(
         Config {
             admin: a.clone(),
@@ -1378,16 +1537,14 @@ fn storage_layout_is_frozen() {
     v.push_back(
         VoucherBook {
             hours: 1,
-            earmark: 2,
-            earmark_per_hour: 3,
-            senior_out: 4,
-            dues: soroban_sdk::vec![
-                &env,
-                Due {
-                    owner: a.clone(),
-                    amount: 5,
-                },
-            ],
+            per_hour: 2,
+            value: 3,
+            repaid: 4,
+            interest_accrued: 5,
+            interest_paid: 6,
+            last_accrual_ts: 7,
+            reserve: 8,
+            fee_due: 9,
         }
         .into_val(&env),
     );
@@ -1410,7 +1567,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "fe30eea98285703bcefcefc3fdcdf55b42dc5be5ac9fb1d23c5298323b9abb68",
+        hex, "4e78348ff1d40aff87d6a38344bb18cf3ba661585e63a90dde1697035b413440",
         "fund_core storage layout changed"
     );
 }
@@ -1749,6 +1906,8 @@ fn bring_draws_senior_usdc_only_above_the_voucher_floor() {
         fx.try_acc(&lp, &big, &s24, &q),
         Err(Ok(FxError::BelowVoucherFloor))
     );
+    // Withdrawn, so the next amount is an offer of its own (an open one would take it, 25 Oct).
+    f.cancel_offer(&fx.leader, &big);
     // Only 10 USDC are free above the floor: ₹950 (10.1 USDC with the fee) is refused, ₹900 fits.
     let mid = f.post_offer(
         &fx.leader,
@@ -1761,6 +1920,7 @@ fn bring_draws_senior_usdc_only_above_the_voucher_floor() {
         fx.try_acc(&lp, &mid, &s24, &q),
         Err(Ok(FxError::BelowVoucherFloor))
     );
+    f.cancel_offer(&fx.leader, &mid);
     let ok = f.post_offer(
         &fx.leader,
         &fx.union,
@@ -1938,6 +2098,7 @@ fn tractor(k: i128) -> RateParts {
     }
 }
 const PEND: i128 = 750 * NIN; // the other half of driver, maintenance, insurance, depreciation
+const HOUR: i128 = PRE + PEND; // a tractor hour's whole value: what a voucher hour is lent at (26 Oct)
 
 struct Vx {
     fx: Fx,
@@ -1951,7 +2112,7 @@ impl Vx {
         MachineryContractClient::new(&self.fx.env, &self.m)
     }
 
-    /// fund_core nIN = pools + treasury + rainy + the owner's collectable balance.
+    /// fund_core nIN = pools + treasury + rainy + the voucher reserve + the owner's balance.
     fn assert_conserved(&self) {
         let c = self.fx.core();
         let u = &self.fx.union;
@@ -1959,6 +2120,7 @@ impl Vx {
             + c.get_senior_market(u).cash
             + c.union_treasury(u)
             + c.union_rainy_day(u)
+            + c.senior_earmark(u)
             + c.owner_balance(u, &self.owner);
         assert_eq!(self.fx.token().balance(&self.fx.core_id), books);
     }
@@ -2001,75 +2163,154 @@ fn vsetup() -> Vx {
     }
 }
 
+/// Executive decision 26 Oct: the voucher's value is debt from the draw, with interest that senior
+/// earns; owners are paid in full at the claim; repaying never touches the hours, which stay hers.
 #[test]
-fn voucher_draw_claim_repay_and_collect() {
+fn voucher_is_debt_from_the_draw_and_its_hours_stay_hers() {
     let v = vsetup();
     let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
     let id = loan_id(&fx.env, 1);
-    // The plan recommends 400 cash and 10 hours (not caps, 9 Oct).
     c.attest_food_token(
         &fx.attester,
         &fx.union,
         &id,
         &fx.borrower,
         &(400 * NIN),
-        &1000,
-        &T0,
+        &600,
     );
-    c.draw_loan(&fx.union, &fx.borrower, &id, &(400 * NIN), &1000);
-    assert_eq!(c.senior_earmark(&fx.union), 10 * PRE);
-    assert_eq!(mc.voucher(&fx.union, &id).unwrap().hours, 1000);
-    // Senior cash held back is not claimable by seniors.
-    assert_eq!(c.get_senior_market(&fx.union).cash, 10_000 * NIN);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &(400 * NIN), &600);
+    // 6 tractor hours lent by senior at the draw: out of senior cash into the reserve, owed by her.
+    let value = 6 * HOUR;
+    assert_eq!(c.senior_earmark(&fx.union), value);
+    let sm = c.get_senior_market(&fx.union);
+    assert_eq!((sm.cash, sm.total_borrows), (10_000 * NIN - value, value));
+    assert_eq!(mc.voucher(&fx.union, &id).unwrap().units, 600);
+    // Her lock counts the voucher's value too (R27): she owes more than her 2,000.
+    let p = c.position(&fx.union, &fx.borrower);
+    assert_eq!(p.locked, p.invested);
+    v.assert_conserved();
 
-    // A8a: she signs for up to 6 tractor hours (600 units); the owner works 4 and scans it.
-    assert_eq!(
-        mc.claim(&v.owner, &v.machine, &fx.union, &id, &600, &400),
-        (4 * PRE, 4 * PEND)
-    );
-    // Her own authorisation of (union, token, max hours) is what the claim used (23 Oct).
+    // A8a: she signs for up to 6 hours; the owner works 4 and is paid all of it at once.
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &600, &400);
     use soroban_sdk::{testutils::AuthorizedFunction, IntoVal, Symbol};
     let signed: soroban_sdk::Vec<soroban_sdk::Val> =
         (fx.union.clone(), id.clone(), 600u32).into_val(&fx.env);
     assert!(fx.env.auths().iter().any(|(a, inv)| *a == fx.borrower
         && matches!(&inv.function, AuthorizedFunction::Contract((c, f, args))
             if *c == mc.address && *f == Symbol::new(&fx.env, "claim") && *args == signed)));
-    // The prepay is in the owner's wallet at once, from senior money (D18, N4).
-    assert_eq!(fx.token().balance(&v.owner), 4 * PRE);
-    assert!(!fx.authorized(&v.owner));
-    assert_eq!(c.get_senior_market(&fx.union).cash, 10_000 * NIN - 4 * PRE);
-    assert_eq!(c.senior_earmark(&fx.union), 6 * PRE);
-    let b = c.voucher_book(&fx.union, &id).unwrap();
-    assert_eq!(
-        (b.senior_out, b.dues.get(0).unwrap().amount),
-        (4 * PRE, 4 * PEND)
-    );
-    // The rest of her hours stay with her (one claim per signature: Soroban's nonce).
-    assert_eq!(mc.voucher(&fx.union, &id).unwrap().used, 400);
-    // Her lock counts the voucher part too (R27): she owes more than her 2,000, so all of it.
-    let p = c.position(&fx.union, &fx.borrower);
-    assert_eq!(p.locked, p.invested);
+    assert_eq!(fx.token().balance(&v.owner), 4 * HOUR);
+    assert_eq!(c.senior_earmark(&fx.union), 2 * HOUR);
+    // The claim changes nothing in what she owes or what senior lent.
+    assert_eq!(c.get_senior_market(&fx.union).total_borrows, value);
     v.assert_conserved();
 
-    // She repays everything: owners first, then interest, principal, the senior prepay.
+    // Half a year on she repays everything: the voucher's interest and value to senior, then
+    // junior's interest and principal. Interest runs on the whole (₹400 cash and ₹8,700 vouchers).
     fx.at(T0 + YEAR / 2);
-    let interest = 400 * NIN * 1250 / 10_000 / 2;
-    let total = 4 * PEND + interest + 400 * NIN + 4 * PRE;
+    let j_int = 400 * NIN * 1250 / 10_000 / 2;
+    let v_int = value * 1250 / 10_000 / 2;
+    let total = v_int + value + j_int + 400 * NIN;
     StellarAssetClient::new(&fx.env, &fx.nin).mint(&fx.fx_id, &(total + 50 * NIN));
     assert!(c.repay_loan(&fx.union, &id, &(total + 50 * NIN)));
-    assert_eq!(c.owner_balance(&fx.union, &v.owner), 4 * PEND);
-    assert_eq!(c.get_senior_market(&fx.union).cash, 10_000 * NIN);
-    assert_eq!(c.get_senior_market(&fx.union).total_borrows, 0);
-    // Closed: the unclaimed 6 hours lapse and their earmark is released.
+    let sm = c.get_senior_market(&fx.union);
+    assert_eq!((sm.cash, sm.total_borrows), (10_000 * NIN + v_int, 0));
+    // Closed, and her 2 unused hours stay hers, with their reserve.
+    assert_eq!(c.senior_earmark(&fx.union), 2 * HOUR);
+    assert!(!mc.voucher(&fx.union, &id).unwrap().void);
+    v.assert_conserved();
+    // She uses them after the loan is repaid: the owner is paid from the reserve.
+    fx.at(T0 + YEAR / 2 + 8 * 86_400);
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &200, &200);
+    assert_eq!(fx.token().balance(&v.owner), 6 * HOUR);
     assert_eq!(c.senior_earmark(&fx.union), 0);
-    assert!(mc.voucher(&fx.union, &id).unwrap().void);
     v.assert_conserved();
+}
 
-    // A13: the owner collects her settled part to her wallet.
-    assert_eq!(c.collect_dues(&v.owner, &fx.union), 4 * PEND);
-    assert_eq!(fx.token().balance(&v.owner), 4 * PRE + 4 * PEND);
-    assert!(!fx.authorized(&v.owner));
+/// Executive decision 27 Oct: more machine hours on a share already taken up (draw_loan again, cash 0): on the
+/// same voucher, owed from then, the earlier hours' interest accrued first; more cash is refused.
+#[test]
+fn hours_can_be_added_to_a_share_taken_up() {
+    let v = vsetup();
+    let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
+    let id = loan_id(&fx.env, 1);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &(400 * NIN), &0);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &(400 * NIN), &0);
+    assert!(c.voucher_book(&fx.union, &id).is_none());
+    // A second draw with cash, or with nothing, is refused.
+    assert!(c
+        .try_draw_loan(&fx.union, &fx.borrower, &id, &(100 * NIN), &0)
+        .is_err());
+    assert!(c
+        .try_draw_loan(&fx.union, &fx.borrower, &id, &(100 * NIN), &200)
+        .is_err());
+    assert!(c
+        .try_draw_loan(&fx.union, &fx.borrower, &id, &0, &0)
+        .is_err());
+    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &300);
+    assert_eq!(mc.voucher(&fx.union, &id).unwrap().units, 300);
+    assert_eq!(c.senior_earmark(&fx.union), 3 * HOUR);
     v.assert_conserved();
+    // A month on, 2 more hours: the same voucher, the first 3 hours' interest accrued to then.
+    fx.at(T0 + 30 * 86_400);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &200);
+    assert_eq!(mc.voucher(&fx.union, &id).unwrap().units, 500);
+    let b = c.voucher_book(&fx.union, &id).unwrap();
+    assert_eq!((b.hours, b.value, b.reserve), (500, 5 * HOUR, 5 * HOUR));
+    assert!(b.interest_accrued > 0);
+    assert_eq!(c.senior_earmark(&fx.union), 5 * HOUR);
+    let sm = c.get_senior_market(&fx.union);
+    assert_eq!(
+        (sm.cash, sm.total_borrows),
+        (10_000 * NIN - 5 * HOUR, 5 * HOUR)
+    );
+    v.assert_conserved();
+}
+
+/// A crop share's token id as FoodToken packs it: crop code at bit 204, area in m² at bit 148; `tag` in the low byte.
+fn share_token(env: &Env, crop_code: u64, m2: u64, tag: u8) -> BytesN<32> {
+    let mut b = [0u8; 32];
+    b[31] = tag;
+    for (shift, width, v) in [(204u32, 20u32, crop_code), (148, 24, m2)] {
+        for i in 0..width {
+            if (v >> i) & 1 == 1 {
+                let bit = shift + i;
+                b[31 - (bit / 8) as usize] |= 1 << (bit % 8);
+            }
+        }
+    }
+    BytesN::from_array(env, &b)
+}
+
+/// Executive decision 27 Oct: vouchers count acres; a claim never exceeds the crop share's own area (read from its
+/// token id), and the union's price for the crop (trailer × sugarcane) beats the type's price.
+#[test]
+fn acres_are_capped_by_the_shares_area_and_priced_by_its_crop() {
+    let v = vsetup();
+    let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
+    let id = share_token(&fx.env, 2000, 4046, 1); // sugarcane (family 2), one acre: 100 centi acres
+    assert_eq!(mc.share_of(&id), (2, 100));
+    c.attest_food_token(
+        &fx.attester,
+        &fx.union,
+        &id,
+        &fx.borrower,
+        &(400 * NIN),
+        &600,
+    );
+    c.draw_loan(&fx.union, &fx.borrower, &id, &(400 * NIN), &600); // 6 tractor acres
+                                                                   // More than the share's area is refused, whatever she signed.
+    assert!(mc
+        .try_claim(&v.owner, &v.machine, &fx.union, &id, &600, &101)
+        .is_err());
+    // The union prices tractor work on sugarcane at twice the acre: one acre uses two tractor acres.
+    mc.set_crop_rate(&fx.union, &1, &2, &Some(tractor(2 * NIN)));
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &600, &100);
+    assert_eq!(mc.voucher(&fx.union, &id).unwrap().used, 200);
+    assert_eq!(fx.token().balance(&v.owner), 2 * HOUR);
+    v.assert_conserved();
+    // Removing the crop's price brings the type's back.
+    mc.set_crop_rate(&fx.union, &1, &2, &None);
+    assert_eq!(mc.rate_for_crop(&fx.union, &1, &2), mc.rate(&fx.union, &1));
 }
 
 #[test]
@@ -2077,13 +2318,9 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
     let v = vsetup();
     let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &1400, &T0);
-    // A voucher-only loan: no cash part.
-    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &1400);
-    assert_eq!(
-        c.try_repay_loan(&fx.union, &id, &NIN),
-        Err(Ok(Error::NothingOwed))
-    );
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &600);
+    // A voucher-only loan: no cash part, but the voucher's value is owed (26 Oct).
+    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &600);
     use nila_machinery::Error as ME;
     // The owner alone cannot claim: her own authorisation is required.
     {
@@ -2113,17 +2350,17 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
     );
     assert_eq!(
         mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &1000, &1100),
-        Err(Ok(ME::TooManyHours))
+        Err(Ok(ME::TooMuchWork))
     );
     assert_eq!(
         mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &1500, &1500),
-        Err(Ok(ME::TooManyHours))
+        Err(Ok(ME::TooMuchWork))
     );
     let small = mc.register_machine(&fx.leader, &fx.union, &v.owner, &1, &3, &id);
     mc.confirm_machine(&v.owner, &small);
     assert_eq!(
         mc.try_claim(&v.owner, &small, &fx.union, &id, &1000, &400),
-        Err(Ok(ME::TooManyHours))
+        Err(Ok(ME::TooMuchWork))
     );
     // On hold (R83): no claims.
     mc.set_hold(&v.owner, &v.machine, &true, &1);
@@ -2142,9 +2379,9 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
         mc.try_register_machine(&fx.leader, &fx.union, &stranger, &1, &40, &id),
         Err(Ok(ME::NotMember))
     );
-    // Not enough senior money for the prepay of the hours asked.
+    // Not enough senior money for the value of the hours asked.
     let id2 = loan_id(&fx.env, 2);
-    c.attest_food_token(&fx.attester, &fx.union, &id2, &fx.borrower, &0, &2000, &T0);
+    c.attest_food_token(&fx.attester, &fx.union, &id2, &fx.borrower, &0, &2000);
     assert_eq!(
         c.try_draw_loan(&fx.union, &fx.borrower, &id2, &0, &2000),
         Err(Ok(Error::NoSeniorBacking))
@@ -2152,7 +2389,7 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
 }
 
 #[test]
-fn default_pays_the_owner_and_senior_from_her_investment_first() {
+fn default_takes_the_voucher_value_from_her_investment_first() {
     let v = vsetup();
     let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
     let id = loan_id(&fx.env, 1);
@@ -2164,25 +2401,25 @@ fn default_pays_the_owner_and_senior_from_her_investment_first() {
         &id,
         &fx.borrower,
         &(300 * NIN),
-        &2,
-        &T0,
+        &200,
     );
     c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &200);
     mc.claim(&v.owner, &v.machine, &fx.union, &id, &200, &200);
     c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
     fx.at(T0 + 111 * 86_400 + 1);
     c.mark_default(&fx.union, &id);
-    // Her 2,000 covers everything: owners in full, principal, interest, the senior prepay.
-    assert_eq!(c.owner_balance(&fx.union, &v.owner), 2 * PEND);
+    // Her investment covers it all: the voucher's value and interest to senior, junior in full.
+    assert_eq!(fx.token().balance(&v.owner), 2 * HOUR);
     let sm = c.get_senior_market(&fx.union);
-    assert_eq!((sm.cash, sm.total_borrows), (10_000 * NIN, 0));
+    assert_eq!(sm.total_borrows, 0);
+    assert!(sm.cash > 10_000 * NIN);
     assert!(mc.voucher(&fx.union, &id).unwrap().void);
     assert_eq!(c.senior_earmark(&fx.union), 0);
     v.assert_conserved();
 }
 
 #[test]
-fn default_beyond_her_investment_owner_still_paid_senior_takes_its_loss() {
+fn default_unused_hours_go_back_to_senior_and_it_takes_the_rest() {
     let v = vsetup();
     let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
     let id = loan_id(&fx.env, 1);
@@ -2192,27 +2429,28 @@ fn default_beyond_her_investment_owner_still_paid_senior_takes_its_loss() {
         &id,
         &fx.borrower,
         &(300 * NIN),
-        &4,
-        &T0,
+        &400,
     );
     c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &400);
-    mc.claim(&v.owner, &v.machine, &fx.union, &id, &400, &400);
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &200, &200);
     c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
     fx.at(T0 + 111 * 86_400 + 1);
     c.mark_default(&fx.union, &id);
-    // She owed 3,000 dues + 300 + interest + 2,800 prepay against 2,000 invested. The owner is
-    // paid in full (D17); the senior prepay her investment could not cover is senior's loss.
-    assert_eq!(c.owner_balance(&fx.union, &v.owner), 4 * PEND);
-    assert_eq!(c.voucher_book(&fx.union, &id).unwrap().dues.len(), 0);
+    // Her 2 unused hours lapse and their reserve takes ₹2,900 off the ₹5,800 she owed senior. Her
+    // 2,000 invested goes to senior first, as far as the junior pool holds cash (₹1,700 after the
+    // ₹300 draw), then to her junior principal; senior loses the rest.
+    assert_eq!(fx.token().balance(&v.owner), 2 * HOUR);
+    assert!(mc.voucher(&fx.union, &id).unwrap().void);
+    assert_eq!(c.senior_earmark(&fx.union), 0);
     let sm = c.get_senior_market(&fx.union);
     assert_eq!(sm.total_borrows, 0);
-    assert!(sm.cash < 10_000 * NIN);
+    assert_eq!(sm.cash, 10_000 * NIN - 2 * HOUR + 1_700 * NIN);
     assert_eq!(c.position(&fx.union, &fx.borrower).invested, 0);
     v.assert_conserved();
 }
 
 #[test]
-fn review_fixes_self_claim_rate_rise_earmarks_close_unused() {
+fn self_claim_rate_rise_and_handing_hours_back() {
     let v = vsetup();
     let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
     use nila_machinery::Error as ME;
@@ -2227,34 +2465,57 @@ fn review_fixes_self_claim_rate_rise_earmarks_close_unused() {
     );
     mc.confirm_machine(&fx.borrower, &mine);
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &400, &T0);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &400);
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &400);
     assert_eq!(
         mc.try_claim(&fx.borrower, &mine, &fx.union, &id, &400, &100),
         Err(Ok(ME::SelfClaim))
     );
-    // Another loan holds back 10 hours: 14 × ₹700 of the 10,000 senior nIN are earmarked.
-    let id2 = loan_id(&fx.env, 2);
-    c.attest_food_token(&fx.attester, &fx.union, &id2, &fx.borrower, &0, &1000, &T0);
-    c.draw_loan(&fx.union, &fx.borrower, &id2, &0, &1000);
-    assert_eq!(c.senior_earmark(&fx.union), 14 * PRE);
-    // The union raises its tractor rate 50% after the draw: the higher prepay would eat the
-    // other loan's earmark, so the claim is refused.
+    // The union raises its tractor rate 50% after the draw: the owner is paid what the voucher
+    // set aside, never another voucher's reserve.
     mc.set_rate(&fx.union, &1, &tractor(15_000_000));
-    assert!(mc
-        .try_claim(&v.owner, &v.machine, &fx.union, &id, &400, &400)
-        .is_err());
+    let id2 = loan_id(&fx.env, 2);
     mc.set_rate(&fx.union, &1, &tractor(NIN));
+    c.attest_food_token(&fx.attester, &fx.union, &id2, &fx.borrower, &0, &200);
+    c.draw_loan(&fx.union, &fx.borrower, &id2, &0, &200);
+    mc.set_rate(&fx.union, &1, &tractor(15_000_000));
     mc.claim(&v.owner, &v.machine, &fx.union, &id, &400, &400);
+    assert_eq!(fx.token().balance(&v.owner), 4 * HOUR);
+    assert_eq!(c.senior_earmark(&fx.union), 2 * HOUR);
+    mc.set_rate(&fx.union, &1, &tractor(NIN));
 
-    // She releases the voucher she no longer needs: nothing owed, the earmark goes back.
+    // She hands back 1 of her 2 unused hours on loan 2: ₹1,450 off what she owes senior, its
+    // reserve back to senior cash, and 5% (₹72.5) owed to the union treasury.
+    let sm0 = c.get_senior_market(&fx.union);
     assert_eq!(
-        c.try_close_unused(&fx.borrower, &fx.union, &id),
-        Err(Ok(Error::BadState))
+        c.return_voucher(&fx.borrower, &fx.union, &id2, &100),
+        HOUR * 95 / 100
     );
-    c.close_unused(&fx.borrower, &fx.union, &id2);
-    assert_eq!(c.senior_earmark(&fx.union), 0);
-    assert!(mc.voucher(&fx.union, &id2).unwrap().void);
+    let sm1 = c.get_senior_market(&fx.union);
+    assert_eq!(
+        (sm1.cash - sm0.cash, sm0.total_borrows - sm1.total_borrows),
+        (HOUR, HOUR)
+    );
+    assert_eq!(mc.voucher(&fx.union, &id2).unwrap().units, 100);
+    assert_eq!(c.senior_earmark(&fx.union), HOUR);
+    // Not more than she has unclaimed.
+    assert!(c
+        .try_return_voucher(&fx.borrower, &fx.union, &id2, &200)
+        .is_err());
+    // Repaying loan 2: the rest of the voucher's value to senior, the 5% to the treasury.
+    let t0 = c.union_treasury(&fx.union);
+    let owed = HOUR + HOUR * 5 / 100;
+    StellarAssetClient::new(&fx.env, &fx.nin).mint(&fx.fx_id, &owed);
+    assert!(c.repay_loan(&fx.union, &id2, &owed));
+    assert_eq!(c.union_treasury(&fx.union) - t0, HOUR * 5 / 100);
+    // Nothing owed any more: handing back is refused, the hour stays hers.
+    assert!(c
+        .try_return_voucher(&fx.borrower, &fx.union, &id2, &100)
+        .is_err());
+    assert_eq!(
+        mc.voucher(&fx.union, &id2).unwrap().units - mc.voucher(&fx.union, &id2).unwrap().used,
+        100
+    );
     v.assert_conserved();
 }
 
@@ -2269,10 +2530,10 @@ fn bring_respects_the_daily_cap_and_the_voucher_earmark() {
     fx.scan(Purpose::Treasury, &fx.leader, 5_000 * NIN, 1, None)
         .unwrap();
     let (s24, q) = fx.ids();
-    // 200 senior USDC at ₹50; a voucher earmarks 14 × ₹700 = 9,800 nIN = 196 USDC.
+    // 200 senior USDC at ₹50; a voucher of 6.76 tractor hours sets aside ₹9,802 = 196.04 USDC.
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &1400, &T0);
-    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &1400);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &676);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &676);
     // ₹250 → 5 USDC + 1% would cut into the 196 USDC held for the voucher.
     let b = f.post_offer(
         &fx.leader,
@@ -2285,6 +2546,7 @@ fn bring_respects_the_daily_cap_and_the_voucher_earmark() {
         fx.try_acc(&v.owner, &b, &s24, &q),
         Err(Ok(FxError::BelowVoucherFloor))
     );
+    f.cancel_offer(&fx.leader, &b);
     // ₹150 → 3.03 USDC fits in the 4 free.
     let ok = f.post_offer(
         &fx.leader,
@@ -2336,21 +2598,22 @@ fn a_title_in_any_union_makes_her_junior_never_senior() {
 }
 
 #[test]
-fn close_unused_is_hers_only_and_evented() {
+fn handing_hours_back_is_hers_only() {
     let v = vsetup();
     let (fx, c) = (&v.fx, v.fx.core());
     let id = loan_id(&fx.env, 1);
-    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &200, &T0);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &200);
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &200);
     assert_eq!(
-        c.try_close_unused(&fx.neighbour, &fx.union, &id),
+        c.try_return_voucher(&fx.neighbour, &fx.union, &id, &100),
         Err(Ok(Error::NotBorrower))
     );
-    c.close_unused(&fx.borrower, &fx.union, &id);
-    assert!(c.get_loan(&fx.union, &id).unwrap().closed);
+    // All of it back: her debt is the 5% for the treasury only.
+    c.return_voucher(&fx.borrower, &fx.union, &id, &200);
+    let b = c.voucher_book(&fx.union, &id).unwrap();
     assert_eq!(
-        c.try_close_unused(&fx.borrower, &fx.union, &id),
-        Err(Ok(Error::LoanClosed))
+        (b.value - b.repaid, b.fee_due, b.reserve),
+        (0, 2 * HOUR * 5 / 100, 0)
     );
 }
 
@@ -2581,22 +2844,55 @@ fn claim_junior_cash_pays_over_the_desk() {
     assert!(c
         .try_claim_junior_cash(&fx.union, &fx.neighbour, &fx.leader, &0)
         .is_err());
-    // And the leader must sign too: she alone cannot collect cash at the desk.
+    // And the leader must sign too: she alone cannot collect cash at the desk. Her QR (24 Oct) signs
+    // (union, max_shares) only, so it names no leader.
     fx.env.mock_auths(&[MockAuth {
         address: &fx.neighbour,
         invoke: &MockAuthInvoke {
             contract: &fx.core_id,
             fn_name: "claim_junior_cash",
-            args: (
-                fx.union.clone(),
-                fx.neighbour.clone(),
-                fx.leader.clone(),
-                0i128,
-            )
-                .into_val(&fx.env),
+            args: (fx.union.clone(), 0i128).into_val(&fx.env),
             sub_invokes: &[],
         },
     }]);
+    assert!(c
+        .try_claim_junior_cash(&fx.union, &fx.neighbour, &fx.leader, &0)
+        .is_err());
+    fx.env.mock_all_auths();
+
+    // Her signature of the full call (with a leader in it) is not hers for this claim: the args differ.
+    fx.env.mock_auths(&[
+        MockAuth {
+            address: &fx.neighbour,
+            invoke: &MockAuthInvoke {
+                contract: &fx.core_id,
+                fn_name: "claim_junior_cash",
+                args: (
+                    fx.union.clone(),
+                    fx.neighbour.clone(),
+                    fx.leader.clone(),
+                    0i128,
+                )
+                    .into_val(&fx.env),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &fx.leader,
+            invoke: &MockAuthInvoke {
+                contract: &fx.core_id,
+                fn_name: "claim_junior_cash",
+                args: (
+                    fx.union.clone(),
+                    fx.neighbour.clone(),
+                    fx.leader.clone(),
+                    0i128,
+                )
+                    .into_val(&fx.env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
     assert!(c
         .try_claim_junior_cash(&fx.union, &fx.neighbour, &fx.leader, &0)
         .is_err());
@@ -2606,7 +2902,9 @@ fn claim_junior_cash_pays_over_the_desk() {
     let supply_core = fx.token().balance(&fx.core_id);
     c.claim_junior_cash(&fx.union, &fx.neighbour, &fx.leader, &0);
     let auths = fx.env.auths();
-    assert!(auths.iter().any(|a| a.0 == fx.neighbour));
+    assert!(auths.iter().any(|a| a.0 == fx.neighbour
+        && matches!(&a.1.function, AuthorizedFunction::Contract((_, f, args))
+            if *f == Symbol::new(&fx.env, "claim_junior_cash") && args.len() == 2)));
     assert!(auths.iter().any(|a| a.0 == fx.leader));
     assert_eq!(fx.token().balance(&fx.neighbour), 0);
     assert_eq!(fx.token().balance(&fx.core_id), supply_core - 400 * NIN);
@@ -2955,5 +3253,167 @@ fn leader_swaps_usdc_to_nin_and_back_from_her_bucket_only() {
     assert_eq!(
         f.try_swap_nin_to_usdc(&fx.leader, &fx.union, &NIN),
         Err(Ok(FxError::StaleOracle))
+    );
+}
+
+/// The last draw date and the public lapse (executive decision 25 Oct): no floor, drawn up to and on its last
+/// date, too late after it; an undrawn token past its last date lapses by anyone and is never drawn or attested
+/// again; a drawn one cannot lapse; a voucher-only share lapses the same way.
+#[test]
+fn last_draw_date_and_public_lapse() {
+    let fx = setup();
+    let c = fx.core();
+    fx.invest(&fx.borrower, 3_000 * NIN);
+    let last = T0 + 10 * DAY;
+    fx.window(Some((0, last)));
+    let attest = |b: u8, amount: i128, hours: u32| {
+        c.attest_food_token(
+            &fx.attester,
+            &fx.union,
+            &loan_id(&fx.env, b),
+            &fx.borrower,
+            &amount,
+            &hours,
+        )
+    };
+    // A sowing in none of its crop's windows (or no calendar): refused.
+    fx.window(None);
+    assert_eq!(
+        c.try_attest_food_token(
+            &fx.attester,
+            &fx.union,
+            &loan_id(&fx.env, 9),
+            &fx.borrower,
+            &(100 * NIN),
+            &0,
+        )
+        .unwrap_err(),
+        Ok(Error::BadDates)
+    );
+    fx.window(Some((0, last)));
+    for b in 1..=4 {
+        attest(b, 100 * NIN, 0);
+    }
+    attest(5, 0, 300); // voucher-only
+    let draw = |b: u8| {
+        c.try_draw_loan(
+            &fx.union,
+            &fx.borrower,
+            &loan_id(&fx.env, b),
+            &(100 * NIN),
+            &0,
+        )
+    };
+    // No floor: drawn right after attestation.
+    assert!(draw(1).is_ok());
+    assert_eq!(
+        c.food_token(&fx.union, &loan_id(&fx.env, 1))
+            .unwrap()
+            .final_date,
+        last
+    );
+    // Not lapsed before or at its last date.
+    let lapse = |b: u8| c.try_lapse_food_token(&fx.union, &loan_id(&fx.env, b));
+    assert_eq!(lapse(2).unwrap_err(), Ok(Error::NotLapsedYet));
+    fx.at(last);
+    assert_eq!(lapse(2).unwrap_err(), Ok(Error::NotLapsedYet));
+    // On its last date: still drawn.
+    assert!(draw(2).is_ok());
+    // After it: too late, and anyone may lapse an undrawn one (no signature at all).
+    fx.at(last + 1);
+    assert_eq!(draw(3).unwrap_err(), Ok(Error::TooLate));
+    fx.env.set_auths(&[]);
+    c.lapse_food_token(&fx.union, &loan_id(&fx.env, 3));
+    c.lapse_food_token(&fx.union, &loan_id(&fx.env, 5));
+    fx.env.mock_all_auths();
+    let v = c.food_token(&fx.union, &loan_id(&fx.env, 3)).unwrap();
+    assert!(v.lapsed && !v.loan.drawn());
+    assert!(
+        c.food_token(&fx.union, &loan_id(&fx.env, 5))
+            .unwrap()
+            .lapsed
+    );
+    // Lapsed once only; never drawn or attested again.
+    assert_eq!(lapse(3).unwrap_err(), Ok(Error::FoodTokenLapsed));
+    assert_eq!(draw(3).unwrap_err(), Ok(Error::FoodTokenLapsed));
+    assert_eq!(
+        c.try_attest_food_token(
+            &fx.attester,
+            &fx.union,
+            &loan_id(&fx.env, 3),
+            &fx.borrower,
+            &(100 * NIN),
+            &0,
+        )
+        .unwrap_err(),
+        Ok(Error::FoodTokenLapsed)
+    );
+    // A drawn token cannot lapse; an unknown one is not there.
+    assert_eq!(lapse(1).unwrap_err(), Ok(Error::FoodTokenUsed));
+    assert_eq!(lapse(77).unwrap_err(), Ok(Error::NoFoodToken));
+    // Undrawn and past its date but not lapsed yet: still lapsable.
+    assert!(lapse(4).is_ok());
+    fx.assert_conserved();
+}
+
+/// Usable in its window (executive decision 25 Oct): from the crop calendar's opening (a week
+/// before its crop's sowing window) up to its last sowing day.
+#[test]
+fn a_crop_share_is_usable_only_in_its_attested_window() {
+    let fx = setup();
+    let c = fx.core();
+    fx.invest(&fx.borrower, 3_000 * NIN);
+    let id = loan_id(&fx.env, 1);
+    let (open, last) = (T0 + 40 * DAY, T0 + 100 * DAY);
+    fx.window(Some((open, last)));
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &(100 * NIN), &0);
+    let v = c.food_token(&fx.union, &id).unwrap();
+    assert_eq!((v.from_date, v.final_date), (open, last));
+    let draw = || c.try_draw_loan(&fx.union, &fx.borrower, &id, &(100 * NIN), &0);
+    fx.at(open - 1);
+    assert_eq!(draw().unwrap_err(), Ok(Error::NotOpenYet));
+    fx.at(open);
+    assert!(draw().is_ok());
+}
+
+/// The real crop calendar and a packed Polygon token id (25 Oct): maize (family 6) sown 20 Jun
+/// 2027 opens 25 May, a week before its Jun–Jul window, and closes at the end of 31 July.
+#[test]
+fn the_window_comes_from_the_crop_calendar_by_the_token_ids_crop_and_sowing() {
+    use nila_crop_calendar::{CropCalendarContract, CropCalendarContractClient, Window};
+    let fx = setup();
+    let c = fx.core();
+    let cal = fx
+        .env
+        .register(CropCalendarContract, (Address::generate(&fx.env),));
+    CropCalendarContractClient::new(&fx.env, &cal).set_windows(
+        &6,
+        &soroban_sdk::vec![&fx.env, Window { first: 6, last: 7 }],
+    );
+    c.set_crop_calendar(&cal);
+    // packTokenId(land 42, crop 6000, sos 2027-06-20, area 4000 m², fields 0b1)
+    let pack = |crop: u128, sos: u128| {
+        let hi: u128 = (42 << 96) | (crop << 76) | (sos << 44) | (4000 << 20);
+        let mut b = [0u8; 32];
+        b[..16].copy_from_slice(&hi.to_be_bytes());
+        b[16..].copy_from_slice(&(1u128 << 20).to_be_bytes());
+        BytesN::from_array(&fx.env, &b)
+    };
+    let id = pack(6000, 1_813_449_600);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &(100 * NIN), &0);
+    let v = c.food_token(&fx.union, &id).unwrap();
+    assert_eq!((v.from_date, v.final_date), (1_811_203_200, 1_817_078_399));
+    // April: not a maize sowing month here.
+    assert_eq!(
+        c.try_attest_food_token(
+            &fx.attester,
+            &fx.union,
+            &pack(6000, 1_806_537_600),
+            &fx.borrower,
+            &(100 * NIN),
+            &0,
+        )
+        .unwrap_err(),
+        Ok(Error::BadDates)
     );
 }

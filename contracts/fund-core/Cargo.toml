@@ -21,6 +21,7 @@ nila-roles = { path = "../roles" }
 nila-land-title = { path = "../land-title" }
 nila-fx-pool = { path = "../fx-pool" }
 nila-machinery = { path = "../machinery" }
+nila-crop-calendar = { path = "../crop-calendar" }
 ed25519-dalek = { version = "2.2.0", default-features = false }
 
 [features]

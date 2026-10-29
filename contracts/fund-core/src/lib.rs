@@ -5,21 +5,24 @@ mod types;
 
 use events::*;
 use nila_common::{
-    bump_instance, upgrade, FxPoolClient, LandTitleClient, Loan, MachineryClient, MarketLite, Role,
-    RolesClient, Tranche, TTL_BUMP, TTL_THRESHOLD,
+    bump_instance, upgrade, CropCalendarClient, FxPoolClient, LandTitleClient, Loan,
+    MachineryClient, MarketLite, Role, RolesClient, Tranche, TTL_BUMP, TTL_THRESHOLD,
 };
 use nila_math::{
     accrued_interest, haircut_index, index_bump, to_shares, to_underlying, BPS, DUST, RAY,
 };
 use soroban_sdk::{
     contract, contractimpl, contractmeta, contracttype, token::TokenClient, vec, Address, BytesN,
-    Env, Vec,
+    Env, IntoVal, Vec,
 };
 use types::{
     LoanState, Market, Milestone, UnionBook, FLAG_CLOSED, FLAG_DEFAULTED, FLAG_DRAWN, FLAG_OVERDUE,
 };
 
-pub use types::{Config, Due, Error, FoodToken, Investor, Position, UnionConfig, VoucherBook};
+pub use types::{
+    Config, Error, FoodToken, FoodTokenFinal, FoodTokenView, Investor, Position, UnionConfig,
+    VoucherBook,
+};
 
 contractmeta!(key = "binver", val = "0.2.0");
 
@@ -84,16 +87,33 @@ pub enum DataKey {
     Union(Address),
     /// Attested food token (union, Polygon token id) that a loan may be drawn against.
     FoodToken(Address, BytesN<32>),
+    /// Its last draw date and lapsed flag (25 Oct), apart so stored `FoodToken` entries keep their layout.
+    FoodTokenFinal(Address, BytesN<32>),
     /// A loan's voucher part (C5).
     Vouchers(Address, BytesN<32>),
     /// An owner's settled pending parts, ready to collect (union, owner).
     OwnerBalance(Address, Address),
+    /// The crop calendar contract (25 Oct), apart from `Config` so its stored layout stays.
+    CropCalendar,
 }
 
 #[contract]
 pub struct FundCore;
 
 // ---------- storage ----------
+
+/// The crop code (family × 1000 + variety) and planned sowing (unix) packed in a Polygon
+/// FoodToken id: bits 204–223 and 172–203 (FoodTokenUpgradeable.packTokenId).
+fn crop_and_sos(token_id: &BytesN<32>) -> (u32, u64) {
+    let b = token_id.to_array();
+    let mut hi = [0u8; 16];
+    hi.copy_from_slice(&b[..16]);
+    let hi = u128::from_be_bytes(hi);
+    (
+        ((hi >> 76) & 0xF_FFFF) as u32,
+        ((hi >> 44) & 0xFFFF_FFFF) as u64,
+    )
+}
 
 fn cfg(env: &Env) -> Config {
     env.storage().instance().get(&DataKey::Config).unwrap()
@@ -102,6 +122,10 @@ fn cfg(env: &Env) -> Config {
 fn save_cfg(env: &Env, c: &Config) {
     env.storage().instance().set(&DataKey::Config, c);
     bump_instance(env);
+}
+
+fn final_of(env: &Env, key: &DataKey) -> Option<FoodTokenFinal> {
+    env.storage().persistent().get(key)
 }
 
 fn bump_key(env: &Env, key: &DataKey) {
@@ -455,11 +479,10 @@ fn member_owed(env: &Env, union: &Address, member: &Address) -> Result<i128, Err
             .checked_add(ln.principal - ln.principal_paid)
             .and_then(|x| x.checked_add(ln.interest_accrued - ln.interest_paid))
             .ok_or(Error::Overflow)?;
-        // Her voucher part counts too: owners' pending parts and the senior prepay (R27).
-        if let Some(b) = load_book(env, union, &id) {
-            owed = owed
-                .checked_add(dues_total(&b) + b.senior_out)
-                .ok_or(Error::Overflow)?;
+        // Her voucher part counts too: its value, its interest and any fee (26 Oct).
+        if let Some(mut b) = load_book(env, union, &id) {
+            accrue_voucher(env, &mut b, ln.rate_bp, now)?;
+            owed = owed.checked_add(voucher_owed(&b)).ok_or(Error::Overflow)?;
         }
     }
     Ok(owed)
@@ -618,12 +641,8 @@ fn claim(
         core::cmp::min(amount, m.claimable_principal),
         inv.pending_principal_snap,
     );
-    let held = if junior {
-        0
-    } else {
-        i_get(env, &Counter::Earmark(union.clone()))
-    };
-    if m.cash - held < amount {
+    // The voucher reserve is outside senior cash (26 Oct): nothing else is held back.
+    if m.cash < amount {
         return Err(Error::InsufficientCash);
     }
     let uc = union_cfg(env, union)?;
@@ -676,9 +695,6 @@ fn close_loan(env: &Env, union: &Address, token_id: &BytesN<32>, ln: &Loan) {
     }
 }
 
-/// Owners per loan's voucher book.
-const MAX_OWNERS_PER_LOAN: u32 = 8;
-
 fn load_book(env: &Env, union: &Address, token_id: &BytesN<32>) -> Option<VoucherBook> {
     env.storage()
         .persistent()
@@ -691,55 +707,123 @@ fn save_book(env: &Env, union: &Address, token_id: &BytesN<32>, b: &VoucherBook)
     bump_key(env, &k);
 }
 
-/// This loan's own earmark, released when it ends.
-fn book_earmark(b: &VoucherBook) -> i128 {
-    b.earmark
-}
-
-fn dues_total(b: &VoucherBook) -> i128 {
-    b.dues.iter().map(|d| d.amount).sum()
-}
-
-/// Settles owners' pending parts in order, up to `amount`: each owner's share is credited to
-/// her balance here, which she collects with `collect_dues` (a repayment arrives inside fx_pool's
-/// call, so it cannot pay out through fx_pool's trustline flip). Returns what was settled.
-fn pay_dues(env: &Env, union: &Address, b: &mut VoucherBook, amount: i128) -> Result<i128, Error> {
-    let mut left = amount;
-    let mut kept = Vec::new(env);
-    for d in b.dues.iter() {
-        let x = core::cmp::min(left, d.amount);
-        if x > 0 {
-            p_add(
-                env,
-                &DataKey::OwnerBalance(union.clone(), d.owner.clone()),
-                x,
-            )?;
-            left -= x;
-        }
-        if d.amount > x {
-            kept.push_back(Due {
-                owner: d.owner.clone(),
-                amount: d.amount - x,
-            });
-        }
-    }
-    b.dues = kept;
-    Ok(amount - left)
-}
-
-/// The loan is over: unclaimed hours lapse and their senior earmark is released.
-fn end_vouchers(env: &Env, union: &Address, token_id: &BytesN<32>) -> Result<(), Error> {
-    if let Some(mut b) = load_book(env, union, token_id) {
-        if b.earmark > 0 {
-            i_add(env, &Counter::Earmark(union.clone()), -b.earmark)?;
-            b.earmark = 0;
-            save_book(env, union, token_id, &b);
-        }
-        if let Some(m) = cfg(env).machinery {
-            MachineryClient::new(env, &m).void(union, token_id);
-        }
-    }
+/// The voucher's interest to `now` (senior's, 26 Oct): simple interest at the loan's rate on what
+/// is still lent.
+fn accrue_voucher(env: &Env, b: &mut VoucherBook, rate_bp: u32, now: u64) -> Result<(), Error> {
+    let i = accrued_interest(
+        env,
+        b.value - b.repaid,
+        rate_bp,
+        now.saturating_sub(b.last_accrual_ts),
+    )
+    .ok_or(Error::Overflow)?;
+    b.interest_accrued = b.interest_accrued.checked_add(i).ok_or(Error::Overflow)?;
+    b.last_accrual_ts = now;
     Ok(())
+}
+
+/// What she owes on the voucher part: its value, its interest and the treasury's fee.
+fn voucher_owed(b: &VoucherBook) -> i128 {
+    b.value - b.repaid + b.interest_accrued - b.interest_paid + b.fee_due
+}
+
+/// Senior is repaid `pay` of the voucher's value (cash in, the loan's borrow out).
+fn senior_repaid(env: &Env, union: &Address, pay: i128) {
+    let mut sm = load_market(env, false, union);
+    sm.cash += pay;
+    sm.total_borrows -= core::cmp::min(sm.total_borrows, pay);
+    save_market(env, false, union, &sm);
+}
+
+/// The voucher's interest is senior's income.
+fn senior_interest(env: &Env, union: &Address, interest: i128) -> Result<(), Error> {
+    if interest <= 0 {
+        return Ok(());
+    }
+    let mut sm = load_market(env, false, union);
+    sm.cash += interest;
+    if sm.total_shares > 0 {
+        sm.index = index_bump(env, sm.index, sm.total_shares, interest).ok_or(Error::Overflow)?;
+    } else {
+        // No senior shareholders to earn it: it stays with the union.
+        sm.cash -= interest;
+        i_add(env, &Counter::Treasury(union.clone()), interest)?;
+    }
+    save_market(env, false, union, &sm);
+    Ok(())
+}
+
+/// At a default: her unclaimed hours lapse and their reserve goes back to senior cash. Returns it.
+fn void_vouchers(
+    env: &Env,
+    union: &Address,
+    token_id: &BytesN<32>,
+    b: &mut VoucherBook,
+) -> Result<i128, Error> {
+    let back = b.reserve;
+    if back > 0 {
+        i_add(env, &Counter::Earmark(union.clone()), -back)?;
+        let mut sm = load_market(env, false, union);
+        sm.cash += back;
+        save_market(env, false, union, &sm);
+        b.reserve = 0;
+    }
+    if let Some(m) = cfg(env).machinery {
+        MachineryClient::new(env, &m).void(union, token_id);
+    }
+    Ok(back)
+}
+
+/// The voucher part of a crop share, at the draw or added later (27 Oct): `hours` (centi tractor hours) at the
+/// tractor hour's value, lent by senior (which must back it), set aside in the reserve and owed from `now` with
+/// interest; the hours go onto her voucher. Returns the value.
+fn lend_vouchers(
+    env: &Env,
+    union: &Address,
+    member: &Address,
+    token_id: &BytesN<32>,
+    hours: u32,
+    rate_bp: u32,
+    now: u64,
+) -> Result<i128, Error> {
+    let mc = MachineryClient::new(env, &cfg(env).machinery.ok_or(Error::NotMachinery)?);
+    let per_hour = mc.value_per_tractor_acre(union);
+    let value = per_hour
+        .checked_mul(i128::from(hours))
+        .ok_or(Error::Overflow)?
+        .checked_add(99)
+        .ok_or(Error::Overflow)?
+        / 100;
+    let mut sm = load_market(env, false, union);
+    if sm.cash < value {
+        return Err(Error::NoSeniorBacking);
+    }
+    sm.cash -= value;
+    sm.total_borrows += value;
+    save_market(env, false, union, &sm);
+    i_add(env, &Counter::Earmark(union.clone()), value)?;
+    let mut b = load_book(env, union, token_id).unwrap_or(VoucherBook {
+        hours: 0,
+        per_hour,
+        value: 0,
+        repaid: 0,
+        interest_accrued: 0,
+        interest_paid: 0,
+        last_accrual_ts: now,
+        reserve: 0,
+        fee_due: 0,
+    });
+    accrue_voucher(env, &mut b, rate_bp, now)?;
+    // One rate per voucher for a returned hour: the hours' average.
+    let all = b.hours.checked_add(hours).ok_or(Error::Overflow)?;
+    b.per_hour =
+        (b.per_hour * i128::from(b.hours) + per_hour * i128::from(hours)) / i128::from(all);
+    b.hours = all;
+    b.value += value;
+    b.reserve += value;
+    save_book(env, union, token_id, &b);
+    mc.grant(union, member, token_id, &hours);
+    Ok(value)
 }
 
 fn tranche(junior: bool) -> Tranche {
@@ -814,6 +898,16 @@ impl FundCore {
         c.machinery = Some(machinery.clone());
         save_cfg(&env, &c);
         MachinerySet { machinery }.publish(&env);
+        Ok(())
+    }
+
+    /// The crop calendar that sets a food token's window at attest (25 Oct). Admin; may be moved.
+    pub fn set_crop_calendar(env: Env, calendar: Address) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::CropCalendar, &calendar);
+        bump_instance(&env);
         Ok(())
     }
 
@@ -1041,6 +1135,8 @@ impl FundCore {
     /// Her junior investment collected over the desk (executive decision 22 Oct): she and a leader of her
     /// union both sign; the claim's nIN is burned in fund_core and booked against the union's cash at hand,
     /// as `draw_loan` does for the cash part. No nIN reaches her wallet. The leader hands the notes.
+    /// Her signed QR (24 Oct): she authorises (union, max_shares) only, so any leader of her union may scan
+    /// and submit it once the cash is handed over; one use by its Soroban nonce, expiring at its ledger.
     pub fn claim_junior_cash(
         env: Env,
         union: Address,
@@ -1049,7 +1145,7 @@ impl FundCore {
         max_shares: i128,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
-        member.require_auth();
+        member.require_auth_for_args((union.clone(), max_shares).into_val(&env));
         require_leader(&env, &union, &leader)?;
         let amount = claim(&env, true, &union, &member, max_shares, false)?;
         nin(&env).burn(&env.current_contract_address(), &amount);
@@ -1141,8 +1237,9 @@ impl FundCore {
     // ---------- loans ----------
 
     /// Food token fact (F2): the attester copies a Polygon FoodToken from the crop plan with
-    /// the amount that may be drawn against it and the date loans open. One loan per token;
-    /// it can be corrected until a loan is drawn against it.
+    /// the amount that may be drawn against it. Its window comes from the crop calendar by the
+    /// token id's crop and planned sowing (25 Oct): from a week before that sowing window up to
+    /// its last day. One loan per token; it can be corrected until a loan is drawn against it.
     #[allow(clippy::too_many_arguments)]
     pub fn attest_food_token(
         env: Env,
@@ -1152,19 +1249,33 @@ impl FundCore {
         member: Address,
         amount: i128,
         hours: u32,
-        from_date: u64,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         require_attester(&env, &attester)?;
         if amount < 0 || (amount == 0 && hours == 0) {
             return Err(Error::AmountZero);
         }
+        // Its window from the calendar: no calendar, or a sowing outside every window, is refused.
+        let (from_date, final_date) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::CropCalendar)
+            .and_then(|c| {
+                let (crop, sos) = crop_and_sos(&token_id);
+                CropCalendarClient::new(&env, &c).window(&crop, &sos)
+            })
+            .ok_or(Error::BadDates)?;
         let key = DataKey::FoodToken(union.clone(), token_id.clone());
         if let Some(old) = env.storage().persistent().get::<_, FoodToken>(&key) {
             if old.loan.drawn() {
                 return Err(Error::FoodTokenUsed);
             }
         }
+        let fk = DataKey::FoodTokenFinal(union.clone(), token_id.clone());
+        if final_of(&env, &fk).is_some_and(|f| f.lapsed) {
+            return Err(Error::FoodTokenLapsed);
+        }
+        // Usable in its window (25 Oct): from a week before its sowing window up to its last day.
         let ft = FoodToken {
             member: member.clone(),
             amount,
@@ -1174,13 +1285,21 @@ impl FundCore {
         };
         env.storage().persistent().set(&key, &ft);
         bump_key(&env, &key);
+        env.storage().persistent().set(
+            &fk,
+            &FoodTokenFinal {
+                final_date,
+                lapsed: false,
+            },
+        );
+        bump_key(&env, &fk);
         FoodTokenAttested {
             union,
             token_id,
             member,
             amount,
             hours,
-            from_date,
+            final_date,
         }
         .publish(&env);
         bump_instance(&env);
@@ -1218,16 +1337,47 @@ impl FundCore {
         if ft.member != member {
             return Err(Error::NoFoodToken);
         }
-        if ft.loan.drawn() {
+        // A share already taken up takes more machine hours only (executive decision 27 Oct: the union may have more
+        // machines by then): cash 0, its loan open, up to its last draw date below.
+        let more = ft.loan.drawn();
+        if more && (cash != 0 || hours == 0 || ft.loan.flags & (FLAG_CLOSED | FLAG_DEFAULTED) != 0)
+        {
             return Err(Error::FoodTokenUsed);
         }
+        // Its window (25 Oct): from its opening date (a week before its sowing window, attested) up to the last date. A token
+        // attested before 25 Oct keeps its season's SOS as the opening and has no last date.
         if env.ledger().timestamp() < ft.from_date {
             return Err(Error::NotOpenYet);
+        }
+        if let Some(f) = final_of(
+            &env,
+            &DataKey::FoodTokenFinal(union.clone(), token_id.clone()),
+        ) {
+            if f.lapsed {
+                return Err(Error::FoodTokenLapsed);
+            }
+            if env.ledger().timestamp() > f.final_date {
+                return Err(Error::TooLate);
+            }
         }
 
         let uc = union_cfg(&env, &union)?;
         if on_hold(&env, &union) > 0 {
             return Err(Error::LendingOnHold);
+        }
+        if more {
+            // The added hours show in machinery's VoucherGranted; their value in voucher_book.
+            lend_vouchers(
+                &env,
+                &union,
+                &member,
+                &token_id,
+                hours,
+                ft.loan.rate_bp,
+                env.ledger().timestamp(),
+            )?;
+            bump_instance(&env);
+            return Ok(());
         }
         if cash > uc.max_loan {
             return Err(Error::CapExceeded);
@@ -1255,36 +1405,20 @@ impl FundCore {
         if cash > 0 && jm.cash < cash.checked_add(req).ok_or(Error::Overflow)? {
             return Err(Error::ReserveStop);
         }
-        // The voucher part, in centi tractor hours: senior money held back for the prepay of
-        // every tractor hour (R36, C8, N4; executive decision 23 Oct).
+        // The voucher part, in centi tractor hours (executive decision 26 Oct): its value (the
+        // tractor hour's whole rate) is lent by senior and owed from now, with interest; senior
+        // sets the money aside in the reserve, which pays the owners whenever she uses the hours.
+        let mut voucher = 0;
         if hours > 0 {
-            let mac = cfg(&env).machinery.ok_or(Error::NotMachinery)?;
-            let mc = MachineryClient::new(&env, &mac);
-            let per_hour = mc.prepay_per_tractor_hour(&union);
-            let earmark = per_hour
-                .checked_mul(i128::from(hours))
-                .ok_or(Error::Overflow)?
-                .checked_add(99)
-                .ok_or(Error::Overflow)?
-                / 100;
-            let ek = Counter::Earmark(union.clone());
-            if load_market(&env, false, &union).cash - i_get(&env, &ek) < earmark {
-                return Err(Error::NoSeniorBacking);
-            }
-            i_add(&env, &ek, earmark)?;
-            save_book(
+            voucher = lend_vouchers(
                 &env,
                 &union,
+                &member,
                 &token_id,
-                &VoucherBook {
-                    hours,
-                    earmark,
-                    earmark_per_hour: per_hour,
-                    senior_out: 0,
-                    dues: Vec::new(&env),
-                },
-            );
-            mc.grant(&union, &member, &token_id, &hours);
+                hours,
+                uc.rate_bp,
+                env.ledger().timestamp(),
+            )?;
         }
         jm.cash -= cash;
         jm.total_borrows += cash;
@@ -1324,6 +1458,7 @@ impl FundCore {
             borrower: member,
             cash,
             hours,
+            voucher,
             rate_bp: uc.rate_bp,
             cash_settled: settled,
         }
@@ -1332,10 +1467,10 @@ impl FundCore {
         Ok(())
     }
 
-    /// Cash-scan REPAY: fx_pool pays the nIN in (R14). The order (executive decision, 12 Oct): machine owners'
-    /// pending parts (they carry no risk, D17), then the senior voucher prepay (no interest, D6),
-    /// then junior: interest, then principal. At most what is owed is taken. Closes inside 0.1
-    /// nIN (R40). Returns true when closed.
+    /// Cash-scan REPAY: fx_pool pays the nIN in (R14). The order (executive decision 26 Oct): the
+    /// voucher part to senior (its interest, then its value), then junior (interest, then principal),
+    /// then the union treasury's fee for handed-back hours. At most what is owed is taken. Closes
+    /// inside 0.1 nIN (R40); her voucher hours stay hers. Returns true when closed.
     pub fn repay_loan(
         env: Env,
         union: Address,
@@ -1350,13 +1485,21 @@ impl FundCore {
         if ln.closed {
             return Err(Error::LoanClosed);
         }
-        accrue(&env, &mut ln, env.ledger().timestamp())?;
+        let now = env.ledger().timestamp();
+        accrue(&env, &mut ln, now)?;
         let mut book = load_book(&env, &union, &token_id);
-        let owed_d = book.as_ref().map(dues_total).unwrap_or(0);
-        let owed_s = book.as_ref().map(|b| b.senior_out).unwrap_or(0);
+        if let Some(b) = book.as_mut() {
+            accrue_voucher(&env, b, ln.rate_bp, now)?;
+        }
+        let owed_vi = book
+            .as_ref()
+            .map(|b| b.interest_accrued - b.interest_paid)
+            .unwrap_or(0);
+        let owed_v = book.as_ref().map(|b| b.value - b.repaid).unwrap_or(0);
+        let owed_f = book.as_ref().map(|b| b.fee_due).unwrap_or(0);
         let owed_i = ln.interest_accrued - ln.interest_paid;
         let owed_p = ln.principal - ln.principal_paid;
-        let total = owed_d + owed_i + owed_p + owed_s;
+        let total = owed_vi + owed_v + owed_i + owed_p + owed_f;
         if total <= 0 {
             return Err(Error::NothingOwed);
         }
@@ -1370,23 +1513,21 @@ impl FundCore {
         }
 
         let mut left_pay = pay;
-        let mut pay_d = 0;
-        if let Some(b) = book.as_mut() {
-            pay_d = pay_dues(&env, &union, b, core::cmp::min(left_pay, owed_d))?;
-            left_pay -= pay_d;
-        }
-        let pay_s = core::cmp::min(left_pay, owed_s);
-        left_pay -= pay_s;
+        let pay_vi = core::cmp::min(left_pay, owed_vi);
+        left_pay -= pay_vi;
+        let pay_v = core::cmp::min(left_pay, owed_v);
+        left_pay -= pay_v;
         let pay_i = core::cmp::min(left_pay, owed_i);
         left_pay -= pay_i;
         let mut pay_p = core::cmp::min(left_pay, owed_p);
+        left_pay -= pay_p;
+        let pay_f = core::cmp::min(left_pay, owed_f);
         // Always run, even for zero interest: interest moves with the ledger clock, and the
         // simulated footprint must hold the treasury and rainy-day keys either way.
         ln.interest_paid += pay_i;
         distribute_interest(&env, &union, &uc, pay_i)?;
         let left = total - pay;
-        // Owners carry no risk (D17): a loan never closes with any of their part unpaid.
-        let closed = left <= DUST && pay_d == owed_d;
+        let closed = left <= DUST;
         // Dust principal left at close is written off with the borrow.
         let off_books = if closed { owed_p - pay_p } else { 0 };
         if pay_p > 0 || off_books > 0 {
@@ -1409,36 +1550,44 @@ impl FundCore {
             ln.principal_paid += pay_p + off_books;
             pay_p += off_books;
         }
+        let mut pay_s = pay_v;
         if let Some(b) = book.as_mut() {
-            let mut sm = load_market(&env, false, &union);
-            sm.cash += pay_s;
-            b.senior_out -= pay_s;
-            // Closing inside dust: the prepay's last fraction is written off by senior, as the
-            // principal's is by junior.
-            let off_s = if closed { b.senior_out } else { 0 };
-            sm.total_borrows -= core::cmp::min(sm.total_borrows, pay_s + off_s);
-            if off_s > 0 {
+            b.interest_paid += pay_vi;
+            senior_interest(&env, &union, pay_vi)?;
+            // Closing inside dust: the voucher value's last fraction is written off by senior.
+            let off_v = if closed { owed_v - pay_v } else { 0 };
+            senior_repaid(&env, &union, pay_v);
+            if off_v > 0 {
+                let mut sm = load_market(&env, false, &union);
+                sm.total_borrows -= core::cmp::min(sm.total_borrows, off_v);
                 let under = to_underlying(&env, sm.total_shares, sm.index).unwrap_or(0);
-                sm.index = haircut_index(&env, sm.index, under, off_s)
+                sm.index = haircut_index(&env, sm.index, under, off_v)
                     .ok_or(Error::Overflow)?
                     .1;
+                save_market(&env, false, &union, &sm);
             }
-            b.senior_out -= off_s;
-            save_market(&env, false, &union, &sm);
+            b.repaid += pay_v + off_v;
+            pay_s += off_v;
+            b.fee_due -= pay_f;
+            if closed {
+                b.fee_due = 0;
+            }
+            if pay_f > 0 {
+                i_add(&env, &Counter::Treasury(union.clone()), pay_f)?;
+            }
             save_book(&env, &union, &token_id, b);
         }
         if closed {
             ln.closed = true;
             close_loan(&env, &union, &token_id, &ln);
-            end_vouchers(&env, &union, &token_id)?;
         }
         save_loan(&env, &union, &token_id, &ln)?;
         LoanRepaid {
             union,
             token_id,
-            interest_paid: pay_i,
+            interest_paid: pay_i + pay_vi,
             principal_paid: pay_p,
-            dues_paid: pay_d,
+            fee_paid: pay_f,
             senior_paid: pay_s,
             closed,
         }
@@ -1447,39 +1596,57 @@ impl FundCore {
         Ok(closed)
     }
 
-    /// She ends a loan that owes nothing (a voucher with no hours claimed): the hours lapse and
-    /// their senior earmark is released.
-    pub fn close_unused(
+    /// She hands back `units` unclaimed centi tractor hours (executive decision 26 Oct): their
+    /// whole value comes off what she owes senior and their reserve goes back to senior cash; 5%
+    /// of that value is added as owed to the union treasury. Only while the voucher's value is
+    /// still owed (with nothing owed, unused hours simply stay hers).
+    pub fn return_voucher(
         env: Env,
         member: Address,
         union: Address,
         token_id: BytesN<32>,
-    ) -> Result<(), Error> {
+        units: u32,
+    ) -> Result<i128, Error> {
         require_not_paused(&env)?;
         member.require_auth();
-        let mut ln = load_loan(&env, &union, &token_id)?;
+        let ln = load_loan(&env, &union, &token_id)?;
         if ln.borrower != member {
             return Err(Error::NotBorrower);
         }
         if ln.closed {
             return Err(Error::LoanClosed);
         }
-        accrue(&env, &mut ln, env.ledger().timestamp())?;
-        let b = load_book(&env, &union, &token_id);
-        let owed = ln.principal - ln.principal_paid + ln.interest_accrued - ln.interest_paid
-            + b.as_ref()
-                .map(|b| dues_total(b) + b.senior_out)
-                .unwrap_or(0);
-        if owed > 0 {
+        let mut b = load_book(&env, &union, &token_id).ok_or(Error::NotExists)?;
+        accrue_voucher(&env, &mut b, ln.rate_bp, env.ledger().timestamp())?;
+        let value = core::cmp::min(
+            b.per_hour
+                .checked_mul(i128::from(units))
+                .ok_or(Error::Overflow)?
+                / 100,
+            b.reserve,
+        );
+        if units == 0 || value <= 0 || value > b.value - b.repaid {
             return Err(Error::BadState);
         }
-        ln.closed = true;
-        close_loan(&env, &union, &token_id, &ln);
-        save_loan(&env, &union, &token_id, &ln)?;
-        end_vouchers(&env, &union, &token_id)?;
-        LoanReleased { union, token_id }.publish(&env);
+        MachineryClient::new(&env, &cfg(&env).machinery.ok_or(Error::NotMachinery)?)
+            .take_back(&union, &token_id, &units);
+        b.reserve -= value;
+        i_add(&env, &Counter::Earmark(union.clone()), -value)?;
+        senior_repaid(&env, &union, value);
+        b.repaid += value;
+        let fee = value * 5 / 100;
+        b.fee_due += fee;
+        save_book(&env, &union, &token_id, &b);
+        VoucherReturned {
+            union,
+            token_id,
+            units,
+            value,
+            fee,
+        }
+        .publish(&env);
         bump_instance(&env);
-        Ok(())
+        Ok(value - fee)
     }
 
     /// A13: the owner collects her settled pending parts to her wallet (R85); cash at the
@@ -1504,89 +1671,41 @@ impl FundCore {
         Ok(amount)
     }
 
-    /// machinery only: an owner claimed `hours` on her voucher (D19). The prepay goes to the
-    /// owner's wallet from senior money (N4, C8) and the rest is booked as her pending dues to
-    /// that owner (D18, R85). No interest on any of it (D6).
-    #[allow(clippy::too_many_arguments)]
+    /// machinery only: an owner claimed hours on a voucher (D19). The owner is paid `amount` in
+    /// full from the voucher's reserve at once, also after the loan is repaid (executive decision
+    /// 26 Oct: the hours are hers, the debt is separate).
     pub fn pay_voucher(
         env: Env,
         union: Address,
         token_id: BytesN<32>,
         owner: Address,
-        hours: u32, // centi tractor hours used by the claim
-        prepay: i128,
-        pending: i128,
+        units: u32,
+        amount: i128,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         cfg(&env)
             .machinery
             .ok_or(Error::NotMachinery)?
             .require_auth();
-        if prepay < 0 || pending < 0 {
+        if amount < 0 {
             return Err(Error::NegativeAmount);
         }
-        let ln = load_loan(&env, &union, &token_id)?;
-        if ln.closed {
-            return Err(Error::LoanClosed);
-        }
         let mut b = load_book(&env, &union, &token_id).ok_or(Error::NotExists)?;
-        // Release this many hours' earmark; the prepay itself comes out of senior cash.
-        let release = core::cmp::min(
-            b.earmark,
-            b.earmark_per_hour
-                .checked_mul(i128::from(hours))
-                .ok_or(Error::Overflow)?
-                / 100,
-        );
-        b.earmark -= release;
-        let ek = Counter::Earmark(union.clone());
-        i_add(&env, &ek, -release)?;
-        let mut sm = load_market(&env, false, &union);
-        // Paid from this loan's released earmark and free senior cash, never from what other
-        // loans' unclaimed hours hold back (a rate may have risen since the draw).
-        if sm.cash - i_get(&env, &ek) < prepay {
-            return Err(Error::NoSeniorBacking);
-        }
-        sm.cash -= prepay;
-        sm.total_borrows += prepay;
-        save_market(&env, false, &union, &sm);
-        b.senior_out += prepay;
-        if pending > 0 {
-            let mut found = false;
-            let mut dues = Vec::new(&env);
-            for d in b.dues.iter() {
-                if d.owner == owner {
-                    found = true;
-                    dues.push_back(Due {
-                        owner: d.owner.clone(),
-                        amount: d.amount + pending,
-                    });
-                } else {
-                    dues.push_back(d);
-                }
-            }
-            if !found {
-                if dues.len() >= MAX_OWNERS_PER_LOAN {
-                    return Err(Error::TooManyOwners);
-                }
-                dues.push_back(Due {
-                    owner: owner.clone(),
-                    amount: pending,
-                });
-            }
-            b.dues = dues;
-        }
+        // Never more than this voucher set aside (a rate may have risen since the draw).
+        let pay = core::cmp::min(amount, b.reserve);
+        b.reserve -= pay;
+        i_add(&env, &Counter::Earmark(union.clone()), -pay)?;
         save_book(&env, &union, &token_id, &b);
-        if prepay > 0 {
-            pay_member(&env, &union, &owner, prepay)?;
+        if pay > 0 {
+            pay_member(&env, &union, &owner, pay)?;
         }
         VoucherPaid {
             union,
             token_id,
             owner,
-            hours,
-            prepay,
-            pending,
+            hours: units,
+            prepay: pay,
+            pending: 0,
         }
         .publish(&env);
         bump_instance(&env);
@@ -1667,27 +1786,54 @@ impl FundCore {
             return Err(Error::NotDue);
         }
         // Everything she owes is written off: principal and the interest accrued to date, plus
-        // her voucher part (owners' pending parts and the senior prepay).
-        accrue(&env, &mut ln, env.ledger().timestamp())?;
+        // her voucher part. Her unclaimed hours lapse first and their reserve goes back to senior,
+        // which takes it off the voucher's value she owes (26 Oct).
+        let now = env.ledger().timestamp();
+        accrue(&env, &mut ln, now)?;
+        let mut book = load_book(&env, &union, &token_id);
+        let mut jm = load_market(&env, true, &union);
+        let mut sm = load_market(&env, false, &union);
+        let (mut v_rest, mut v_int) = (0, 0);
+        if let Some(b) = book.as_mut() {
+            accrue_voucher(&env, b, ln.rate_bp, now)?;
+            save_market(&env, true, &union, &jm);
+            let back = void_vouchers(&env, &union, &token_id, b)?;
+            sm = load_market(&env, false, &union);
+            let v_out = b.value - b.repaid;
+            let cover = core::cmp::min(back, v_out);
+            sm.total_borrows -= core::cmp::min(sm.total_borrows, cover);
+            b.repaid += cover;
+            // Hours she had paid for and never used: their reserve pays her junior principal.
+            let surplus = back - cover;
+            if surplus > 0 {
+                let to_p = core::cmp::min(surplus, ln.principal - ln.principal_paid);
+                sm.cash -= to_p;
+                jm.cash += to_p;
+                jm.total_borrows -= core::cmp::min(jm.total_borrows, to_p);
+                ln.principal_paid += to_p;
+                let ub = Counter::Borrows(union.clone());
+                i_add(&env, &ub, -core::cmp::min(i_get(&env, &ub), to_p))?;
+            }
+            v_rest = b.value - b.repaid;
+            v_int = b.interest_accrued - b.interest_paid;
+        }
         let loss = ln.principal - ln.principal_paid;
         let interest = ln.interest_accrued - ln.interest_paid;
-        let mut book = load_book(&env, &union, &token_id);
-        let dues = book.as_ref().map(dues_total).unwrap_or(0);
-        let senior_out = book.as_ref().map(|b| b.senior_out).unwrap_or(0);
 
-        // 1. Her investment pays first (R27, D10), in this order (executive decision, 12 Oct): owners (D17),
-        //    senior prepay, then junior principal and interest. Owners and senior are paid in
-        //    cash, so those parts are capped by the junior pool's idle cash; what cannot move
-        //    stays her investment.
-        let mut jm = load_market(&env, true, &union);
+        // 1. Her investment pays first (R27, D10): the voucher's value to senior (in cash, so capped
+        //    by the junior pool's idle cash), then junior principal and interest, then the voucher's
+        //    interest. What cannot move stays her investment.
         let mut inv = load_inv(&env, true, &union, &ln.borrower);
         let avail = active_shares(&inv);
         let avail_value = to_underlying(&env, avail, jm.index).ok_or(Error::Overflow)?;
-        let m_d = core::cmp::min(core::cmp::min(avail_value, dues), jm.cash);
-        let m_s = core::cmp::min(core::cmp::min(avail_value - m_d, senior_out), jm.cash - m_d);
-        let m_p = core::cmp::min(avail_value - m_d - m_s, loss);
-        let m_i = core::cmp::min(avail_value - m_d - m_s - m_p, interest);
-        let member_applied = m_d + m_p + m_i + m_s;
+        let m_s = core::cmp::min(core::cmp::min(avail_value, v_rest), jm.cash);
+        let m_p = core::cmp::min(avail_value - m_s, loss);
+        let m_i = core::cmp::min(avail_value - m_s - m_p, interest);
+        let m_vi = core::cmp::min(
+            core::cmp::min(avail_value - m_s - m_p - m_i, v_int),
+            jm.cash - m_s,
+        );
+        let member_applied = m_s + m_p + m_i + m_vi;
         let burn = if member_applied >= avail_value {
             avail
         } else {
@@ -1715,37 +1861,15 @@ impl FundCore {
                 i_add(&env, &Counter::Treasury(union.clone()), m_i)?;
             }
         }
-        let mut sm = load_market(&env, false, &union);
-        // Her investment's cash to the senior pool for the prepay she owed.
-        jm.cash -= m_s;
-        sm.cash += m_s;
-
-        // 2. Owners carry no risk (D17): the rest of their pending parts comes from junior cash,
-        //    then senior cash, as a loss to those pools. Anything no pool can pay stays owed.
-        let mut dues_paid = 0;
-        if let Some(b) = book.as_mut() {
-            let from_member = pay_dues(&env, &union, b, m_d)?;
-            jm.cash -= from_member;
-            let short = dues - from_member;
-            let from_junior = core::cmp::min(short, jm.cash);
-            let paid_j = pay_dues(&env, &union, b, from_junior)?;
-            jm.cash -= paid_j;
-            let under = to_underlying(&env, jm.total_shares, jm.index).unwrap_or(0);
-            jm.index = haircut_index(&env, jm.index, under, paid_j)
-                .ok_or(Error::Overflow)?
-                .1;
-            let held = i_get(&env, &Counter::Earmark(union.clone())) - book_earmark(b);
-            let from_senior = core::cmp::min(short - paid_j, core::cmp::max(0, sm.cash - held));
-            let paid_s = pay_dues(&env, &union, b, from_senior)?;
-            sm.cash -= paid_s;
-            let sunder = to_underlying(&env, sm.total_shares, sm.index).unwrap_or(0);
-            sm.index = haircut_index(&env, sm.index, sunder, paid_s)
-                .ok_or(Error::Overflow)?
-                .1;
-            dues_paid = from_member + paid_j + paid_s;
+        // Her investment's cash to senior for the voucher value and interest she owed.
+        jm.cash -= m_s + m_vi;
+        sm.cash += m_s + m_vi;
+        sm.total_borrows -= core::cmp::min(sm.total_borrows, v_rest);
+        if m_vi > 0 && sm.total_shares > 0 {
+            sm.index = index_bump(&env, sm.index, sm.total_shares, m_vi).ok_or(Error::Overflow)?;
         }
 
-        // 3. Unpaid principal: junior pool, then senior (index haircuts). Unpaid interest
+        // 2. Unpaid principal: junior pool, then senior (index haircuts). Unpaid interest
         //    beyond her investment was never booked and is written off.
         let rest = loss - m_p;
         let (junior_applied, idx) = haircut_index(
@@ -1769,9 +1893,8 @@ impl FundCore {
             senior_applied = sa;
             sm.index = sidx;
         }
-        // 4. The senior prepay she could not cover is senior's loss (it is senior's money).
-        let senior_prepay_lost = senior_out - m_s;
-        sm.total_borrows -= core::cmp::min(sm.total_borrows, senior_out);
+        // 3. The voucher value she could not cover is senior's loss (senior guaranteed it).
+        let senior_prepay_lost = v_rest - m_s;
         if senior_prepay_lost > 0 {
             let sunder = to_underlying(&env, sm.total_shares, sm.index).unwrap_or(0);
             sm.index = haircut_index(&env, sm.index, sunder, senior_prepay_lost)
@@ -1780,17 +1903,20 @@ impl FundCore {
         }
         save_market(&env, false, &union, &sm);
         if let Some(b) = book.as_mut() {
-            b.senior_out = 0;
+            b.repaid = b.value;
+            b.interest_paid = b.interest_accrued;
+            b.fee_due = 0;
             save_book(&env, &union, &token_id, b);
         }
         let ub = Counter::Borrows(union.clone());
         i_add(&env, &ub, -core::cmp::min(i_get(&env, &ub), loss))?;
+        let dues_paid = 0;
+        let dues = 0;
 
         ln.defaulted = true;
         ln.closed = true;
         close_loan(&env, &union, &token_id, &ln);
         save_loan(&env, &union, &token_id, &ln)?;
-        end_vouchers(&env, &union, &token_id)?;
         LoanDefaulted {
             union,
             token_id,
@@ -1961,10 +2087,56 @@ impl FundCore {
         load_loan(&env, &union, &token_id).ok()
     }
 
-    pub fn food_token(env: Env, union: Address, token_id: BytesN<32>) -> Option<FoodToken> {
-        env.storage()
+    /// The food token with its last draw date (0: none) and whether it lapsed (25 Oct).
+    pub fn food_token(env: Env, union: Address, token_id: BytesN<32>) -> Option<FoodTokenView> {
+        let ft: FoodToken = env
+            .storage()
             .persistent()
-            .get(&DataKey::FoodToken(union, token_id))
+            .get(&DataKey::FoodToken(union.clone(), token_id.clone()))?;
+        let f = final_of(&env, &DataKey::FoodTokenFinal(union, token_id));
+        Some(FoodTokenView {
+            member: ft.member,
+            amount: ft.amount,
+            hours: ft.hours,
+            from_date: ft.from_date,
+            final_date: f.as_ref().map_or(0, |f| f.final_date),
+            lapsed: f.is_some_and(|f| f.lapsed),
+            loan: ft.loan,
+        })
+    }
+
+    /// Anyone, after the last draw date (25 Oct): an undrawn food token lapses. The entry stays, so the id is never
+    /// attested or drawn again; no funds move. The oracle relays it to Polygon (burnToken) after its own checks.
+    pub fn lapse_food_token(env: Env, union: Address, token_id: BytesN<32>) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        let ft: FoodToken = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FoodToken(union.clone(), token_id.clone()))
+            .ok_or(Error::NoFoodToken)?;
+        if ft.loan.drawn() {
+            return Err(Error::FoodTokenUsed);
+        }
+        let fk = DataKey::FoodTokenFinal(union.clone(), token_id.clone());
+        let mut f = final_of(&env, &fk).ok_or(Error::NotLapsedYet)?;
+        if f.lapsed {
+            return Err(Error::FoodTokenLapsed);
+        }
+        if env.ledger().timestamp() <= f.final_date {
+            return Err(Error::NotLapsedYet);
+        }
+        f.lapsed = true;
+        env.storage().persistent().set(&fk, &f);
+        bump_key(&env, &fk);
+        FoodTokenLapsed {
+            union,
+            token_id,
+            member: ft.member,
+            final_date: f.final_date,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(())
     }
 
     /// Open loans per union and borrower (R43); closed ones are in the events.

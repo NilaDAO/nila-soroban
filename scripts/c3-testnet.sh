@@ -174,7 +174,7 @@ L1=$(printf '01%.0s' {1..32})
 T1=$(printf 'f1%.0s' {1..32})
 tx stellar contract invoke --id "$CORE" --source ${P}-attester -- \
   attest_food_token --attester ${P}-attester --union "$UNION" --token_id "$T1" \
-  --member ${P}-member --amount $((400 * NIN)) --from_date 0 >/dev/null
+  --member ${P}-member --amount $((400 * NIN)) >/dev/null
 TX_DRAW=$(tx stellar contract invoke --id "$CORE" --source ${P}-member -- \
   draw_loan --union "$UNION" --member ${P}-member --token_id "$T1" --loan_id "$L1" --cash $((500 * NIN)))
 expect "cash at hand after the draw" "$(view "$FX" cash_at_hand --union "$UNION")" "\"$((1501 * NIN))\""

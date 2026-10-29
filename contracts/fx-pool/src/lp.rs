@@ -128,6 +128,18 @@ pub struct VoucherFloorSet {
     pub usdc: i128,
 }
 
+/// Rupees added to an open offer no LP has accepted yet (25 Oct): one offer grows instead of a new one each time.
+#[contractevent]
+pub struct OfferMerged {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub offer_id: u64,
+    pub added: i128,
+    pub inr: i128,
+    pub expires: u64,
+}
+
 #[contractevent]
 pub struct OfferPosted {
     #[topic]
@@ -474,49 +486,7 @@ impl FxPoolContract {
         if expires <= now || expires > now + MAX_CASH_OUT_TERM {
             return Err(Error::BadExpiry);
         }
-        let mut ids = offers_of(&env, &union);
-        if ids.len() >= MAX_OPEN_OFFERS {
-            return Err(Error::TooManyOffers);
-        }
-        let id = env
-            .storage()
-            .instance()
-            .get(&DataKey::NextOffer)
-            .unwrap_or(0u64)
-            + 1;
-        env.storage().instance().set(&DataKey::NextOffer, &id);
-        let empty = String::from_str(&env, "");
-        save_offer(
-            &env,
-            id,
-            &Offer {
-                union: union.clone(),
-                kind,
-                inr,
-                expires,
-                state: OfferState::Open,
-                lp: None,
-                usdc: 0,
-                inr_per_usd: 0,
-                sep24_id: empty.clone(),
-                quote_id: empty,
-                from_lp: 0,
-                from_domestic: 0,
-                from_offshore: 0,
-            },
-        );
-        ids.push_back(id);
-        let k = DataKey::OffersOf(union.clone());
-        env.storage().persistent().set(&k, &ids);
-        bump(&env, &k);
-        OfferPosted {
-            union,
-            offer_id: id,
-            kind,
-            inr,
-            expires,
-        }
-        .publish(&env);
+        let id = open_offer(&env, &union, kind, inr, expires)?;
         bump_instance(&env);
         Ok(id)
     }
@@ -760,4 +730,84 @@ impl FxPoolContract {
     pub fn anchor(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::Anchor)
     }
+}
+
+/// An open offer of the union's rupees (post_offer, and the cash scan's own Collect over the treasury, 24 Oct).
+/// Merged (25 Oct): while the union has an open offer of the same kind no LP has accepted yet, the rupees are added
+/// to it (up to the most one offer can be, the max scan) and its expiry moved to the later one, instead of a new
+/// offer; the id returned is that offer's.
+pub(crate) fn open_offer(
+    env: &Env,
+    union: &Address,
+    kind: OfferKind,
+    inr: i128,
+    expires: u64,
+) -> Result<u64, Error> {
+    let mut ids = offers_of(env, union);
+    let now = env.ledger().timestamp();
+    for oid in ids.iter() {
+        if let Ok(mut o) = load_offer(env, oid) {
+            if o.kind == kind
+                && o.state == OfferState::Open
+                && o.expires > now
+                && o.inr + inr <= max_scan(env)
+            {
+                o.inr += inr;
+                o.expires = core::cmp::max(o.expires, expires);
+                save_offer(env, oid, &o);
+                OfferMerged {
+                    union: union.clone(),
+                    offer_id: oid,
+                    added: inr,
+                    inr: o.inr,
+                    expires: o.expires,
+                }
+                .publish(env);
+                return Ok(oid);
+            }
+        }
+    }
+    if ids.len() >= MAX_OPEN_OFFERS {
+        return Err(Error::TooManyOffers);
+    }
+    let id = env
+        .storage()
+        .instance()
+        .get(&DataKey::NextOffer)
+        .unwrap_or(0u64)
+        + 1;
+    env.storage().instance().set(&DataKey::NextOffer, &id);
+    let empty = String::from_str(env, "");
+    save_offer(
+        env,
+        id,
+        &Offer {
+            union: union.clone(),
+            kind,
+            inr,
+            expires,
+            state: OfferState::Open,
+            lp: None,
+            usdc: 0,
+            inr_per_usd: 0,
+            sep24_id: empty.clone(),
+            quote_id: empty,
+            from_lp: 0,
+            from_domestic: 0,
+            from_offshore: 0,
+        },
+    );
+    ids.push_back(id);
+    let k = DataKey::OffersOf(union.clone());
+    env.storage().persistent().set(&k, &ids);
+    bump(env, &k);
+    OfferPosted {
+        union: union.clone(),
+        offer_id: id,
+        kind,
+        inr,
+        expires,
+    }
+    .publish(env);
+    Ok(id)
 }

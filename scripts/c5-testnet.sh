@@ -107,7 +107,7 @@ TX_RATE_TABLE=$(tx stellar contract invoke --id "$MACH" --source ${P}-union -- s
 
 log "L13: the leader registers the owner's tractor, 40 h a week; the owner confirms (N9)"
 MACHINE=$(stellar contract invoke --id "$MACH" --source ${P}-leader -- register_machine --leader ${P}-leader \
-  --union "$UNION" --owner ${P}-owner --machine_type 1 --hours_per_week 40 --photos_hash "$H" 2>/dev/null)
+  --union "$UNION" --owner ${P}-owner --machine_type 1 --acres_per_week 40 --photos_hash "$H" 2>/dev/null)
 TX_CONFIRM=$(tx stellar contract invoke --id "$MACH" --source ${P}-owner -- \
   confirm_machine --owner ${P}-owner --machine_id "$MACHINE")
 
@@ -130,7 +130,7 @@ L=$(printf '0a%.0s' {1..32})
 log "F2: her food token attested with the plan's recommendation (400 cash, 10 hours)"
 TX_ATTEST=$(tx stellar contract invoke --id "$CORE" --source ${P}-attester -- attest_food_token \
   --attester ${P}-attester --union "$UNION" --token_id "$L" --member ${P}-member \
-  --amount $((400 * NIN)) --hours 10 --from_date 0)
+  --amount $((400 * NIN)) --hours 10)
 log "N10: she accepts the loan: 400 cash + 10 machine hours (senior earmarks 10 × ₹700)"
 TX_DRAW=$(tx stellar contract invoke --id "$CORE" --source ${P}-member -- draw_loan --union "$UNION" \
   --member ${P}-member --token_id "$L" --cash $((400 * NIN)) --hours 10)
