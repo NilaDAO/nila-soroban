@@ -177,6 +177,12 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
 | `Pending` | instance | `Pending{signer, at}`: a proposed recovery and when it may take effect |
 | `Session` | instance | u64: until when a leader of the union may sign for the account |
 
+29 Oct (key backup, K1a): no stored type changed. A present `Pending` now **freezes** the account: `__check_auth`
+refuses every signature (`Frozen`, error 8), `start_session` and `set_signer` are refused, and a proposal removes
+`Session`. `cancel_recovery` takes the union's multisig account (the factory's `union`), no longer the account's
+signer. Running accounts get the code through the factory's timelocked `propose_account_wasm` / `apply_account_wasm`,
+then `upgrade` on each account.
+
 ## account_factory (26 Oct): one per union, admin = the union's multisig account
 
 | Key | Tier | Value |
