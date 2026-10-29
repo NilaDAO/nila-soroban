@@ -107,7 +107,7 @@ TX_RATE_TABLE=$(tx stellar contract invoke --id "$MACH" --source ${P}-union -- s
 
 log "L13: the leader registers the owner's tractor, 40 h a week; the owner confirms (N9)"
 MACHINE=$(stellar contract invoke --id "$MACH" --source ${P}-leader -- register_machine --leader ${P}-leader \
-  --union "$UNION" --owner ${P}-owner --machine_type 1 --hours_per_week 40 --photos_hash "$H" 2>/dev/null)
+  --union "$UNION" --owner ${P}-owner --machine_type 1 --acres_per_week 40 --photos_hash "$H" 2>/dev/null)
 TX_CONFIRM=$(tx stellar contract invoke --id "$MACH" --source ${P}-owner -- \
   confirm_machine --owner ${P}-owner --machine_id "$MACHINE")
 

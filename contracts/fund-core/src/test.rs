@@ -2184,7 +2184,7 @@ fn voucher_is_debt_from_the_draw_and_its_hours_stay_hers() {
     assert_eq!(c.senior_earmark(&fx.union), value);
     let sm = c.get_senior_market(&fx.union);
     assert_eq!((sm.cash, sm.total_borrows), (10_000 * NIN - value, value));
-    assert_eq!(mc.voucher(&fx.union, &id).unwrap().hours, 600);
+    assert_eq!(mc.voucher(&fx.union, &id).unwrap().units, 600);
     // Her lock counts the voucher's value too (R27): she owes more than her 2,000.
     let p = c.position(&fx.union, &fx.borrower);
     assert_eq!(p.locked, p.invested);
@@ -2247,13 +2247,13 @@ fn hours_can_be_added_to_a_share_taken_up() {
         .try_draw_loan(&fx.union, &fx.borrower, &id, &0, &0)
         .is_err());
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &300);
-    assert_eq!(mc.voucher(&fx.union, &id).unwrap().hours, 300);
+    assert_eq!(mc.voucher(&fx.union, &id).unwrap().units, 300);
     assert_eq!(c.senior_earmark(&fx.union), 3 * HOUR);
     v.assert_conserved();
     // A month on, 2 more hours: the same voucher, the first 3 hours' interest accrued to then.
     fx.at(T0 + 30 * 86_400);
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &200);
-    assert_eq!(mc.voucher(&fx.union, &id).unwrap().hours, 500);
+    assert_eq!(mc.voucher(&fx.union, &id).unwrap().units, 500);
     let b = c.voucher_book(&fx.union, &id).unwrap();
     assert_eq!((b.hours, b.value, b.reserve), (500, 5 * HOUR, 5 * HOUR));
     assert!(b.interest_accrued > 0);
@@ -2264,6 +2264,53 @@ fn hours_can_be_added_to_a_share_taken_up() {
         (10_000 * NIN - 5 * HOUR, 5 * HOUR)
     );
     v.assert_conserved();
+}
+
+/// A crop share's token id as FoodToken packs it: crop code at bit 204, area in m² at bit 148; `tag` in the low byte.
+fn share_token(env: &Env, crop_code: u64, m2: u64, tag: u8) -> BytesN<32> {
+    let mut b = [0u8; 32];
+    b[31] = tag;
+    for (shift, width, v) in [(204u32, 20u32, crop_code), (148, 24, m2)] {
+        for i in 0..width {
+            if (v >> i) & 1 == 1 {
+                let bit = shift + i;
+                b[31 - (bit / 8) as usize] |= 1 << (bit % 8);
+            }
+        }
+    }
+    BytesN::from_array(env, &b)
+}
+
+/// Executive decision 27 Oct: vouchers count acres; a claim never exceeds the crop share's own area (read from its
+/// token id), and the union's price for the crop (trailer × sugarcane) beats the type's price.
+#[test]
+fn acres_are_capped_by_the_shares_area_and_priced_by_its_crop() {
+    let v = vsetup();
+    let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
+    let id = share_token(&fx.env, 2000, 4046, 1); // sugarcane (family 2), one acre: 100 centi acres
+    assert_eq!(mc.share_of(&id), (2, 100));
+    c.attest_food_token(
+        &fx.attester,
+        &fx.union,
+        &id,
+        &fx.borrower,
+        &(400 * NIN),
+        &600,
+    );
+    c.draw_loan(&fx.union, &fx.borrower, &id, &(400 * NIN), &600); // 6 tractor acres
+                                                                   // More than the share's area is refused, whatever she signed.
+    assert!(mc
+        .try_claim(&v.owner, &v.machine, &fx.union, &id, &600, &101)
+        .is_err());
+    // The union prices tractor work on sugarcane at twice the acre: one acre uses two tractor acres.
+    mc.set_crop_rate(&fx.union, &1, &2, &Some(tractor(2 * NIN)));
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &600, &100);
+    assert_eq!(mc.voucher(&fx.union, &id).unwrap().used, 200);
+    assert_eq!(fx.token().balance(&v.owner), 2 * HOUR);
+    v.assert_conserved();
+    // Removing the crop's price brings the type's back.
+    mc.set_crop_rate(&fx.union, &1, &2, &None);
+    assert_eq!(mc.rate_for_crop(&fx.union, &1, &2), mc.rate(&fx.union, &1));
 }
 
 #[test]
@@ -2303,17 +2350,17 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
     );
     assert_eq!(
         mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &1000, &1100),
-        Err(Ok(ME::TooManyHours))
+        Err(Ok(ME::TooMuchWork))
     );
     assert_eq!(
         mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &1500, &1500),
-        Err(Ok(ME::TooManyHours))
+        Err(Ok(ME::TooMuchWork))
     );
     let small = mc.register_machine(&fx.leader, &fx.union, &v.owner, &1, &3, &id);
     mc.confirm_machine(&v.owner, &small);
     assert_eq!(
         mc.try_claim(&v.owner, &small, &fx.union, &id, &1000, &400),
-        Err(Ok(ME::TooManyHours))
+        Err(Ok(ME::TooMuchWork))
     );
     // On hold (R83): no claims.
     mc.set_hold(&v.owner, &v.machine, &true, &1);
@@ -2449,7 +2496,7 @@ fn self_claim_rate_rise_and_handing_hours_back() {
         (sm1.cash - sm0.cash, sm0.total_borrows - sm1.total_borrows),
         (HOUR, HOUR)
     );
-    assert_eq!(mc.voucher(&fx.union, &id2).unwrap().hours, 100);
+    assert_eq!(mc.voucher(&fx.union, &id2).unwrap().units, 100);
     assert_eq!(c.senior_earmark(&fx.union), HOUR);
     // Not more than she has unclaimed.
     assert!(c
@@ -2466,7 +2513,7 @@ fn self_claim_rate_rise_and_handing_hours_back() {
         .try_return_voucher(&fx.borrower, &fx.union, &id2, &100)
         .is_err());
     assert_eq!(
-        mc.voucher(&fx.union, &id2).unwrap().hours - mc.voucher(&fx.union, &id2).unwrap().used,
+        mc.voucher(&fx.union, &id2).unwrap().units - mc.voucher(&fx.union, &id2).unwrap().used,
         100
     );
     v.assert_conserved();

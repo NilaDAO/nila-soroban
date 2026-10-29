@@ -787,7 +787,7 @@ fn lend_vouchers(
     now: u64,
 ) -> Result<i128, Error> {
     let mc = MachineryClient::new(env, &cfg(env).machinery.ok_or(Error::NotMachinery)?);
-    let per_hour = mc.value_per_tractor_hour(union);
+    let per_hour = mc.value_per_tractor_acre(union);
     let value = per_hour
         .checked_mul(i128::from(hours))
         .ok_or(Error::Overflow)?
