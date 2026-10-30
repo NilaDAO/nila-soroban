@@ -10,18 +10,18 @@ use soroban_sdk::{contractclient, contracttype, Address, BytesN, Env};
 
 pub mod upgrade;
 
-/// ~5s ledgers → 17,280 ledgers / day (network-configured; documented assumption).
+// ~5s ledgers → 17,280 ledgers / day (network-configured; documented assumption).
 pub const DAY_IN_LEDGERS: u32 = 17_280;
-/// Extend instance/persistent when TTL falls below 30 days.
+// Extend instance/persistent when TTL falls below 30 days.
 pub const TTL_THRESHOLD: u32 = 30 * DAY_IN_LEDGERS;
-/// Extend to 120 days (TAD: instance extended on every interaction).
+// Extend to 120 days (TAD: instance extended on every interaction).
 pub const TTL_BUMP: u32 = 120 * DAY_IN_LEDGERS;
 
 pub fn bump_instance(env: &Env) {
     env.storage().instance().extend_ttl(TTL_THRESHOLD, TTL_BUMP);
 }
 
-/// Tranche discriminant. Matches `ICore.Tranche`.
+// Tranche discriminant. Matches `ICore.Tranche`.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Tranche {
@@ -39,18 +39,18 @@ pub struct MarketLite {
     pub claimable_principal: i128,
 }
 
-/// A loan as read by the app (`get_loan`). Not stored this way: since C6 the loan lives inside
-/// its food token entry (one loan per token, the token id is the loan id), without copies of the
-/// borrower or token, and with its flags packed (fund_core `LoanState`).
+// A loan as fund_core works with it (the app reads `food_token` and its flags, 30 Oct). Not stored this way: since C6 the loan lives inside
+// its food token entry (one loan per token, the token id is the loan id), without copies of the
+// borrower or token, and with its flags packed (fund_core `LoanState`).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Loan {
     pub borrower: Address,
-    /// Cash part handed out by the leader (D9).
+    // Cash part handed out by the leader (D9).
     pub principal: i128,
     pub rate_bp: u32,
     pub drawdown_ts: u64,
-    /// Detected end of season reported by the oracle; 0 until reported (no EOS, no default).
+    // Detected end of season reported by the oracle; 0 until reported (no EOS, no default).
     pub maturity_ts: u64,
     pub principal_paid: i128,
     pub interest_paid: i128,
@@ -61,15 +61,15 @@ pub struct Loan {
     pub closed: bool,
 }
 
-/// Membership is holding a land title the union minted (land_title contract).
+// Membership is holding a land title the union minted (land_title contract).
 #[contractclient(name = "LandTitleClient")]
 pub trait LandTitleTrait {
     fn holds_title(union: Address, account: Address) -> bool;
-    /// A title in any union: a member somewhere, so never a senior investor.
+    // A title in any union: a member somewhere, so never a senior investor.
     fn holds_any_title(account: Address) -> bool;
 }
 
-/// Trust-wide roles in the roles contract, set by the admin (the trust's multisig, R75).
+// Trust-wide roles in the roles contract, set by the admin (the trust's multisig, R75).
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -79,7 +79,7 @@ pub enum Role {
     Core = 2,
 }
 
-/// Officer roles inside one union, set by the union account (3 of 5, D12).
+// Officer roles inside one union, set by the union account (3 of 5, D12).
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -95,54 +95,54 @@ pub trait RolesTrait {
     fn has_role(account: Address, role: Role) -> bool;
 }
 
-/// What fund_core asks of fx_pool (C3). fx_pool never reads back into fund_core inside
-/// these calls (TAD §7.1).
+// What fund_core asks of fx_pool (C3). fx_pool never reads back into fund_core inside
+// these calls (TAD §7.1).
 #[contractclient(name = "FxPoolClient")]
 pub trait FxPoolTrait {
-    /// The cash part of a draw was handed out of the union's cash at hand (D9, R35).
+    // The cash part of a draw was handed out of the union's cash at hand (D9, R35).
     fn settle_cash(union: Address, amount: i128) -> i128;
-    /// R10: authorise or deauthorise her nIN trustline around a payout.
+    // R10: authorise or deauthorise her nIN trustline around a payout.
     fn set_member_auth(union: Address, account: Address, authorized: bool);
-    /// Cash at hand: the union's open escrows (R15).
+    // Cash at hand: the union's open escrows (R15).
     fn cash_at_hand(union: Address) -> i128;
 }
 
-/// What fx_pool's cash scan calls on fund_core (R13–R15, R17). fx_pool signs as the payer.
+// What fx_pool's cash scan calls on fund_core (R13–R15, R17). fx_pool signs as the payer.
 #[contractclient(name = "FundCoreClient")]
 pub trait FundCoreTrait {
     fn deposit_junior(union: Address, member: Address, amount: i128);
-    /// mint_senior: a senior investor's USDC, as nIN, into the union's senior pool (R46).
+    // mint_senior: a senior investor's USDC, as nIN, into the union's senior pool (R46).
     fn deposit_senior(union: Address, investor: Address, amount: i128);
     fn repay_loan(union: Address, token_id: BytesN<32>, amount: i128) -> bool;
     fn credit_recovery(union: Address, token_id: BytesN<32>, amount: i128);
     fn deposit_union_treasury(union: Address, amount: i128);
-    /// An escrow expired unsettled: the union keeps the rupees, so its treasury nIN burns.
+    // An escrow expired unsettled: the union keeps the rupees, so its treasury nIN burns.
     fn cover_expired_escrow(union: Address, amount: i128) -> i128;
     fn union_treasury(union: Address) -> i128;
-    /// Senior money set aside for unclaimed voucher hours (the floor under Bring offers).
+    // Senior money set aside for unclaimed voucher hours (the floor under Bring offers).
     fn senior_earmark(union: Address) -> i128;
-    /// machinery only: an owner claimed work on a voucher (`units`: the centi tractor acres they
-    /// used); pay the owner `amount` in full from the voucher's reserve (26 Oct: the voucher is
-    /// the member's, its debt is separate).
+    // machinery only: an owner claimed work on a voucher (`units`: the centi tractor acres they
+    // used); pay the owner `amount` in full from the voucher's reserve (26 Oct: the voucher is
+    // the member's, its debt is separate).
     fn pay_voucher(union: Address, token_id: BytesN<32>, owner: Address, units: u32, amount: i128);
 }
 
-/// The crop calendar (25 Oct): a crop share's window from its crop code and planned sowing.
+// The crop calendar (25 Oct): a crop share's window from its crop code and planned sowing.
 #[contractclient(name = "CropCalendarClient")]
 pub trait CropCalendarTrait {
-    /// (opening, last second of the last sowing day), or None outside every sowing window.
+    // (opening, last second of the last sowing day), or None outside every sowing window.
     fn window(crop_code: u32, sos: u64) -> Option<(u64, u64)>;
 }
 
-/// What fund_core asks of the machinery contract (C5).
+// What fund_core asks of the machinery contract (C5).
 #[contractclient(name = "MachineryClient")]
 pub trait MachineryTrait {
-    /// The value of one tractor acre (the voucher's unit): machine type 1's whole price an acre (27 Oct).
+    // The value of one tractor acre (the voucher's unit): machine type 1's whole price an acre (27 Oct).
     fn value_per_tractor_acre(union: Address) -> i128;
-    /// A drawn loan's voucher part: centi tractor acres of machinery for her (R36, R51; acres since 27 Oct).
+    // A drawn loan's voucher part: centi tractor acres of machinery for her (R36, R51; acres since 27 Oct).
     fn grant(union: Address, member: Address, token_id: BytesN<32>, units: u32);
-    /// The loan defaulted: unclaimed work lapses.
+    // The loan defaulted: unclaimed work lapses.
     fn void(union: Address, token_id: BytesN<32>);
-    /// She hands back `units` unclaimed centi tractor acres (26 Oct, deducted from her debt).
+    // She hands back `units` unclaimed centi tractor acres (26 Oct, deducted from her debt).
     fn take_back(union: Address, token_id: BytesN<32>, units: u32);
 }

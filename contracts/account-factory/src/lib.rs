@@ -3,8 +3,8 @@
 //! Nila accounts (members, leaders, machine owners, LPs; nila-account) and holds the settings
 //! they read. No master key over all unions: its admin is the union's own account, a Stellar
 //! multisig (3 of 5, D12), which also names the union's leaders in roles and may propose an
-//! account's recovery. The admin sets the SMS key (the node's key that sends the one-time SMS
-//! link; with one leader it may propose a keypad member's new key), the recovery wait, the session length and the contracts
+//! account's recovery. The admin sets the recovery wait (no SMS key since 29 Oct: two leaders
+//! recover a lost phone), the session length and the contracts
 //! a leader session reaches; a new account code and the factory's own code take effect only
 //! after the timelock (nila_common::upgrade). Anyone may create an account (the member's app,
 //! a leader's app at L14): its union is this factory's and its address follows from the key,
@@ -69,12 +69,14 @@ pub struct PendingWasm {
 pub enum DataKey {
     Union, // admin: the union's multisig account
     Roles,
-    SmsKey,
     Wait,
     SessionLen,
     SessionContracts,
     AccountWasm,
     PendingWasm,
+    /// The LP pledge (30 Oct): the fx_pool that may lock and unlock an account's USDC, and the USDC.
+    FxPool,
+    Usdc,
 }
 
 #[contractevent]
@@ -111,12 +113,10 @@ pub struct AccountFactory;
 
 #[contractimpl]
 impl AccountFactory {
-    #[allow(clippy::too_many_arguments)]
     pub fn __constructor(
         env: Env,
         union: Address,
         roles: Address,
-        sms_key: Address,
         wait: u64,
         session_len: u64,
         session_contracts: Vec<Address>,
@@ -125,7 +125,6 @@ impl AccountFactory {
         let s = env.storage().instance();
         s.set(&DataKey::Union, &union);
         s.set(&DataKey::Roles, &roles);
-        s.set(&DataKey::SmsKey, &sms_key);
         s.set(&DataKey::Wait, &wait.clamp(WAIT_MIN, WAIT_MAX));
         s.set(
             &DataKey::SessionLen,
@@ -166,12 +165,6 @@ impl AccountFactory {
 
     // ---------- settings (the union's multisig) ----------
 
-    pub fn set_sms_key(env: Env, sms_key: Address) {
-        require_union(&env);
-        env.storage().instance().set(&DataKey::SmsKey, &sms_key);
-        bump_instance(&env);
-    }
-
     pub fn set_wait(env: Env, wait: u64) -> Result<(), Error> {
         require_union(&env);
         if !(WAIT_MIN..=WAIT_MAX).contains(&wait) {
@@ -193,6 +186,14 @@ impl AccountFactory {
             .set(&DataKey::SessionContracts, &contracts);
         bump_instance(&env);
         Ok(())
+    }
+
+    /// The LP pledge (30 Oct): the fx_pool whose positions put liens on the accounts' USDC.
+    pub fn set_pledge(env: Env, fx_pool: Address, usdc: Address) {
+        require_union(&env);
+        env.storage().instance().set(&DataKey::FxPool, &fx_pool);
+        env.storage().instance().set(&DataKey::Usdc, &usdc);
+        bump_instance(&env);
     }
 
     /// A new account code: each account moves to it with its own `upgrade` once the timelock
@@ -235,9 +236,6 @@ impl AccountFactory {
     pub fn roles(env: Env) -> Address {
         get(&env, DataKey::Roles)
     }
-    pub fn sms_key(env: Env) -> Address {
-        get(&env, DataKey::SmsKey)
-    }
     pub fn wait(env: Env) -> u64 {
         get(&env, DataKey::Wait)
     }
@@ -250,6 +248,14 @@ impl AccountFactory {
     pub fn account_wasm(env: Env) -> BytesN<32> {
         get(&env, DataKey::AccountWasm)
     }
+    pub fn fx_pool(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::FxPool)
+    }
+
+    pub fn usdc(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Usdc)
+    }
+
     pub fn pending_account_wasm(env: Env) -> Option<PendingWasm> {
         env.storage().instance().get(&DataKey::PendingWasm)
     }

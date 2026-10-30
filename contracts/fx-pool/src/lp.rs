@@ -1,27 +1,29 @@
-//! LP offers (C5b, Nov 7; executive decision 12 Oct): member LPs swap cash and USDC for the union, for a fee.
+//! LP offers as a pledge (executive decision 30 Oct, replaces the C5b swap): an LP is a member who
+//! owns USDC and holds the union's cash for a while, for a fee. Her USDC never changes owner.
 //!
-//! - An **LP** is a member of the union with a land title, accepted by the trust's anchor after
-//!   SEP-12 (R20). She never lends or guarantees.
-//! - **Bring** (a member wants a loan and the drawer has no cash, R18, R21): the leader posts the
-//!   rupees needed. An LP accepts at the quote (the rate is fixed at accept), brings the rupees, and
-//!   on the leader's scan the union pays her the USDC plus her fee. Her rupees join the union's cash
-//!   at hand (a 7-day escrow) until the draw hands them out (executive decision, 12 Oct). The USDC comes from the union's pool: first LP-collected USDC, then
-//!   senior USDC above the **voucher floor**, domestic before offshore (D1, R24).
-//! - **Collect** (a member repaid in cash and no other borrower takes it, R19, R22): the leader
-//!   posts the spare rupees. An LP accepts and signs a
-//!   USDC approve that lapses at the offer's expiry (R23). On the scan the union takes her USDC
-//!   (less her fee) and she takes the rupees, which leave the union's cash at hand.
-//! - Each accepted offer stores the anchor's SEP-24 transaction id and the SEP-38 quote id (R23).
-//!   `accept` needs the anchor's signature over them (C9b): fx_pool pays an LP only for a swap the
-//!   anchor recorded (C16), and only at the USDC the anchor quoted, before the quote runs out.
-//! - A no-show costs nothing: the offer expires and any reservation or approve lapses.
+//! - An **LP** is a member of the union with a land title, accepted by the trust's anchor (K1, R20),
+//!   on a Nila account (nila-account), which carries the lien.
+//! - **Collect** (the union has spare cash): the leader posts the rupees. An LP accepts at the fix:
+//!   her account locks USDC worth 110% of them (`lock`, refused above her free USDC). On the
+//!   leader's scan she takes the rupees, which leave the union's cash at hand, and her position
+//!   grows (owed rupees, locked USDC). No USDC moves.
+//! - **Bring** (the union wants its cash back): only an LP whose position owes the union, at most
+//!   what she owes. She brings the rupees less her 1% fee (the union's cost, covered from its
+//!   treasury); on the scan they join the cash at hand (a 7-day escrow), her position shrinks and
+//!   her account unlocks the USDC pro rata (all of it at the close). No pool USDC reaches her.
+//! - **Call and claim:** a leader calls a position; after 7 days' notice the union's multisig
+//!   claims through her account (`nila-account.claim`): USDC worth what she owes at today's fix,
+//!   at most the locked, to the union's account; the rest unlocks.
+//! - Each accepted offer stores the anchor's SEP-24 transaction id and the SEP-38 quote id;
+//!   `accept` needs the anchor's signature over them (C9b), so the anchor records every change.
+//! - A no-show costs nothing: the offer expires and a Collect's lock is released.
 
 use super::*;
 use soroban_sdk::{xdr::ToXdr, String};
 
 /// What the anchor's swap key signs for one accept (C9b): this prefix, then the XDR of
-/// (fx_pool, offer_id, lp, sep24_id, quote_id, usdc, valid_until).
-pub const ACCEPT_PREFIX: &[u8] = b"nila-lp-accept-v1";
+/// (fx_pool, offer_id, lp, sep24_id, quote_id, usdc, valid_until); usdc = USDC to lock (Collect) or to unlock (Bring).
+pub const ACCEPT_PREFIX: &[u8] = b"nila-lp-accept-v2";
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,33 +62,81 @@ pub struct Offer {
     pub expires: u64,
     pub state: OfferState,
     pub lp: Option<Address>,
-    /// USDC paid to her (Bring) or taken from her (Collect), fee included, fixed at accept.
+    /// USDC locked in her account (Collect, at accept) or unlocked (Bring, at the scan).
     pub usdc: i128,
     pub inr_per_usd: i128,
     pub sep24_id: String,
     pub quote_id: String,
-    /// Where a Bring's USDC is reserved from (R24).
+    /// Unused since the pledge (30 Oct; were a swap's USDC sources): kept so stored offers still read.
     pub from_lp: i128,
     pub from_domestic: i128,
     pub from_offshore: i128,
 }
 
-/// What an offer pays or takes at today's fix (C9): the anchor's SEP-38 price reads it.
+/// What an offer locks or unlocks at today's fix (C9, the anchor's SEP-38 price reads it).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Quote {
-    /// USDC paid to her (Bring, fee added) or taken from her (Collect, fee taken off).
+    /// Collect: USDC her account locks (110% of the rupees at the fix). Bring: the rupees' USDC
+    /// value at the fix (what unlocks depends on her position: `bring_unlock`).
     pub usdc: i128,
-    /// Her fee in USDC.
-    pub fee: i128,
+    /// Bring: her fee in rupees (nIN units), off the cash she brings; Collect: 0.
+    pub fee_inr: i128,
     pub fee_bp: u32,
     pub inr_per_usd: i128,
     /// The fix's expiry: a quote after it fails at accept with StaleOracle.
     pub valid_until: u64,
-    /// USDC still allowed out today under the daily cap (a Bring pays out of it).
-    pub day_left: i128,
-    /// USDC the union could pay a Bring now: LP-collected plus senior above the voucher floor.
-    pub usdc_free: i128,
+}
+
+/// An LP's holding of the union's cash (30 Oct): rupees owed, the USDC locked in her account for
+/// them, since when, and when a leader called it back.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Position {
+    pub owed: i128,
+    pub locked: i128,
+    pub opened: u64,
+    pub called_at: Option<u64>,
+}
+
+/// What an LP's Nila account does for fx_pool (nila-account): the lien on her own USDC.
+#[allow(dead_code)]
+#[soroban_sdk::contractclient(name = "LienClient")]
+pub trait LienTrait {
+    fn lock(env: Env, amount: i128) -> i128;
+    fn unlock(env: Env, amount: i128) -> i128;
+}
+
+#[contractevent]
+pub struct PositionChanged {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub lp: Address,
+    pub owed: i128,
+    pub locked: i128,
+}
+
+#[contractevent]
+pub struct PositionCalled {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub lp: Address,
+    pub owed: i128,
+    pub claimable_from: u64,
+}
+
+#[contractevent]
+pub struct PositionClaimed {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub lp: Address,
+    pub usdc: i128,
+    pub inr: i128,
+    pub inr_per_usd: i128,
+    pub unlocked: i128,
 }
 
 #[contractevent]
@@ -190,8 +240,11 @@ pub struct OfferClosed {
 
 /// At most this many open offers per union.
 pub const MAX_OPEN_OFFERS: u32 = 64;
-/// Average ledger close, for the Collect approve's expiry ledger.
-const LEDGER_SECONDS: u64 = 5;
+/// A Collect locks 110% of the rupees' USDC at the fix (executive decision 30 Oct, Q3; below 105%
+/// nothing happens by itself: a leader may call).
+pub const LOCK_MARGIN_BP: i128 = 11_000;
+/// Notice after a call before the union may claim (Q4).
+pub const CALL_NOTICE: u64 = 7 * DAY;
 
 fn p_get(env: &Env, k: &DataKey) -> i128 {
     env.storage().persistent().get(k).unwrap_or(0)
@@ -204,11 +257,6 @@ fn p_set(env: &Env, k: &DataKey, v: i128) {
 
 fn voucher_floor(env: &Env, union: &Address) -> i128 {
     p_get(env, &DataKey::VoucherFloor(union.clone()))
-}
-
-fn senior_total(env: &Env, union: &Address) -> i128 {
-    p_get(env, &DataKey::SeniorUsdc(union.clone(), Tag::Domestic))
-        + p_get(env, &DataKey::SeniorUsdc(union.clone(), Tag::Offshore))
 }
 
 fn load_offer(env: &Env, id: u64) -> Result<Offer, Error> {
@@ -241,22 +289,13 @@ fn drop_open(env: &Env, union: &Address, id: u64) {
     bump(env, &k);
 }
 
-/// Hands a Bring's reserved USDC back to the pool it came from.
-fn release(env: &Env, o: &Offer) {
-    if o.kind != OfferKind::Bring || o.state != OfferState::Accepted {
-        return;
-    }
-    let u = &o.union;
-    let lk = DataKey::LpUsdc(u.clone());
-    p_set(env, &lk, p_get(env, &lk) + o.from_lp);
-    let dk = DataKey::SeniorUsdc(u.clone(), Tag::Domestic);
-    p_set(env, &dk, p_get(env, &dk) + o.from_domestic);
-    let ok = DataKey::SeniorUsdc(u.clone(), Tag::Offshore);
-    p_set(env, &ok, p_get(env, &ok) + o.from_offshore);
-}
-
 fn close(env: &Env, id: u64, o: &mut Offer, state: OfferState) {
-    release(env, o);
+    // A Collect accepted but not handed over: her lock goes.
+    if o.kind == OfferKind::Collect && o.state == OfferState::Accepted && o.usdc > 0 {
+        if let Some(lp) = &o.lp {
+            LienClient::new(env, lp).unlock(&o.usdc);
+        }
+    }
     o.state = state;
     save_offer(env, id, o);
     drop_open(env, &o.union, id);
@@ -268,40 +307,6 @@ fn close(env: &Env, id: u64, o: &mut Offer, state: OfferState) {
     .publish(env);
 }
 
-/// USDC paid out today (temporary storage: it only matters for the day).
-fn day_out(env: &Env) -> i128 {
-    env.storage()
-        .temporary()
-        .get(&DataKey::DayOut(env.ledger().timestamp() / DAY))
-        .unwrap_or(0)
-}
-
-/// The daily cap on USDC out (R76, C15): 2,500 USDC at launch.
-fn check_day_out(env: &Env, usdc: i128) -> Result<(), Error> {
-    if day_out(env) + usdc > day_cap(env) {
-        return Err(Error::CapExceeded);
-    }
-    Ok(())
-}
-
-/// (LP-collected USDC, senior USDC above the floor) a Bring may use. The floor is the admin's,
-/// but never below the USDC value of senior money fund_core holds back for unclaimed voucher
-/// hours (rounded up, so the floor never sits below the earmark).
-fn bring_room(env: &Env, union: &Address, inr_per_usd: i128) -> Result<(i128, i128), Error> {
-    let lp = p_get(env, &DataKey::LpUsdc(union.clone()));
-    let held = FundCoreClient::new(env, &core_addr(env)?).senior_earmark(union);
-    let held_usdc = (held * RATE_ONE + inr_per_usd - 1) / inr_per_usd;
-    let floor = core::cmp::max(voucher_floor(env, union), held_usdc);
-    Ok((lp, core::cmp::max(0, senior_total(env, union) - floor)))
-}
-
-fn day_cap(env: &Env) -> i128 {
-    env.storage()
-        .instance()
-        .get(&DataKey::DailyCap)
-        .unwrap_or(0)
-}
-
 fn lp_fee_bp(env: &Env) -> u32 {
     env.storage()
         .instance()
@@ -309,7 +314,8 @@ fn lp_fee_bp(env: &Env) -> u32 {
         .unwrap_or(DEFAULT_LP_FEE_BP)
 }
 
-/// The USDC for `inr` rupees at the attester's fix, with her fee (same maths in `accept` and `quote`).
+/// What `inr` rupees lock (Collect) or are worth (Bring) at the attester's fix, and a Bring's
+/// rupee fee (same maths in `accept` and `quote`).
 fn price(env: &Env, kind: OfferKind, inr: i128) -> Result<Quote, Error> {
     let rate: RateFix = env
         .storage()
@@ -324,20 +330,89 @@ fn price(env: &Env, kind: OfferKind, inr: i128) -> Result<Quote, Error> {
         .map(|v| v / rate.inr_per_usd)
         .ok_or(Error::CapExceeded)?;
     let fee_bp = lp_fee_bp(env);
-    let fee = base * i128::from(fee_bp) / 10_000;
-    let usdc = match kind {
-        OfferKind::Bring => base + fee,
-        OfferKind::Collect => base - fee,
+    let (usdc, fee_inr) = match kind {
+        // Rounded up: the lock never sits below 110%.
+        OfferKind::Collect => ((base * LOCK_MARGIN_BP + 9_999) / 10_000, 0),
+        // Whole rupees, rounded down: she hands over notes.
+        OfferKind::Bring => (
+            base,
+            inr * i128::from(fee_bp) / 10_000 / NIN_UNIT * NIN_UNIT,
+        ),
     };
     Ok(Quote {
         usdc,
-        fee,
+        fee_inr,
         fee_bp,
         inr_per_usd: rate.inr_per_usd,
         valid_until: rate.valid_until,
-        day_left: 0,
-        usdc_free: 0,
     })
+}
+
+fn load_position(env: &Env, union: &Address, lp: &Address) -> Option<Position> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Position(union.clone(), lp.clone()))
+}
+
+fn save_position(env: &Env, union: &Address, lp: &Address, p: &Position) {
+    let k = DataKey::Position(union.clone(), lp.clone());
+    let lk = DataKey::LpsOwing(union.clone());
+    let mut lps: Vec<Address> = env.storage().persistent().get(&lk).unwrap_or(vec![env]);
+    let at = lps.first_index_of(lp);
+    if p.owed <= 0 {
+        env.storage().persistent().remove(&k);
+        if let Some(i) = at {
+            lps.remove(i);
+        }
+    } else {
+        env.storage().persistent().set(&k, p);
+        bump(env, &k);
+        if at.is_none() {
+            lps.push_back(lp.clone());
+        }
+    }
+    env.storage().persistent().set(&lk, &lps);
+    bump(env, &lk);
+    PositionChanged {
+        union: union.clone(),
+        lp: lp.clone(),
+        owed: core::cmp::max(p.owed, 0),
+        locked: if p.owed <= 0 { 0 } else { p.locked },
+    }
+    .publish(env);
+}
+
+fn add_lp_owed(env: &Env, union: &Address, d: i128) {
+    let k = DataKey::LpOwed(union.clone());
+    p_set(env, &k, p_get(env, &k) + d);
+}
+
+/// USDC a Bring of `inr` unlocks: pro rata, all at the close.
+fn unlock_for(p: &Position, inr: i128) -> i128 {
+    if inr >= p.owed {
+        p.locked
+    } else {
+        p.locked * inr / p.owed
+    }
+}
+
+/// USDC the union may claim from a called position after the notice: what she owes at today's
+/// fix (rounded up), at most the locked; 0 before.
+fn claimable(env: &Env, p: &Position) -> Result<i128, Error> {
+    match p.called_at {
+        Some(t) if env.ledger().timestamp() >= t + CALL_NOTICE => {}
+        _ => return Ok(0),
+    }
+    let rate: RateFix = env
+        .storage()
+        .instance()
+        .get(&DataKey::Rate)
+        .ok_or(Error::StaleOracle)?;
+    if env.ledger().timestamp() > rate.valid_until {
+        return Err(Error::StaleOracle);
+    }
+    let need = (p.owed * RATE_ONE + rate.inr_per_usd - 1) / rate.inr_per_usd;
+    Ok(core::cmp::min(need, p.locked))
 }
 
 fn is_lp(env: &Env, union: &Address, lp: &Address) -> bool {
@@ -541,51 +616,26 @@ impl FxPoolContract {
         );
         env.crypto().ed25519_verify(&key, &msg, &sig);
         let q = price(&env, o.kind, o.inr)?;
-        if q.usdc != usdc {
-            return Err(Error::QuoteChanged);
-        }
-        let usdc_addr: Address = get(&env, &DataKey::Usdc);
         match o.kind {
-            OfferKind::Bring => {
-                let usdc = q.usdc;
-                // LP-collected USDC first, then senior above the floor, domestic before offshore.
-                let u = o.union.clone();
-                let lk = DataKey::LpUsdc(u.clone());
-                let (lp_free, senior_free) = bring_room(&env, &u, q.inr_per_usd)?;
-                let from_lp = core::cmp::min(usdc, lp_free);
-                check_day_out(&env, usdc)?;
-                let need = usdc - from_lp;
-                if need > senior_free {
-                    return Err(if senior_total(&env, &u) >= need {
-                        Error::BelowVoucherFloor
-                    } else {
-                        Error::NoUsdc
-                    });
-                }
-                let dk = DataKey::SeniorUsdc(u.clone(), Tag::Domestic);
-                let from_domestic = core::cmp::min(need, p_get(&env, &dk));
-                let from_offshore = need - from_domestic;
-                let ok = DataKey::SeniorUsdc(u, Tag::Offshore);
-                p_set(&env, &lk, p_get(&env, &lk) - from_lp);
-                p_set(&env, &dk, p_get(&env, &dk) - from_domestic);
-                p_set(&env, &ok, p_get(&env, &ok) - from_offshore);
-                o.usdc = usdc;
-                o.from_lp = from_lp;
-                o.from_domestic = from_domestic;
-                o.from_offshore = from_offshore;
-            }
             OfferKind::Collect => {
-                let usdc = q.usdc;
-                let ledgers = ((o.expires - now) / LEDGER_SECONDS + 1) as u32;
-                TokenClient::new(&env, &usdc_addr).approve(
-                    &lp,
-                    &env.current_contract_address(),
-                    &usdc,
-                    &(env.ledger().sequence() + ledgers),
-                );
-                o.usdc = usdc;
+                if q.usdc != usdc {
+                    return Err(Error::QuoteChanged);
+                }
+                // Her account locks it; refused above her free USDC. Nothing leaves her account.
+                LienClient::new(&env, &lp).lock(&usdc);
+            }
+            OfferKind::Bring => {
+                // Only an LP who holds the union's cash brings it back, at most what she owes.
+                let p = load_position(&env, &o.union, &lp).ok_or(Error::NoPosition)?;
+                if p.owed < o.inr {
+                    return Err(Error::NoPosition);
+                }
+                if unlock_for(&p, o.inr) != usdc {
+                    return Err(Error::QuoteChanged);
+                }
             }
         }
+        o.usdc = usdc;
         o.state = OfferState::Accepted;
         o.lp = Some(lp.clone());
         o.inr_per_usd = q.inr_per_usd;
@@ -616,29 +666,44 @@ impl FxPoolContract {
             return Err(Error::OfferState);
         }
         let lp = o.lp.clone().ok_or(Error::OfferState)?;
-        let me = env.current_contract_address();
-        let usdc = TokenClient::new(&env, &get(&env, &DataKey::Usdc));
+        let mut p = load_position(&env, &o.union, &lp).unwrap_or(Position {
+            owed: 0,
+            locked: 0,
+            opened: env.ledger().timestamp(),
+            called_at: None,
+        });
         match o.kind {
-            OfferKind::Bring => {
-                check_day_out(&env, o.usdc)?;
-                check_room(&env, &o.union, o.inr)?;
-                open_escrow(&env, &o.union, &lp, Purpose::Bring, o.inr);
-                let k = DataKey::DayOut(env.ledger().timestamp() / DAY);
-                env.storage().temporary().set(&k, &(day_out(&env) + o.usdc));
-                env.storage().temporary().extend_ttl(
-                    &k,
-                    nila_common::DAY_IN_LEDGERS,
-                    nila_common::DAY_IN_LEDGERS * 2,
-                );
-                usdc.transfer(&me, &lp, &o.usdc)
-            }
             OfferKind::Collect => {
-                usdc.transfer_from(&me, &lp, &me, &o.usdc);
-                let lk = DataKey::LpUsdc(o.union.clone());
-                p_set(&env, &lk, p_get(&env, &lk) + o.usdc);
+                // She takes the rupees: they leave the cash at hand; her lock (made at accept) stays.
                 settle(&env, &o.union, o.inr);
+                p.owed += o.inr;
+                p.locked += o.usdc;
+                add_lp_owed(&env, &o.union, o.inr);
+            }
+            OfferKind::Bring => {
+                if p.owed < o.inr {
+                    return Err(Error::NoPosition);
+                }
+                // She brings the rupees less her fee; the fee is the union's cost, from its treasury.
+                let fee = price(&env, OfferKind::Bring, o.inr)?.fee_inr;
+                let cash = o.inr - fee;
+                check_room(&env, &o.union, cash)?;
+                open_escrow(&env, &o.union, &lp, Purpose::Bring, cash);
+                if fee > 0 {
+                    FundCoreClient::new(&env, &core_addr(&env)?)
+                        .cover_expired_escrow(&o.union, &fee);
+                }
+                let unlock = unlock_for(&p, o.inr);
+                p.owed -= o.inr;
+                p.locked -= unlock;
+                add_lp_owed(&env, &o.union, -o.inr);
+                o.usdc = unlock;
+                if unlock > 0 {
+                    LienClient::new(&env, &lp).unlock(&unlock);
+                }
             }
         }
+        save_position(&env, &o.union, &lp, &p);
         o.state = OfferState::Done;
         save_offer(&env, offer_id, &o);
         drop_open(&env, &o.union, offer_id);
@@ -684,6 +749,76 @@ impl FxPoolContract {
         Ok(())
     }
 
+    /// A leader asks an LP for the union's cash back: after 7 days' notice the union may claim.
+    pub fn call_position(
+        env: Env,
+        leader: Address,
+        union: Address,
+        lp: Address,
+    ) -> Result<u64, Error> {
+        require_not_paused(&env)?;
+        require_leader(&env, &union, &leader)?;
+        let mut p = load_position(&env, &union, &lp).ok_or(Error::NoPosition)?;
+        let now = env.ledger().timestamp();
+        if p.called_at.is_none() {
+            p.called_at = Some(now);
+            let k = DataKey::Position(union.clone(), lp.clone());
+            env.storage().persistent().set(&k, &p);
+            bump(&env, &k);
+        }
+        let from = p.called_at.unwrap_or(now) + CALL_NOTICE;
+        PositionCalled {
+            union,
+            lp,
+            owed: p.owed,
+            claimable_from: from,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(from)
+    }
+
+    /// Her account books the union's claim (nila-account.claim, started by the union's multisig): it
+    /// moved `usdc` to the union's account. Clears the rupees that USDC is worth at today's fix;
+    /// returns the USDC her account unlocks (the rest, once nothing is owed). Her account calls
+    /// this, never the other way round (no re-entry), so fx_pool never moves her USDC.
+    pub fn book_claim(env: Env, union: Address, lp: Address, usdc: i128) -> Result<i128, Error> {
+        lp.require_auth();
+        let mut p = load_position(&env, &union, &lp).ok_or(Error::NoPosition)?;
+        let can = claimable(&env, &p)?;
+        if usdc <= 0 || usdc > can {
+            return Err(Error::NotClaimable);
+        }
+        let rate: RateFix = env
+            .storage()
+            .instance()
+            .get(&DataKey::Rate)
+            .ok_or(Error::StaleOracle)?;
+        // `claimable` rounds up, so USDC that covers what she owes clears all of it.
+        let need = (p.owed * RATE_ONE + rate.inr_per_usd - 1) / rate.inr_per_usd;
+        let cleared = if usdc >= need {
+            p.owed
+        } else {
+            usdc * rate.inr_per_usd / RATE_ONE
+        };
+        p.owed -= cleared;
+        p.locked -= usdc;
+        add_lp_owed(&env, &union, -cleared);
+        let unlocked = if p.owed <= 0 { p.locked } else { 0 };
+        save_position(&env, &union, &lp, &p);
+        PositionClaimed {
+            union,
+            lp,
+            usdc,
+            inr: cleared,
+            inr_per_usd: rate.inr_per_usd,
+            unlocked,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(unlocked)
+    }
+
     // ---------- views ----------
 
     pub fn offer(env: Env, offer_id: u64) -> Option<Offer> {
@@ -698,7 +833,7 @@ impl FxPoolContract {
         env.storage().persistent().get(&DataKey::LpOf(union, lp))
     }
 
-    /// USDC LPs brought into the union (domestic).
+    /// Legacy (C5b swaps, before 30 Oct): USDC LPs paid in through Collect swaps; nothing adds to it now.
     pub fn lp_usdc(env: Env, union: Address) -> i128 {
         p_get(&env, &DataKey::LpUsdc(union))
     }
@@ -707,16 +842,45 @@ impl FxPoolContract {
         voucher_floor(&env, &union)
     }
 
-    /// C9: what a Bring or Collect of `inr` rupees pays or takes at today's fix (SEP-38 reads it),
-    /// with the day cap and the union's free USDC left. The same price `accept` fixes while the fix
-    /// and the fee stay; accept may still refuse (pause, offer state, cap, USDC left).
+    /// C9: what a Collect of `inr` rupees locks, or a Bring is worth and its rupee fee, at today's
+    /// fix (SEP-38 reads it). The same price `accept` fixes while the fix and the fee stay.
     pub fn quote(env: Env, union: Address, kind: OfferKind, inr: i128) -> Result<Quote, Error> {
+        let _ = union;
         check_amount(&env, inr)?;
-        let mut q = price(&env, kind, inr)?;
-        q.day_left = core::cmp::max(0, day_cap(&env) - day_out(&env));
-        let (lp_free, senior_free) = bring_room(&env, &union, q.inr_per_usd)?;
-        q.usdc_free = lp_free + senior_free;
-        Ok(q)
+        price(&env, kind, inr)
+    }
+
+    /// USDC a Bring of `inr` would unlock for her now (the anchor's Bring quote).
+    pub fn bring_unlock(env: Env, union: Address, lp: Address, inr: i128) -> Result<i128, Error> {
+        let p = load_position(&env, &union, &lp).ok_or(Error::NoPosition)?;
+        if inr <= 0 || p.owed < inr {
+            return Err(Error::NoPosition);
+        }
+        Ok(unlock_for(&p, inr))
+    }
+
+    pub fn position(env: Env, union: Address, lp: Address) -> Option<Position> {
+        load_position(&env, &union, &lp)
+    }
+
+    /// The union's LPs who hold its cash (each one's `position` says how much).
+    pub fn lps_owing(env: Env, union: Address) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LpsOwing(union))
+            .unwrap_or(vec![&env])
+    }
+
+    /// Rupees the union's LPs hold (its cash out with them).
+    pub fn lp_owed(env: Env, union: Address) -> i128 {
+        p_get(&env, &DataKey::LpOwed(union))
+    }
+
+    pub fn claimable(env: Env, union: Address, lp: Address) -> Result<i128, Error> {
+        match load_position(&env, &union, &lp) {
+            Some(p) => claimable(&env, &p),
+            None => Ok(0),
+        }
     }
 
     pub fn swap_key(env: Env) -> Option<BytesN<32>> {
@@ -734,7 +898,7 @@ impl FxPoolContract {
 
 /// An open offer of the union's rupees (post_offer, and the cash scan's own Collect over the treasury, 24 Oct).
 /// Merged (25 Oct): while the union has an open offer of the same kind no LP has accepted yet, the rupees are added
-/// to it (up to the most one offer can be, the max scan) and its expiry moved to the later one, instead of a new
+/// to it (no size limit since 30 Oct) and its expiry moved to the later one, instead of a new
 /// offer; the id returned is that offer's.
 pub(crate) fn open_offer(
     env: &Env,
@@ -747,11 +911,7 @@ pub(crate) fn open_offer(
     let now = env.ledger().timestamp();
     for oid in ids.iter() {
         if let Ok(mut o) = load_offer(env, oid) {
-            if o.kind == kind
-                && o.state == OfferState::Open
-                && o.expires > now
-                && o.inr + inr <= max_scan(env)
-            {
+            if o.kind == kind && o.state == OfferState::Open && o.expires > now {
                 o.inr += inr;
                 o.expires = core::cmp::max(o.expires, expires);
                 save_offer(env, oid, &o);
