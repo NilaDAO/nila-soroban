@@ -15,14 +15,14 @@
 
 use soroban_sdk::{contractevent, contracttype, BytesN, Env};
 
-/// 48 hours at deploy (C15).
+// 48 hours at deploy (C15).
 pub const DEFAULT_DELAY: u64 = 48 * 3_600;
-/// Upper bound: a larger delay would freeze the code for good.
+// Upper bound: a larger delay would freeze the code for good.
 pub const MAX_DELAY: u64 = 30 * 24 * 3_600;
-/// A matured lowering must be applied within this window, or it is void.
+// A matured lowering must be applied within this window, or it is void.
 pub const LOWER_WINDOW: u64 = 7 * 24 * 3_600;
 
-/// Prefixed so they never collide with a contract's own instance keys.
+// Prefixed so they never collide with a contract's own instance keys.
 #[contracttype]
 #[derive(Clone)]
 pub enum UpgradeKey {
@@ -61,7 +61,7 @@ pub struct UpgradeCancelled {
     pub wasm_hash: BytesN<32>,
 }
 
-/// `eta` is when a lowered delay may be applied; 0 once the delay is in force.
+// `eta` is when a lowered delay may be applied; 0 once the delay is in force.
 #[contractevent]
 pub struct UpgradeDelaySet {
     pub delay: u64,
@@ -87,7 +87,7 @@ pub fn pending_delay(env: &Env) -> Option<PendingDelay> {
     env.storage().instance().get(&UpgradeKey::UpgPendingDelay)
 }
 
-/// False when `new_delay` exceeds `MAX_DELAY`.
+// False when `new_delay` exceeds `MAX_DELAY`.
 pub fn set_delay(env: &Env, new_delay: u64) -> bool {
     if new_delay > MAX_DELAY {
         return false;
@@ -130,7 +130,7 @@ pub fn set_delay(env: &Env, new_delay: u64) -> bool {
     true
 }
 
-/// Files the upgrade, replacing (and evented as cancelling) any earlier filing.
+// Files the upgrade, replacing (and evented as cancelling) any earlier filing.
 pub fn propose(env: &Env, wasm_hash: BytesN<32>) {
     cancel(env);
     let eta = env.ledger().timestamp().saturating_add(delay(env));
@@ -144,7 +144,7 @@ pub fn propose(env: &Env, wasm_hash: BytesN<32>) {
     UpgradeProposed { wasm_hash, eta }.publish(env);
 }
 
-/// False when nothing is filed or its delay has not passed.
+// False when nothing is filed or its delay has not passed.
 pub fn execute(env: &Env) -> bool {
     match pending(env) {
         Some(p) if env.ledger().timestamp() >= p.eta => {
@@ -156,7 +156,7 @@ pub fn execute(env: &Env) -> bool {
     }
 }
 
-/// Cancels the filed upgrade and any filed lowering of the delay.
+// Cancels the filed upgrade and any filed lowering of the delay.
 pub fn cancel(env: &Env) {
     env.storage()
         .instance()

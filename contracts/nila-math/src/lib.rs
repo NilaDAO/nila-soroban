@@ -13,40 +13,40 @@
 
 use soroban_sdk::{contracttype, Env, U256};
 
-/// Maker-style RAY (1e27). Index starts at RAY (= 1.0).
+// Maker-style RAY (1e27). Index starts at RAY (= 1.0).
 pub const RAY: i128 = 1_000_000_000_000_000_000_000_000_000;
 
-/// Ratio scale used for junior/senior bucket thresholds (1e18).
-/// TAD §7.1: "threshold ratio rescaled off WAD" — we keep 18-dec WAD for
-/// ratio precision; amounts themselves are 7-dec nIN.
+// Ratio scale used for junior/senior bucket thresholds (1e18).
+// TAD §7.1: "threshold ratio rescaled off WAD" — we keep 18-dec WAD for
+// ratio precision; amounts themselves are 7-dec nIN.
 pub const WAD: i128 = 1_000_000_000_000_000_000;
 
-/// Basis-point denominator.
+// Basis-point denominator.
 pub const BPS: i128 = 10_000;
 
-/// Seconds in a 365-day year (matches Solidity `365 days`).
+// Seconds in a 365-day year (matches Solidity `365 days`).
 pub const YEAR: u64 = 365 * 24 * 60 * 60;
 
-/// Default unbonding window (14 days).
+// Default unbonding window (14 days).
 pub const DEFAULT_UNBONDING: u64 = 14 * 24 * 60 * 60;
 
-/// nIN decimals on Stellar (classic asset / SAC).
+// nIN decimals on Stellar (classic asset / SAC).
 pub const NIN_DECIMALS: u32 = 7;
 
-/// One whole nIN (₹1) in atomic units.
+// One whole nIN (₹1) in atomic units.
 pub const NIN: i128 = 10_000_000;
 
-/// Dust close threshold: 0.1 nIN at 7 decimals (Solidity used 1e17 at 18 dec).
+// Dust close threshold: 0.1 nIN at 7 decimals (Solidity used 1e17 at 18 dec).
 pub const DUST: i128 = 1_000_000;
 
-/// Tranche-1 per-loan / per-swap cap: ₹10,000 at 7 decimals.
+// Tranche-1 per-loan / per-swap cap: ₹10,000 at 7 decimals.
 pub const DEFAULT_PER_LOAN_CAP: i128 = 10_000 * NIN;
 
-/// Default protocol fees (basis points of interest).
+// Default protocol fees (basis points of interest).
 pub const DEFAULT_TREASURY_FEE_BP: u32 = 100; // 1%
 pub const DEFAULT_RAINY_FEE_BP: u32 = 200; // 2%
 
-/// Kinked utilisation rate curve (per union).
+// Kinked utilisation rate curve (per union).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RateParams {
@@ -57,7 +57,7 @@ pub struct RateParams {
     pub max_rate_bp: u32,
 }
 
-/// `floor(a * b / d)` with U256 intermediates. Returns `None` on sign/zero/overflow.
+// `floor(a * b / d)` with U256 intermediates. Returns `None` on sign/zero/overflow.
 pub fn mul_div(env: &Env, a: i128, b: i128, d: i128) -> Option<i128> {
     if a < 0 || b < 0 || d <= 0 {
         return None;
@@ -67,18 +67,18 @@ pub fn mul_div(env: &Env, a: i128, b: i128, d: i128) -> Option<i128> {
     quot.to_u128().and_then(|x| i128::try_from(x).ok())
 }
 
-/// Convert an nIN amount into shares at `index` (RAY-scaled). Index 0 is a pool written off
-/// in full, not "unset": it has no share price, so this returns `None`.
+// Convert an nIN amount into shares at `index` (RAY-scaled). Index 0 is a pool written off
+// in full, not "unset": it has no share price, so this returns `None`.
 pub fn to_shares(env: &Env, amount: i128, index: i128) -> Option<i128> {
     mul_div(env, amount, RAY, index)
 }
 
-/// Convert shares back to nIN at `index` (RAY-scaled). At index 0 shares are worth nothing.
+// Convert shares back to nIN at `index` (RAY-scaled). At index 0 shares are worth nothing.
 pub fn to_underlying(env: &Env, shares: i128, index: i128) -> Option<i128> {
     mul_div(env, shares, index, RAY)
 }
 
-/// Simple interest on leftover principal over `elapsed` seconds.
+// Simple interest on leftover principal over `elapsed` seconds.
 pub fn accrued_interest(env: &Env, principal: i128, rate_bp: u32, elapsed: u64) -> Option<i128> {
     if principal <= 0 || rate_bp == 0 || elapsed == 0 {
         return Some(0);
@@ -88,7 +88,7 @@ pub fn accrued_interest(env: &Env, principal: i128, rate_bp: u32, elapsed: u64) 
     mul_div(env, num_left, i128::from(elapsed), denom)
 }
 
-/// Junior-first (then senior) index haircut. Returns `(applied, new_index)`.
+// Junior-first (then senior) index haircut. Returns `(applied, new_index)`.
 pub fn haircut_index(env: &Env, index: i128, underlying: i128, loss: i128) -> Option<(i128, i128)> {
     if loss <= 0 || index == 0 || underlying <= 0 {
         return Some((0, index));
@@ -99,7 +99,7 @@ pub fn haircut_index(env: &Env, index: i128, underlying: i128, loss: i128) -> Op
     Some((applied, new_index))
 }
 
-/// Bump a RAY index by distributing `cash_in` across `total_shares`.
+// Bump a RAY index by distributing `cash_in` across `total_shares`.
 pub fn index_bump(env: &Env, index: i128, total_shares: i128, cash_in: i128) -> Option<i128> {
     if cash_in <= 0 || total_shares <= 0 {
         return Some(index);
@@ -108,8 +108,8 @@ pub fn index_bump(env: &Env, index: i128, total_shares: i128, cash_in: i128) -> 
     index.checked_add(delta)
 }
 
-/// Junior / senior share ratio in WAD. `None` if senior underlying is zero
-/// (caller treats that as "ratio check disabled / passes").
+// Junior / senior share ratio in WAD. `None` if senior underlying is zero
+// (caller treats that as "ratio check disabled / passes").
 pub fn bucket_ratio_wad(
     env: &Env,
     junior_underlying: i128,
@@ -121,7 +121,7 @@ pub fn bucket_ratio_wad(
     mul_div(env, junior_underlying, WAD, senior_underlying)
 }
 
-/// Kinked utilisation curve → borrow rate in basis points.
+// Kinked utilisation curve → borrow rate in basis points.
 pub fn preview_rate_bp(params: &RateParams, util_bp: u32) -> u32 {
     if params.kink_util_bp == 0 {
         return params.base_rate_bp.min(params.max_rate_bp);
@@ -144,7 +144,7 @@ pub fn preview_rate_bp(params: &RateParams, util_bp: u32) -> u32 {
     rate.min(params.max_rate_bp)
 }
 
-/// Utilisation in basis points: borrows / (idle cash + borrows).
+// Utilisation in basis points: borrows / (idle cash + borrows).
 pub fn utilisation_bp(env: &Env, borrows: i128, idle_cash: i128) -> Option<u32> {
     let denom = borrows.checked_add(idle_cash)?;
     if denom <= 0 {

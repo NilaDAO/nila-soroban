@@ -15,9 +15,7 @@ use soroban_sdk::{
     contract, contractimpl, contractmeta, contracttype, token::TokenClient, vec, Address, BytesN,
     Env, IntoVal, Vec,
 };
-use types::{
-    LoanState, Market, Milestone, UnionBook, FLAG_CLOSED, FLAG_DEFAULTED, FLAG_DRAWN, FLAG_OVERDUE,
-};
+use types::{LoanState, Market, UnionBook, FLAG_CLOSED, FLAG_DEFAULTED, FLAG_DRAWN, FLAG_OVERDUE};
 
 pub use types::{
     Config, Error, FoodToken, FoodTokenFinal, FoodTokenView, Investor, Position, UnionConfig,
@@ -43,31 +41,31 @@ contractmeta!(
     val = "testnet-short: one day is one second"
 );
 
-/// One day in ledger seconds. The `testnet-short-windows` build makes it one second so a
-/// testnet rehearsal can reach the payback date; never deploy that build to mainnet.
+// One day in ledger seconds. The `testnet-short-windows` build makes it one second so a
+// testnet rehearsal can reach the payback date; never deploy that build to mainnet.
 #[cfg(not(feature = "testnet-short-windows"))]
 pub const DAY: u64 = 86_400;
 #[cfg(feature = "testnet-short-windows")]
 pub const DAY: u64 = 1;
 
-/// Payback is never earlier than drawdown + 90 days (LOAN_RULES §1).
+// Payback is never earlier than drawdown + 90 days (LOAN_RULES §1).
 pub const MIN_TERM: u64 = 90 * DAY;
-/// Highest loan rate any union may be given (C14, executive decision 10 Oct): 12.5% simple. The legal
-/// maximum notified under TN Money-Lenders Act s.7 is not yet sourced; once counsel confirms
-/// it, this is raised by a timelocked upgrade, never by a parameter.
+// Highest loan rate any union may be given (C14, executive decision 10 Oct): 12.5% simple. The legal
+// maximum notified under TN Money-Lenders Act s.7 is not yet sourced; once counsel confirms
+// it, this is raised by a timelocked upgrade, never by a parameter.
 pub const MAX_RATE_BP: u32 = 1250;
-/// Share valuation rounds down; this much is forgiven at the gate (stroops).
+// Share valuation rounds down; this much is forgiven at the gate (stroops).
 const GATE_ROUNDING: i128 = 10;
-/// Upgrade timelock at deploy: 48 hours (C15); short builds rehearse it in seconds.
+// Upgrade timelock at deploy: 48 hours (C15); short builds rehearse it in seconds.
 #[cfg(not(feature = "demo-upgrade-delay"))]
 pub const UPGRADE_DELAY: u64 = 2 * DAY;
 #[cfg(feature = "demo-upgrade-delay")]
 pub const UPGRADE_DELAY: u64 = 60;
-/// Unbond request to claim (R28).
+// Unbond request to claim (R28).
 pub const UNBONDING: u64 = 14 * DAY;
-/// Repay window after the end of season (LOAN_RULES §1).
+// Repay window after the end of season (LOAN_RULES §1).
 pub const REPAY_WINDOW: u64 = 21 * DAY;
-/// Open loans per member, for `loans_of` and the lock (R27, R43).
+// Open loans per member, for `loans_of` and the lock (R27, R43).
 pub const MAX_LOANS_PER_MEMBER: u32 = 32;
 
 #[contracttype]
@@ -80,20 +78,20 @@ pub enum DataKey {
     JuniorMarket(Address),
     SeniorInv(Address, Address),
     JuniorInv(Address, Address),
-    /// The oracle's last milestone for a loan (union, token id), written only when reported.
+    // The oracle's last milestone for a loan (union, token id), written only when reported.
     Milestone(Address, BytesN<32>),
     LoansOf(Address, Address),
-    /// The union's counters in one entry (C6): borrows, treasury, rainy day, earmark, on hold.
+    // The union's counters in one entry (C6): borrows, treasury, rainy day, earmark, on hold.
     Union(Address),
-    /// Attested food token (union, Polygon token id) that a loan may be drawn against.
+    // Attested food token (union, Polygon token id) that a loan may be drawn against.
     FoodToken(Address, BytesN<32>),
-    /// Its last draw date and lapsed flag (25 Oct), apart so stored `FoodToken` entries keep their layout.
+    // Its last draw date and lapsed flag (25 Oct), apart so stored `FoodToken` entries keep their layout.
     FoodTokenFinal(Address, BytesN<32>),
-    /// A loan's voucher part (C5).
+    // A loan's voucher part (C5).
     Vouchers(Address, BytesN<32>),
-    /// An owner's settled pending parts, ready to collect (union, owner).
+    // An owner's settled pending parts, ready to collect (union, owner).
     OwnerBalance(Address, Address),
-    /// The crop calendar contract (25 Oct), apart from `Config` so its stored layout stays.
+    // The crop calendar contract (25 Oct), apart from `Config` so its stored layout stays.
     CropCalendar,
 }
 
@@ -102,8 +100,8 @@ pub struct FundCore;
 
 // ---------- storage ----------
 
-/// The crop code (family × 1000 + variety) and planned sowing (unix) packed in a Polygon
-/// FoodToken id: bits 204–223 and 172–203 (FoodTokenUpgradeable.packTokenId).
+// The crop code (family × 1000 + variety) and planned sowing (unix) packed in a Polygon
+// FoodToken id: bits 204–223 and 172–203 (FoodTokenUpgradeable.packTokenId).
 fn crop_and_sos(token_id: &BytesN<32>) -> (u32, u64) {
     let b = token_id.to_array();
     let mut hi = [0u8; 16];
@@ -161,8 +159,8 @@ fn load_market(env: &Env, junior: bool, union: &Address) -> Market {
     m
 }
 
-/// A pool written off in full keeps index 0: its old shares are worth nothing, and it
-/// takes no new money (a fresh deposit would buy shares at par next to them).
+// A pool written off in full keeps index 0: its old shares are worth nothing, and it
+// takes no new money (a fresh deposit would buy shares at par next to them).
 fn require_live(m: &Market) -> Result<(), Error> {
     if m.exists && m.index == 0 {
         Err(Error::PoolWrittenOff)
@@ -185,8 +183,8 @@ fn inv_key(junior: bool, union: &Address, who: &Address) -> DataKey {
     }
 }
 
-/// Reads extend live entries: a passive investor or a loan waiting for its end of season
-/// may not be written for longer than the TTL.
+// Reads extend live entries: a passive investor or a loan waiting for its end of season
+// may not be written for longer than the TTL.
 fn load_inv(env: &Env, junior: bool, union: &Address, who: &Address) -> Investor {
     let key = inv_key(junior, union, who);
     let inv: Option<Investor> = env.storage().persistent().get(&key);
@@ -244,7 +242,7 @@ fn to_view(member: &Address, st: &LoanState) -> Loan {
     }
 }
 
-/// The loan drawn against a food token: read from inside the token's entry (C6).
+// The loan drawn against a food token: read from inside the token's entry (C6).
 fn load_loan(env: &Env, union: &Address, token_id: &BytesN<32>) -> Result<Loan, Error> {
     let key = DataKey::FoodToken(union.clone(), token_id.clone());
     let ft: FoodToken = env
@@ -279,7 +277,7 @@ fn loans_of(env: &Env, union: &Address, member: &Address) -> Vec<BytesN<32>> {
         .unwrap_or(vec![env])
 }
 
-/// A field of the union's one counters entry (`UnionBook`, C6: one entry, not five).
+// A field of the union's one counters entry (`UnionBook`, C6: one entry, not five).
 enum Counter {
     Borrows(Address),
     Treasury(Address),
@@ -338,20 +336,6 @@ fn i_add(env: &Env, c: &Counter, delta: i128) -> Result<(), Error> {
     Ok(())
 }
 
-fn p_get(env: &Env, key: &DataKey) -> i128 {
-    env.storage().persistent().get(key).unwrap_or(0)
-}
-
-fn p_add(env: &Env, key: &DataKey, delta: i128) -> Result<(), Error> {
-    let next = p_get(env, key).checked_add(delta).ok_or(Error::Overflow)?;
-    if next < 0 {
-        return Err(Error::Overflow);
-    }
-    env.storage().persistent().set(key, &next);
-    bump_key(env, key);
-    Ok(())
-}
-
 fn on_hold_add(env: &Env, union: &Address, delta: i32) {
     let mut b = load_union(env, union);
     b.on_hold = if delta > 0 {
@@ -391,14 +375,14 @@ fn require_admin(env: &Env) -> Result<Config, Error> {
     Ok(c)
 }
 
-/// All money into fund_core comes through fx_pool's cash scan (executive decision, 9 Oct).
+// All money into fund_core comes through fx_pool's cash scan (executive decision, 9 Oct).
 fn require_fx_pool(env: &Env) -> Result<Address, Error> {
     let fx = cfg(env).fx_pool.ok_or(Error::NotFxPool)?;
     fx.require_auth();
     Ok(fx)
 }
 
-/// Oracle facts only (D21): it never moves money.
+// Oracle facts only (D21): it never moves money.
 fn require_oracle(env: &Env, who: &Address) -> Result<(), Error> {
     who.require_auth();
     if RolesClient::new(env, &cfg(env).roles).is_oracle(who) {
@@ -408,7 +392,7 @@ fn require_oracle(env: &Env, who: &Address) -> Result<(), Error> {
     }
 }
 
-/// The attester writes facts only (D21), from the one role list in `roles`.
+// The attester writes facts only (D21), from the one role list in `roles`.
 fn require_attester(env: &Env, who: &Address) -> Result<(), Error> {
     who.require_auth();
     if RolesClient::new(env, &cfg(env).roles).has_role(who, &Role::Attester) {
@@ -418,7 +402,7 @@ fn require_attester(env: &Env, who: &Address) -> Result<(), Error> {
     }
 }
 
-/// A leader of that union. No admin override (R5, C11).
+// A leader of that union. No admin override (R5, C11).
 fn require_leader(env: &Env, union: &Address, who: &Address) -> Result<(), Error> {
     who.require_auth();
     if RolesClient::new(env, &cfg(env).roles).is_leader(union, who) {
@@ -438,14 +422,14 @@ fn require_positive(amount: i128) -> Result<(), Error> {
     }
 }
 
-/// Member = holds a land title her union minted (as `balanceOf(landNFT)` on Polygon).
+// Member = holds a land title her union minted (as `balanceOf(landNFT)` on Polygon).
 fn holds_title(env: &Env, union: &Address, who: &Address) -> bool {
     LandTitleClient::new(env, &cfg(env).land_title).holds_title(union, who)
 }
 
 // ---------- loan math ----------
 
-/// Brings the loan's accrued interest up to `now` (simple interest on the cash part, R37).
+// Brings the loan's accrued interest up to `now` (simple interest on the cash part, R37).
 fn accrue(env: &Env, ln: &mut Loan, now: u64) -> Result<(), Error> {
     let out = ln.principal - ln.principal_paid;
     let i = accrued_interest(env, out, ln.rate_bp, now.saturating_sub(ln.last_accrual_ts))
@@ -455,8 +439,8 @@ fn accrue(env: &Env, ln: &mut Loan, now: u64) -> Result<(), Error> {
     Ok(())
 }
 
-/// Payback due date: max(drawdown + 90 days, end of season) + 21 days (R39).
-/// `None` while the oracle has not reported the end of season.
+// Payback due date: max(drawdown + 90 days, end of season) + 21 days (R39).
+// `None` while the oracle has not reported the end of season.
 fn due_ts(ln: &Loan) -> Option<u64> {
     if ln.maturity_ts == 0 {
         return None;
@@ -465,7 +449,7 @@ fn due_ts(ln: &Loan) -> Option<u64> {
     Some(base.saturating_add(REPAY_WINDOW))
 }
 
-/// Principal plus interest she owes today on her open loans in the union (R27).
+// Principal plus interest she owes today on her open loans in the union (R27).
 fn member_owed(env: &Env, union: &Address, member: &Address) -> Result<i128, Error> {
     let now = env.ledger().timestamp();
     let mut owed: i128 = 0;
@@ -512,7 +496,7 @@ fn position(env: &Env, union: &Address, member: &Address) -> Result<Position, Er
 
 // ---------- pools ----------
 
-/// Reserve held for one tranche's own unbond queue; the other tranche is never read (I3).
+// Reserve held for one tranche's own unbond queue; the other tranche is never read (I3).
 fn reserve_for(env: &Env, uc: &UnionConfig, claimable: i128) -> Result<i128, Error> {
     let bump =
         nila_math::mul_div(env, i128::from(uc.safety_bp), claimable, BPS).ok_or(Error::Overflow)?;
@@ -523,7 +507,7 @@ fn reserve_for(env: &Env, uc: &UnionConfig, claimable: i128) -> Result<i128, Err
     Ok(req)
 }
 
-/// Fees first, the rest to the junior pool: the cash part is junior money only (D5, R42).
+// Fees first, the rest to the junior pool: the cash part is junior money only (D5, R42).
 fn distribute_interest(
     env: &Env,
     union: &Address,
@@ -606,8 +590,8 @@ fn request_unbond(
     Ok(snap)
 }
 
-/// After 14 days (R28), when the pool's idle cash covers it and the reserve. `to_wallet` false (the desk,
-/// executive decision 22 Oct): nothing is paid to her wallet; the caller books the amount as cash.
+// After 14 days (R28), when the pool's idle cash covers it and the reserve. `to_wallet` false (the desk,
+// executive decision 22 Oct): nothing is paid to her wallet; the caller books the amount as cash.
 fn claim(
     env: &Env,
     junior: bool,
@@ -672,7 +656,7 @@ fn claim(
     Ok(amount)
 }
 
-/// R10: fx_pool (the nIN SAC admin) authorises her trustline for this payout only.
+// R10: fx_pool (the nIN SAC admin) authorises her trustline for this payout only.
 fn pay_member(env: &Env, union: &Address, who: &Address, amount: i128) -> Result<(), Error> {
     let fx = FxPoolClient::new(env, &cfg(env).fx_pool.ok_or(Error::NotFxPool)?);
     fx.set_member_auth(union, who, &true);
@@ -681,7 +665,7 @@ fn pay_member(env: &Env, union: &Address, who: &Address, amount: i128) -> Result
     Ok(())
 }
 
-/// A closed loan lifts its hold and leaves her open-loan list (the events keep the history).
+// A closed loan lifts its hold and leaves her open-loan list (the events keep the history).
 fn close_loan(env: &Env, union: &Address, token_id: &BytesN<32>, ln: &Loan) {
     if ln.overdue {
         on_hold_add(env, union, -1);
@@ -707,8 +691,8 @@ fn save_book(env: &Env, union: &Address, token_id: &BytesN<32>, b: &VoucherBook)
     bump_key(env, &k);
 }
 
-/// The voucher's interest to `now` (senior's, 26 Oct): simple interest at the loan's rate on what
-/// is still lent.
+// The voucher's interest to `now` (senior's, 26 Oct): simple interest at the loan's rate on what
+// is still lent.
 fn accrue_voucher(env: &Env, b: &mut VoucherBook, rate_bp: u32, now: u64) -> Result<(), Error> {
     let i = accrued_interest(
         env,
@@ -722,12 +706,12 @@ fn accrue_voucher(env: &Env, b: &mut VoucherBook, rate_bp: u32, now: u64) -> Res
     Ok(())
 }
 
-/// What she owes on the voucher part: its value, its interest and the treasury's fee.
+// What she owes on the voucher part: its value, its interest and the treasury's fee.
 fn voucher_owed(b: &VoucherBook) -> i128 {
     b.value - b.repaid + b.interest_accrued - b.interest_paid + b.fee_due
 }
 
-/// Senior is repaid `pay` of the voucher's value (cash in, the loan's borrow out).
+// Senior is repaid `pay` of the voucher's value (cash in, the loan's borrow out).
 fn senior_repaid(env: &Env, union: &Address, pay: i128) {
     let mut sm = load_market(env, false, union);
     sm.cash += pay;
@@ -735,7 +719,7 @@ fn senior_repaid(env: &Env, union: &Address, pay: i128) {
     save_market(env, false, union, &sm);
 }
 
-/// The voucher's interest is senior's income.
+// The voucher's interest is senior's income.
 fn senior_interest(env: &Env, union: &Address, interest: i128) -> Result<(), Error> {
     if interest <= 0 {
         return Ok(());
@@ -753,7 +737,7 @@ fn senior_interest(env: &Env, union: &Address, interest: i128) -> Result<(), Err
     Ok(())
 }
 
-/// At a default: her unclaimed hours lapse and their reserve goes back to senior cash. Returns it.
+// At a default: her unclaimed hours lapse and their reserve goes back to senior cash. Returns it.
 fn void_vouchers(
     env: &Env,
     union: &Address,
@@ -774,9 +758,9 @@ fn void_vouchers(
     Ok(back)
 }
 
-/// The voucher part of a crop share, at the draw or added later (27 Oct): `hours` (centi tractor hours) at the
-/// tractor hour's value, lent by senior (which must back it), set aside in the reserve and owed from `now` with
-/// interest; the hours go onto her voucher. Returns the value.
+// The voucher part of a crop share, at the draw or added later (27 Oct): `hours` (centi tractor hours) at the
+// tractor hour's value, lent by senior (which must back it), set aside in the reserve and owed from `now` with
+// interest; the hours go onto her voucher. Returns the value.
 fn lend_vouchers(
     env: &Env,
     union: &Address,
@@ -876,8 +860,8 @@ impl FundCore {
         Ok(())
     }
 
-    /// Set once: fx_pool can burn treasury cover and gates every payout, so only a
-    /// timelocked upgrade may repoint it.
+    // Set once: fx_pool can burn treasury cover and gates every payout, so only a
+    // timelocked upgrade may repoint it.
     pub fn set_fx_pool(env: Env, fx_pool: Address) -> Result<(), Error> {
         let mut c = require_admin(&env)?;
         if c.fx_pool.is_some() {
@@ -889,7 +873,7 @@ impl FundCore {
         Ok(())
     }
 
-    /// Set once, like the fx_pool link.
+    // Set once, like the fx_pool link.
     pub fn set_machinery(env: Env, machinery: Address) -> Result<(), Error> {
         let mut c = require_admin(&env)?;
         if c.machinery.is_some() {
@@ -901,7 +885,7 @@ impl FundCore {
         Ok(())
     }
 
-    /// The crop calendar that sets a food token's window at attest (25 Oct). Admin; may be moved.
+    // The crop calendar that sets a food token's window at attest (25 Oct). Admin; may be moved.
     pub fn set_crop_calendar(env: Env, calendar: Address) -> Result<(), Error> {
         require_admin(&env)?;
         env.storage()
@@ -911,7 +895,7 @@ impl FundCore {
         Ok(())
     }
 
-    /// Lending terms of one union (R26, R34, R37, R42, R76).
+    // Lending terms of one union (R26, R34, R37, R42, R76).
     pub fn set_union_config(env: Env, union: Address, uc: UnionConfig) -> Result<(), Error> {
         require_admin(&env)?;
         if uc.max_loan < 0 || uc.gate < 0 || uc.safety_floor < 0 {
@@ -941,7 +925,7 @@ impl FundCore {
 
     // ---------- union treasury ----------
 
-    /// One leader of the union (R17).
+    // One leader of the union (R17).
     pub fn withdraw_union_treasury(
         env: Env,
         leader: Address,
@@ -979,9 +963,9 @@ impl FundCore {
         Ok(())
     }
 
-    /// C10 (executive decision, 20 Oct): a leader puts her own nIN into the union treasury, as on Polygon
-    /// (`withdrawUnionTreasury(.., deposit=true)`). Not a cash scan: the rupees behind her nIN were counted
-    /// when it was minted. Her trustline is authorised for this transfer only (R10).
+    // C10 (executive decision, 20 Oct): a leader puts her own nIN into the union treasury, as on Polygon
+    // (`withdrawUnionTreasury(.., deposit=true)`). Not a cash scan: the rupees behind her nIN were counted
+    // when it was minted. Her trustline is authorised for this transfer only (R10).
     pub fn leader_deposit_treasury(
         env: Env,
         leader: Address,
@@ -1007,7 +991,7 @@ impl FundCore {
         Ok(())
     }
 
-    /// Cash-scan TREASURY: the union's own rupees into its treasury (R17), via fx_pool.
+    // Cash-scan TREASURY: the union's own rupees into its treasury (R17), via fx_pool.
     pub fn deposit_union_treasury(env: Env, union: Address, amount: i128) -> Result<(), Error> {
         require_not_paused(&env)?;
         let fx = require_fx_pool(&env)?;
@@ -1025,8 +1009,8 @@ impl FundCore {
         Ok(())
     }
 
-    /// fx_pool only: an escrow expired unsettled (R15). The union kept the rupees, so the
-    /// same nIN burns from its treasury, then its rainy-day fund. Returns what was covered.
+    // fx_pool only: an escrow expired unsettled (R15). The union kept the rupees, so the
+    // same nIN burns from its treasury, then its rainy-day fund. Returns what was covered.
     pub fn cover_expired_escrow(env: Env, union: Address, amount: i128) -> Result<i128, Error> {
         // While paused no draw can settle cash at hand, so no expiry may burn the treasury.
         require_not_paused(&env)?;
@@ -1061,7 +1045,7 @@ impl FundCore {
 
     // ---------- junior (members of the union) ----------
 
-    /// Cash-scan INVEST: fx_pool pays the nIN in for her (R13, R25).
+    // Cash-scan INVEST: fx_pool pays the nIN in for her (R13, R25).
     pub fn deposit_junior(
         env: Env,
         union: Address,
@@ -1085,7 +1069,7 @@ impl FundCore {
         Ok(())
     }
 
-    /// Only the free part: invested minus locked (R27, R28).
+    // Only the free part: invested minus locked (R27, R28).
     pub fn request_unbond_junior(
         env: Env,
         union: Address,
@@ -1107,9 +1091,9 @@ impl FundCore {
         Ok(())
     }
 
-    /// A leader's own junior investment, paid as nIN to her wallet (for treasury deposits). Members never
-    /// hold nIN (executive decision 22 Oct, "No nIN in a member's wallet (desk only)"): they use
-    /// `claim_junior_cash`.
+    // A leader's own junior investment, paid as nIN to her wallet (for treasury deposits). Members never
+    // hold nIN (executive decision 22 Oct, "No nIN in a member's wallet (desk only)"): they use
+    // `claim_junior_cash`.
     pub fn claim_junior(
         env: Env,
         union: Address,
@@ -1132,11 +1116,11 @@ impl FundCore {
         Ok(())
     }
 
-    /// Her junior investment collected over the desk (executive decision 22 Oct): she and a leader of her
-    /// union both sign; the claim's nIN is burned in fund_core and booked against the union's cash at hand,
-    /// as `draw_loan` does for the cash part. No nIN reaches her wallet. The leader hands the notes.
-    /// Her signed QR (24 Oct): she authorises (union, max_shares) only, so any leader of her union may scan
-    /// and submit it once the cash is handed over; one use by its Soroban nonce, expiring at its ledger.
+    // Her junior investment collected over the desk (executive decision 22 Oct): she and a leader of her
+    // union both sign; the claim's nIN is burned in fund_core and booked against the union's cash at hand,
+    // as `draw_loan` does for the cash part. No nIN reaches her wallet. The leader hands the notes.
+    // Her signed QR (24 Oct): she authorises (union, max_shares) only, so any leader of her union may scan
+    // and submit it once the cash is handed over; one use by its Soroban nonce, expiring at its ledger.
     pub fn claim_junior_cash(
         env: Env,
         union: Address,
@@ -1166,8 +1150,8 @@ impl FundCore {
 
     // ---------- senior (T2: LPs who are not members) ----------
 
-    /// fx_pool only (mint_senior): a senior investor holds no land title in any union (executive decision,
-    /// 12 Oct: junior vs senior is simply holding a title or not; R46).
+    // fx_pool only (mint_senior): a senior investor holds no land title in any union (executive decision,
+    // 12 Oct: junior vs senior is simply holding a title or not; R46).
     pub fn deposit_senior(
         env: Env,
         union: Address,
@@ -1236,10 +1220,10 @@ impl FundCore {
 
     // ---------- loans ----------
 
-    /// Food token fact (F2): the attester copies a Polygon FoodToken from the crop plan with
-    /// the amount that may be drawn against it. Its window comes from the crop calendar by the
-    /// token id's crop and planned sowing (25 Oct): from a week before that sowing window up to
-    /// its last day. One loan per token; it can be corrected until a loan is drawn against it.
+    // Food token fact (F2): the attester copies a Polygon FoodToken from the crop plan with
+    // the amount that may be drawn against it. Its window comes from the crop calendar by the
+    // token id's crop and planned sowing (25 Oct): from a week before that sowing window up to
+    // its last day. One loan per token; it can be corrected until a loan is drawn against it.
     #[allow(clippy::too_many_arguments)]
     pub fn attest_food_token(
         env: Env,
@@ -1306,12 +1290,12 @@ impl FundCore {
         Ok(())
     }
 
-    /// The member signs (N10); no oracle voucher (D-c). The loan is drawn against an attested
-    /// food token of hers: from its date, once, and at most its amount when the union's
-    /// `enforce_token_amount` is on. The cash part comes from the
-    /// junior pool only (R33, C8). The leader hands her the rupees from the union's cash
-    /// at hand, so the loan's nIN is burned here, the cash at hand in fx_pool is settled
-    /// oldest first, and no nIN reaches her wallet (D9, R35).
+    // The member signs (N10); no oracle voucher (D-c). The loan is drawn against an attested
+    // food token of hers: from its date, once, and at most its amount when the union's
+    // `enforce_token_amount` is on. The cash part comes from the
+    // junior pool only (R33, C8). The leader hands her the rupees from the union's cash
+    // at hand, so the loan's nIN is burned here, the cash at hand in fx_pool is settled
+    // oldest first, and no nIN reaches her wallet (D9, R35).
     pub fn draw_loan(
         env: Env,
         union: Address,
@@ -1467,10 +1451,10 @@ impl FundCore {
         Ok(())
     }
 
-    /// Cash-scan REPAY: fx_pool pays the nIN in (R14). The order (executive decision 26 Oct): the
-    /// voucher part to senior (its interest, then its value), then junior (interest, then principal),
-    /// then the union treasury's fee for handed-back hours. At most what is owed is taken. Closes
-    /// inside 0.1 nIN (R40); her voucher hours stay hers. Returns true when closed.
+    // Cash-scan REPAY: fx_pool pays the nIN in (R14). The order (executive decision 26 Oct): the
+    // voucher part to senior (its interest, then its value), then junior (interest, then principal),
+    // then the union treasury's fee for handed-back hours. At most what is owed is taken. Closes
+    // inside 0.1 nIN (R40); her voucher hours stay hers. Returns true when closed.
     pub fn repay_loan(
         env: Env,
         union: Address,
@@ -1596,10 +1580,10 @@ impl FundCore {
         Ok(closed)
     }
 
-    /// She hands back `units` unclaimed centi tractor hours (executive decision 26 Oct): their
-    /// whole value comes off what she owes senior and their reserve goes back to senior cash; 5%
-    /// of that value is added as owed to the union treasury. Only while the voucher's value is
-    /// still owed (with nothing owed, unused hours simply stay hers).
+    // She hands back `units` unclaimed centi tractor hours (executive decision 26 Oct): their
+    // whole value comes off what she owes senior and their reserve goes back to senior cash; 5%
+    // of that value is added as owed to the union treasury. Only while the voucher's value is
+    // still owed (with nothing owed, unused hours simply stay hers).
     pub fn return_voucher(
         env: Env,
         member: Address,
@@ -1649,31 +1633,9 @@ impl FundCore {
         Ok(value - fee)
     }
 
-    /// A13: the owner collects her settled pending parts to her wallet (R85); cash at the
-    /// desk through a cash-out (A7).
-    pub fn collect_dues(env: Env, owner: Address, union: Address) -> Result<i128, Error> {
-        require_not_paused(&env)?;
-        owner.require_auth();
-        let k = DataKey::OwnerBalance(union.clone(), owner.clone());
-        let amount = p_get(&env, &k);
-        if amount <= 0 {
-            return Err(Error::NothingToClaim);
-        }
-        p_add(&env, &k, -amount)?;
-        pay_member(&env, &union, &owner, amount)?;
-        DuesCollected {
-            union,
-            owner,
-            amount,
-        }
-        .publish(&env);
-        bump_instance(&env);
-        Ok(amount)
-    }
-
-    /// machinery only: an owner claimed hours on a voucher (D19). The owner is paid `amount` in
-    /// full from the voucher's reserve at once, also after the loan is repaid (executive decision
-    /// 26 Oct: the hours are hers, the debt is separate).
+    // machinery only: an owner claimed hours on a voucher (D19). The owner is paid `amount` in
+    // full from the voucher's reserve at once, also after the loan is repaid (executive decision
+    // 26 Oct: the hours are hers, the debt is separate).
     pub fn pay_voucher(
         env: Env,
         union: Address,
@@ -1712,8 +1674,8 @@ impl FundCore {
         Ok(())
     }
 
-    /// The detected end of season (LOAN_RULES: `maturityTs` = actual EOS). Oracle only;
-    /// set once; not before the drawdown and not in the future.
+    // The detected end of season (LOAN_RULES: `maturityTs` = actual EOS). Oracle only;
+    // set once; not before the drawdown and not in the future.
     pub fn report_maturity(
         env: Env,
         oracle: Address,
@@ -1743,8 +1705,8 @@ impl FundCore {
         Ok(())
     }
 
-    /// Anyone, once the payback date has passed: lending in the union stops until the
-    /// loan is repaid or defaulted (R34, R44). No end of season reported, no flag.
+    // Anyone, once the payback date has passed: lending in the union stops until the
+    // loan is repaid or defaulted (R34, R44). No end of season reported, no flag.
     pub fn flag_overdue(env: Env, union: Address, token_id: BytesN<32>) -> Result<(), Error> {
         // A freeze stops repayment, so it stops the clock's consequences too.
         require_not_paused(&env)?;
@@ -1771,10 +1733,10 @@ impl FundCore {
         Ok(())
     }
 
-    /// Anyone, after the payback date (D-d), which is never earlier than
-    /// `maturityTs + 21 days`. Without a reported end of season there is no default.
-    /// Writes off all she owes, principal and interest. Loss order (D10): her own junior
-    /// investment first (principal and interest), then the junior pool, then senior.
+    // Anyone, after the payback date (D-d), which is never earlier than
+    // `maturityTs + 21 days`. Without a reported end of season there is no default.
+    // Writes off all she owes, principal and interest. Loss order (D10): her own junior
+    // investment first (principal and interest), then the junior pool, then senior.
     pub fn mark_default(env: Env, union: Address, token_id: BytesN<32>) -> Result<(), Error> {
         require_not_paused(&env)?;
         let mut ln = load_loan(&env, &union, &token_id)?;
@@ -1934,8 +1896,8 @@ impl FundCore {
         Ok(())
     }
 
-    /// Money recovered after a default, paid in through fx_pool's cash scan; it goes
-    /// back to the junior pool's shareholders.
+    // Money recovered after a default, paid in through fx_pool's cash scan; it goes
+    // back to the junior pool's shareholders.
     pub fn credit_recovery(
         env: Env,
         union: Address,
@@ -1973,44 +1935,10 @@ impl FundCore {
         Ok(())
     }
 
-    /// Crop milestone fact from the oracle; moves no money (D21).
-    pub fn report_milestone(
-        env: Env,
-        oracle: Address,
-        union: Address,
-        token_id: BytesN<32>,
-        milestone: u32,
-        milestone_digest: BytesN<32>,
-    ) -> Result<(), Error> {
-        require_oracle(&env, &oracle)?;
-        let ln = load_loan(&env, &union, &token_id)?;
-        if ln.closed {
-            return Err(Error::LoanClosed);
-        }
-        let mk = DataKey::Milestone(union.clone(), token_id.clone());
-        env.storage().persistent().set(
-            &mk,
-            &Milestone {
-                milestone,
-                digest: milestone_digest.clone(),
-                ts: env.ledger().timestamp(),
-            },
-        );
-        bump_key(&env, &mk);
-        MilestoneReported {
-            union,
-            token_id,
-            milestone,
-            milestone_digest,
-        }
-        .publish(&env);
-        Ok(())
-    }
-
     // ---------- upgrade (admin, timelock, nila_common::upgrade) ----------
 
-    /// Raising applies at once and voids a filed lowering; lowering applies only when set again
-    /// after the current delay, within 7 days; at most 30 days.
+    // Raising applies at once and voids a filed lowering; lowering applies only when set again
+    // after the current delay, within 7 days; at most 30 days.
     pub fn set_upgrade_delay(env: Env, delay_seconds: u64) -> Result<(), Error> {
         require_admin(&env)?;
         if !upgrade::set_delay(&env, delay_seconds) {
@@ -2028,12 +1956,12 @@ impl FundCore {
         upgrade::pending(&env)
     }
 
-    /// A filed lowering of the delay, if any.
+    // A filed lowering of the delay, if any.
     pub fn pending_delay(env: Env) -> Option<upgrade::PendingDelay> {
         upgrade::pending_delay(&env)
     }
 
-    /// Files the new wasm; `execute_upgrade` applies it once the delay has passed.
+    // Files the new wasm; `execute_upgrade` applies it once the delay has passed.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         require_admin(&env)?;
         upgrade::propose(&env, new_wasm_hash);
@@ -2074,20 +2002,16 @@ impl FundCore {
         lite(&load_market(&env, false, &union))
     }
 
-    /// Her junior position: invested, locked, free, pending, earned (R26, R27, R29).
+    // Her junior position: invested, locked, free, pending, earned (R26, R27, R29).
     pub fn position(env: Env, union: Address, member: Address) -> Result<Position, Error> {
         position(&env, &union, &member)
-    }
-
-    pub fn get_investor_senior(env: Env, union: Address, investor: Address) -> Investor {
-        load_inv(&env, false, &union, &investor)
     }
 
     pub fn get_loan(env: Env, union: Address, token_id: BytesN<32>) -> Option<Loan> {
         load_loan(&env, &union, &token_id).ok()
     }
 
-    /// The food token with its last draw date (0: none) and whether it lapsed (25 Oct).
+    // The food token with its last draw date (0: none) and whether it lapsed (25 Oct).
     pub fn food_token(env: Env, union: Address, token_id: BytesN<32>) -> Option<FoodTokenView> {
         let ft: FoodToken = env
             .storage()
@@ -2105,8 +2029,8 @@ impl FundCore {
         })
     }
 
-    /// Anyone, after the last draw date (25 Oct): an undrawn food token lapses. The entry stays, so the id is never
-    /// attested or drawn again; no funds move. The oracle relays it to Polygon (burnToken) after its own checks.
+    // Anyone, after the last draw date (25 Oct): an undrawn food token lapses. The entry stays, so the id is never
+    // attested or drawn again; no funds move. The oracle relays it to Polygon (burnToken) after its own checks.
     pub fn lapse_food_token(env: Env, union: Address, token_id: BytesN<32>) -> Result<(), Error> {
         require_not_paused(&env)?;
         let ft: FoodToken = env
@@ -2139,19 +2063,19 @@ impl FundCore {
         Ok(())
     }
 
-    /// Open loans per union and borrower (R43); closed ones are in the events.
+    // Open loans per union and borrower (R43); closed ones are in the events.
     pub fn loans_of(env: Env, union: Address, member: Address) -> Vec<BytesN<32>> {
         loans_of(&env, &union, &member)
     }
 
-    /// Payback due date, or None while the end of season is not reported (R39).
+    // Payback due date, or None while the end of season is not reported (R39).
     pub fn due_date(env: Env, union: Address, token_id: BytesN<32>) -> Option<u64> {
         load_loan(&env, &union, &token_id)
             .ok()
             .and_then(|ln| due_ts(&ln))
     }
 
-    /// Loans of the union past payback and not repaid; lending is on hold while > 0 (R34).
+    // Loans of the union past payback and not repaid; lending is on hold while > 0 (R34).
     pub fn on_hold(env: Env, union: Address) -> u32 {
         on_hold(&env, &union)
     }
@@ -2164,34 +2088,18 @@ impl FundCore {
         i_get(&env, &Counter::Rainy(union))
     }
 
-    /// An owner's settled pending parts, ready to collect.
-    pub fn owner_balance(env: Env, union: Address, owner: Address) -> i128 {
-        p_get(&env, &DataKey::OwnerBalance(union, owner))
-    }
-
-    /// Her loan's voucher part: hours, earmark, senior prepay out, owners' pending parts.
-    /// The oracle's last crop milestone for a loan (a fact; it moves no money, D21).
-    pub fn milestone(env: Env, union: Address, token_id: BytesN<32>) -> Option<Milestone> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Milestone(union, token_id))
-    }
-
+    // Her loan's voucher part: hours, earmark, senior prepay out, owners' pending parts.
     pub fn voucher_book(env: Env, union: Address, token_id: BytesN<32>) -> Option<VoucherBook> {
         load_book(&env, &union, &token_id)
     }
 
-    /// Senior cash held back for unclaimed voucher hours.
+    // Senior cash held back for unclaimed voucher hours.
     pub fn senior_earmark(env: Env, union: Address) -> i128 {
         i_get(&env, &Counter::Earmark(union))
     }
 
     pub fn union_borrows(env: Env, union: Address) -> i128 {
         i_get(&env, &Counter::Borrows(union))
-    }
-
-    pub fn is_paused(env: Env) -> bool {
-        require_not_paused(&env).is_err()
     }
 }
 

@@ -773,11 +773,6 @@ fn closed_loans_leave_the_open_list_and_recovery_is_capped() {
         c.try_credit_recovery(&fx.union, &b, &1).unwrap_err(),
         Ok(Error::CapExceeded)
     );
-    assert_eq!(
-        c.try_report_milestone(&fx.oracle, &fx.union, &b, &1, &loan_id(&fx.env, 9))
-            .unwrap_err(),
-        Ok(Error::LoanClosed)
-    );
     fx.assert_conserved();
 }
 
@@ -2112,7 +2107,7 @@ impl Vx {
         MachineryContractClient::new(&self.fx.env, &self.m)
     }
 
-    /// fund_core nIN = pools + treasury + rainy + the voucher reserve + the owner's balance.
+    /// fund_core nIN = pools + treasury + rainy + the voucher reserve.
     fn assert_conserved(&self) {
         let c = self.fx.core();
         let u = &self.fx.union;
@@ -2120,8 +2115,7 @@ impl Vx {
             + c.get_senior_market(u).cash
             + c.union_treasury(u)
             + c.union_rainy_day(u)
-            + c.senior_earmark(u)
-            + c.owner_balance(u, &self.owner);
+            + c.senior_earmark(u);
         assert_eq!(self.fx.token().balance(&self.fx.core_id), books);
     }
 }
