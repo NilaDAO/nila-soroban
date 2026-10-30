@@ -2032,17 +2032,14 @@ impl FundCore {
             .and_then(|ln| due_ts(&ln))
     }
 
-    // Loans of the union past payback and not repaid; lending is on hold while > 0 (R34).
-    pub fn on_hold(env: Env, union: Address) -> u32 {
-        on_hold(&env, &union)
+    // The union's book in one read (30 Oct; was on_hold, union_rainy_day and union_borrows): cash lent out, treasury,
+    // rainy-day fund, the senior earmark and the loans past payback (lending is on hold while on_hold > 0, R34).
+    pub fn union_book(env: Env, union: Address) -> UnionBook {
+        load_union(&env, &union)
     }
 
     pub fn union_treasury(env: Env, union: Address) -> i128 {
         i_get(&env, &Counter::Treasury(union))
-    }
-
-    pub fn union_rainy_day(env: Env, union: Address) -> i128 {
-        i_get(&env, &Counter::Rainy(union))
     }
 
     // Her loan's voucher part: hours, earmark, senior prepay out, owners' pending parts.
@@ -2050,13 +2047,9 @@ impl FundCore {
         load_book(&env, &union, &token_id)
     }
 
-    // Senior cash held back for unclaimed voucher hours.
+    // Senior cash held back for unclaimed voucher hours (fx_pool reads it, so it stays a call of its own).
     pub fn senior_earmark(env: Env, union: Address) -> i128 {
         i_get(&env, &Counter::Earmark(union))
-    }
-
-    pub fn union_borrows(env: Env, union: Address) -> i128 {
-        i_get(&env, &Counter::Borrows(union))
     }
 }
 

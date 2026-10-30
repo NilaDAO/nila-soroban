@@ -140,7 +140,7 @@ impl Fx {
         let books = c.get_junior_market(&self.union).cash
             + c.get_senior_market(&self.union).cash
             + c.union_treasury(&self.union)
-            + c.union_rainy_day(&self.union);
+            + c.union_book(&self.union).rainy;
         assert_eq!(self.token().balance(&self.core_id), books);
     }
 }
@@ -265,7 +265,7 @@ fn draw_then_repay_with_interest_and_fees() {
     assert_eq!(fx.token().balance(&fx.borrower), 0);
     assert_eq!(fx.token().balance(&fx.core_id), 1_500 * NIN);
     assert_eq!(c.get_junior_market(&fx.union).cash, 1_500 * NIN);
-    assert_eq!(c.union_borrows(&fx.union), 500 * NIN);
+    assert_eq!(c.union_book(&fx.union).borrows, 500 * NIN);
     assert_eq!(c.loans_of(&fx.union, &fx.borrower).len(), 1);
     fx.assert_conserved();
 
@@ -281,8 +281,8 @@ fn draw_then_repay_with_interest_and_fees() {
     assert!(ln.closed && !ln.defaulted);
     assert_eq!(ln.interest_paid, interest);
     assert_eq!(c.union_treasury(&fx.union), interest / 100);
-    assert_eq!(c.union_rainy_day(&fx.union), interest * 77 / 10_000);
-    assert_eq!(c.union_borrows(&fx.union), 0);
+    assert_eq!(c.union_book(&fx.union).rainy, interest * 77 / 10_000);
+    assert_eq!(c.union_book(&fx.union).borrows, 0);
     fx.assert_conserved();
 
     // The net interest is shared by both investors through the share value.
@@ -525,7 +525,7 @@ fn overdue_puts_the_union_on_hold_until_repaid() {
     );
     fx.at(T0 + 141 * DAY + 1);
     c.flag_overdue(&fx.union, &id);
-    assert_eq!(c.on_hold(&fx.union), 1);
+    assert_eq!(c.union_book(&fx.union).on_hold, 1);
     assert_eq!(
         c.try_flag_overdue(&fx.union, &id).unwrap_err(),
         Ok(Error::BadState)
@@ -540,9 +540,9 @@ fn overdue_puts_the_union_on_hold_until_repaid() {
 
     // A part payment keeps the hold; the full payment lifts it.
     fx.repay(&id, 100 * NIN);
-    assert_eq!(c.on_hold(&fx.union), 1);
+    assert_eq!(c.union_book(&fx.union).on_hold, 1);
     assert!(fx.repay(&id, 1_000 * NIN));
-    assert_eq!(c.on_hold(&fx.union), 0);
+    assert_eq!(c.union_book(&fx.union).on_hold, 0);
     c.draw_loan(&fx.union, &fx.neighbour, &id2, &NIN, &0);
 }
 
@@ -590,7 +590,7 @@ fn default_takes_her_investment_first_then_the_junior_pool() {
     assert_eq!(her.invested, 0);
     let p = c.position(&fx.union, &fx.neighbour);
     assert!((p.invested - 1_000 * NIN).abs() <= 1);
-    assert_eq!(c.union_borrows(&fx.union), 0);
+    assert_eq!(c.union_book(&fx.union).borrows, 0);
     assert_eq!(c.get_junior_market(&fx.union).total_borrows, 0);
     let ln = loan(&c, &fx.union, &id).unwrap();
     assert!(ln.defaulted && ln.closed);
@@ -2106,7 +2106,7 @@ impl Vx {
         let books = c.get_junior_market(u).cash
             + c.get_senior_market(u).cash
             + c.union_treasury(u)
-            + c.union_rainy_day(u)
+            + c.union_book(u).rainy
             + c.senior_earmark(u);
         assert_eq!(self.fx.token().balance(&self.fx.core_id), books);
     }
