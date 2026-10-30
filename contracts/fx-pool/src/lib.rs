@@ -243,6 +243,8 @@ pub enum DataKey {
     Position(Address, Address),
     /// Rupees a union's LPs hold in all (30 Oct).
     LpOwed(Address),
+    /// The union's LPs who hold its cash (30 Oct), for the leaders' list.
+    LpsOwing(Address),
 }
 
 /// Rupees a leader took in, not yet lent out or settled (R15).

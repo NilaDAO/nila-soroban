@@ -1828,6 +1828,10 @@ fn collect_then_bring_through_an_lp() {
         (950 * NIN, 110_000_000, None)
     );
     assert_eq!(f.lp_owed(&fx.union), 950 * NIN);
+    assert_eq!(
+        f.lps_owing(&fx.union),
+        soroban_sdk::vec![&fx.env, lp.clone()]
+    );
     assert_eq!(f.offer(&c).unwrap().state, OfferState::Done);
 
     // Half back: she brings ₹475 less her 1% (₹470.25); the fee is the union's, from its treasury;
@@ -1853,6 +1857,7 @@ fn collect_then_bring_through_an_lp() {
     assert_eq!(f.position(&fx.union, &lp), None);
     assert_eq!(fx.acct(&lp).lien(), 0);
     assert_eq!(f.lp_owed(&fx.union), 0);
+    assert_eq!(f.lps_owing(&fx.union).len(), 0);
     assert_eq!(usdc.balance(&lp), 50 * NIN);
     assert_eq!(usdc.balance(&fx.fx_id), pool);
     assert_eq!(f.offers_of(&fx.union).len(), 0);

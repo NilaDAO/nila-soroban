@@ -352,12 +352,23 @@ fn load_position(env: &Env, union: &Address, lp: &Address) -> Option<Position> {
 
 fn save_position(env: &Env, union: &Address, lp: &Address, p: &Position) {
     let k = DataKey::Position(union.clone(), lp.clone());
+    let lk = DataKey::LpsOwing(union.clone());
+    let mut lps: Vec<Address> = env.storage().persistent().get(&lk).unwrap_or(vec![env]);
+    let at = lps.first_index_of(lp);
     if p.owed <= 0 {
         env.storage().persistent().remove(&k);
+        if let Some(i) = at {
+            lps.remove(i);
+        }
     } else {
         env.storage().persistent().set(&k, p);
         bump(env, &k);
+        if at.is_none() {
+            lps.push_back(lp.clone());
+        }
     }
+    env.storage().persistent().set(&lk, &lps);
+    bump(env, &lk);
     PositionChanged {
         union: union.clone(),
         lp: lp.clone(),
@@ -846,6 +857,14 @@ impl FxPoolContract {
 
     pub fn position(env: Env, union: Address, lp: Address) -> Option<Position> {
         load_position(&env, &union, &lp)
+    }
+
+    /// The union's LPs who hold its cash (each one's `position` says how much).
+    pub fn lps_owing(env: Env, union: Address) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LpsOwing(union))
+            .unwrap_or(vec![&env])
     }
 
     /// Rupees the union's LPs hold (its cash out with them).
