@@ -30,9 +30,6 @@ mod mocks {
         pub fn union(env: Env) -> Address {
             env.storage().instance().get(&K::Recovery).unwrap()
         }
-        pub fn sms_key(env: Env) -> Address {
-            env.storage().instance().get(&K::Recovery).unwrap()
-        }
         pub fn roles(env: Env) -> Address {
             env.storage().instance().get(&K::Roles).unwrap()
         }
@@ -76,6 +73,8 @@ struct T {
     key: SigningKey,
     leaders: [Address; 2],
     fund_core: Address,
+    /// The union's multisig account as the factory names it (the mock's union).
+    union_ms: Address,
 }
 
 fn signer_of(env: &Env, k: &SigningKey) -> Signer {
@@ -101,6 +100,7 @@ fn setup() -> T {
     let union = Address::generate(&env);
     let leaders = [Address::generate(&env), Address::generate(&env)];
     let fund_core = Address::generate(&env);
+    let union_ms = Address::generate(&env);
     let roles = env.register(
         mocks::Roles,
         (
@@ -110,11 +110,7 @@ fn setup() -> T {
     );
     let factory = env.register(
         mocks::Factory,
-        (
-            roles,
-            Address::generate(&env),
-            vec![&env, fund_core.clone()],
-        ),
+        (roles, union_ms.clone(), vec![&env, fund_core.clone()]),
     );
     let key = SigningKey::from_slice(&[7u8; 32]).unwrap();
     let acct = env.register(AccountContract, (factory, union, signer_of(&env, &key)));
@@ -126,6 +122,7 @@ fn setup() -> T {
         key,
         leaders,
         fund_core,
+        union_ms,
     }
 }
 
@@ -240,18 +237,10 @@ fn recovery_replaces_the_signer_on_the_same_address_after_the_wait() {
     let new = signer_of(&t.env, &new_key);
     t.c.recover(&new);
     assert_eq!(t.c.try_execute_recovery(), Err(Ok(Error::NotReady)));
-    // The member cancels from the old phone.
+    // The union's multisig account cancels it.
     t.c.cancel_recovery();
     assert_eq!(t.c.pending(), None);
-    // OTP: the union's SMS key and one leader.
-    assert_eq!(
-        t.c.try_recover_by_sms(&new, &Address::generate(&t.env)),
-        Err(Ok(Error::NotLeaders))
-    );
-    t.c.recover_by_sms(&new, &t.leaders[0]);
-    assert!(t.c.pending().is_some());
-    t.c.cancel_recovery();
-    // Two leaders of the union, the number lost.
+    // Two leaders of the union (a lost phone).
     assert_eq!(
         t.c.try_recover_by_leaders(&new, &t.leaders[0], &t.leaders[0]),
         Err(Ok(Error::NotLeaders))
@@ -270,4 +259,98 @@ fn recovery_replaces_the_signer_on_the_same_address_after_the_wait() {
         Ok(())
     );
     assert!(check(&t, [3; 32], sign(&t.env, &t.key, &[3; 32]), &ctx).is_err());
+}
+
+fn call_named(env: &Env, contract: &Address, f: soroban_sdk::Symbol) -> Vec<Context> {
+    vec![
+        env,
+        Context::Contract(ContractContext {
+            contract: contract.clone(),
+            fn_name: f,
+            args: vec![env],
+        }),
+    ]
+}
+
+/// A stolen phone (executive decision 29 Oct): a proposal freezes the account until it executes;
+/// the old signer can neither draw, withdraw, start a session nor cancel; only the union cancels.
+#[test]
+fn a_pending_recovery_freezes_the_account_and_only_the_union_cancels() {
+    use soroban_sdk::testutils::AuthorizedFunction;
+    let t = setup();
+    let lead = Signature::Leader(t.leaders[0].clone());
+    let draw = call_on(&t.env, &t.fund_core);
+    let withdraw = call_named(&t.env, &t.fund_core, symbol_short!("claim_jc"));
+    // A session is running when the leaders propose: the proposal ends it.
+    t.c.start_session(&1_800_000_600);
+    let new_key = SigningKey::from_slice(&[11u8; 32]).unwrap();
+    let new = signer_of(&t.env, &new_key);
+    t.c.recover_by_leaders(&new, &t.leaders[0], &t.leaders[1]);
+    assert_eq!(t.c.session(), None);
+
+    // Frozen: the old signer draws nothing, withdraws nothing, starts no session.
+    for ctx in [&draw, &withdraw] {
+        assert_eq!(
+            check(&t, [1; 32], sign(&t.env, &t.key, &[1; 32]), ctx),
+            Err(Ok(Error::Frozen))
+        );
+        assert_eq!(
+            check(&t, [1; 32], lead.clone(), ctx),
+            Err(Ok(Error::Frozen))
+        );
+    }
+    assert_eq!(
+        t.c.try_start_session(&1_800_000_600),
+        Err(Ok(Error::Frozen))
+    );
+    assert!(t.c.try_set_signer(&signer_of(&t.env, &t.key)).is_err());
+    // The new key cannot sign yet either.
+    assert_eq!(
+        check(&t, [1; 32], sign(&t.env, &new_key, &[1; 32]), &draw),
+        Err(Ok(Error::Frozen))
+    );
+
+    // The old signer's cancel is refused: the account's own auth is Frozen (above), and the call
+    // asks for the union's (checked below); with no auth given it fails.
+    t.env.set_auths(&[]);
+    assert!(t.c.try_cancel_recovery().is_err());
+    t.env.mock_all_auths();
+    assert!(t.c.pending().is_some());
+    // Two leaders cannot replace it (the wait would restart); the union's multisig still can.
+    assert_eq!(
+        t.c.try_recover_by_leaders(&new, &t.leaders[0], &t.leaders[1]),
+        Err(Ok(Error::Frozen))
+    );
+    t.c.recover(&new);
+
+    // The union's multisig account cancels: the account signs again.
+    t.c.cancel_recovery();
+    let auths = t.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, t.union_ms);
+    match &auths[0].1.function {
+        AuthorizedFunction::Contract((c, f, _)) => {
+            assert_eq!(c, &t.acct);
+            assert_eq!(f, &soroban_sdk::Symbol::new(&t.env, "cancel_recovery"));
+        }
+        _ => panic!("not a contract call"),
+    }
+    assert_eq!(t.c.pending(), None);
+    assert_eq!(
+        check(&t, [1; 32], sign(&t.env, &t.key, &[1; 32]), &draw),
+        Ok(())
+    );
+
+    // The next proposal executes after the wait; the new signer draws on the same address.
+    t.c.recover_by_leaders(&new, &t.leaders[0], &t.leaders[1]);
+    assert_eq!(t.c.try_execute_recovery(), Err(Ok(Error::NotReady)));
+    t.env.ledger().set_timestamp(1_800_000_000 + 172_800);
+    t.c.execute_recovery();
+    assert_eq!(t.c.pending(), None);
+    assert_eq!(
+        check(&t, [3; 32], sign(&t.env, &new_key, &[3; 32]), &draw),
+        Ok(())
+    );
+    assert!(check(&t, [3; 32], sign(&t.env, &t.key, &[3; 32]), &draw).is_err());
+    assert_eq!(t.c.start_session(&1_800_172_900), 1_800_172_800 + 300);
 }

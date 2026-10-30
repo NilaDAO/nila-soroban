@@ -9,11 +9,13 @@
 //! each signed by the leader's own account. A session reaches only the contracts the factory
 //! lists (fund_core, machinery), never this account itself or a token.
 //! Recovery replaces the signer on the same address, so titles, shares, investments and
-//! balances stay: proposed by one leader of the union together with the union's SMS key
-//! (after the member's one-time SMS link, so a keypad phone recovers by OTP too), by two
-//! leaders (the number is lost), or by the union's multisig account;
-//! it takes effect after the factory's wait, and the account's own signer can cancel it
-//! meanwhile. Neither can sign a task. (A smartphone gets its Privy key back at login, so it
+//! balances stay: proposed by two leaders of the union (a lost phone, smartphone or keypad;
+//! executive decision 29 Oct, no SMS key: Nila holds no key with any power here) or by the
+//! union's multisig account;
+//! it takes effect after the factory's wait. A pending recovery freezes the account
+//! (executive decision 29 Oct, a stolen phone): the current signer signs nothing, no task and
+//! no session, and cannot cancel; only the union's multisig account cancels, so a member
+//! disputes a recovery through the union. Neither proposer can sign a task. (A smartphone gets its Privy key back at login, so it
 //! needs none of this unless the member's number is lost.) The node holds no power here.
 //! Settings (roles, wait, session length and contracts, the account code) come from the
 //! factory that deployed the account, one per union.
@@ -24,7 +26,7 @@ use soroban_sdk::{
     contract, contractclient, contracterror, contractevent, contractimpl, contractmeta,
     contracttype,
     crypto::Hash,
-    Address, BytesN, Env, Executable, IntoVal, Vec,
+    panic_with_error, Address, BytesN, Env, Executable, IntoVal, Vec,
 };
 
 contractmeta!(key = "binver", val = "0.1.0");
@@ -51,6 +53,8 @@ pub enum Error {
     Expired = 6,
     /// A signature of another key type than the signer's.
     WrongKind = 7,
+    /// A recovery is pending: the account signs nothing until it executes or the union cancels it.
+    Frozen = 8,
 }
 
 #[contracttype]
@@ -96,7 +100,6 @@ pub enum DataKey {
 #[contractclient(name = "FactoryClient")]
 pub trait FactoryTrait {
     fn union(env: Env) -> Address;
-    fn sms_key(env: Env) -> Address;
     fn roles(env: Env) -> Address;
     fn wait(env: Env) -> u64;
     fn session_len(env: Env) -> u64;
@@ -144,7 +147,13 @@ fn set_signer(env: &Env, signer: Signer) {
     bump_instance(env);
 }
 
+fn frozen(env: &Env) -> bool {
+    env.storage().instance().has(&DataKey::Pending)
+}
+
+/// A proposal freezes the account and ends any running session.
 fn propose(env: &Env, signer: Signer) {
+    env.storage().instance().remove(&DataKey::Session);
     let at = env.ledger().timestamp() + factory(env).wait();
     env.storage().instance().set(
         &DataKey::Pending,
@@ -177,6 +186,9 @@ impl AccountContract {
 
     /// The account's own signer moves to a new key (a new phone).
     pub fn set_signer(env: Env, signer: Signer) {
+        if frozen(&env) {
+            panic_with_error!(&env, Error::Frozen);
+        }
         env.current_contract_address().require_auth();
         set_signer(&env, signer);
     }
@@ -185,6 +197,9 @@ impl AccountContract {
     /// unix seconds by the phone's clock); from its submission any leader of the union may sign
     /// for the account for the factory's session length.
     pub fn start_session(env: Env, not_after: u64) -> Result<u64, Error> {
+        if frozen(&env) {
+            return Err(Error::Frozen);
+        }
         env.current_contract_address().require_auth();
         let now = env.ledger().timestamp();
         if now > not_after {
@@ -209,19 +224,7 @@ impl AccountContract {
         propose(&env, signer);
     }
 
-    /// OTP recovery: the union's SMS key (after the member's one-time SMS link on the new phone)
-    /// and one leader of the union together propose the new phone's key.
-    pub fn recover_by_sms(env: Env, signer: Signer, leader: Address) -> Result<(), Error> {
-        factory(&env).sms_key().require_auth();
-        leader.require_auth();
-        if !is_leader(&env, &leader) {
-            return Err(Error::NotLeaders);
-        }
-        propose(&env, signer);
-        Ok(())
-    }
-
-    /// Two leaders of the account's union together propose a new signer (the number is lost).
+    /// Two leaders of the account's union together propose a new signer (a lost phone).
     pub fn recover_by_leaders(
         env: Env,
         signer: Signer,
@@ -235,6 +238,11 @@ impl AccountContract {
         leader_b.require_auth();
         if !is_leader(&env, &leader_a) || !is_leader(&env, &leader_b) {
             return Err(Error::NotLeaders);
+        }
+        // Two leaders cannot replace a pending proposal (restarting the wait would keep the account frozen, and
+        // could swap the key): only the union's multisig cancels it or overrides it with `recover`.
+        if frozen(&env) {
+            return Err(Error::Frozen);
         }
         propose(&env, signer);
         Ok(())
@@ -254,9 +262,10 @@ impl AccountContract {
         Ok(())
     }
 
-    /// The account's own signer cancels a proposed recovery.
+    /// The union's multisig account cancels a proposed recovery (a member's dispute goes to the
+    /// union); the account's own signer cannot, since a pending recovery freezes it.
     pub fn cancel_recovery(env: Env) {
-        env.current_contract_address().require_auth();
+        factory(&env).union().require_auth();
         env.storage().instance().remove(&DataKey::Pending);
         RecoveryCancelled {}.publish(&env);
         bump_instance(&env);
@@ -307,6 +316,9 @@ impl CustomAccountInterface for AccountContract {
         signature: Signature,
         auth_contexts: Vec<Context>,
     ) -> Result<(), Error> {
+        if frozen(&env) {
+            return Err(Error::Frozen);
+        }
         match signature {
             Signature::Ed25519(sig) => match get(&env, DataKey::Signer) {
                 Signer::Ed25519(pk) => {
