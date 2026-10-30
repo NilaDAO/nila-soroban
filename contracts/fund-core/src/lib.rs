@@ -1970,10 +1970,6 @@ impl FundCore {
         position(&env, &union, &member)
     }
 
-    pub fn get_loan(env: Env, union: Address, token_id: BytesN<32>) -> Option<Loan> {
-        load_loan(&env, &union, &token_id).ok()
-    }
-
     // The food token with its last draw date (0: none) and whether it lapsed (25 Oct).
     pub fn food_token(env: Env, union: Address, token_id: BytesN<32>) -> Option<FoodTokenView> {
         let ft: FoodToken = env

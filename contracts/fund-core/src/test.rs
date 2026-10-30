@@ -13,6 +13,13 @@ use soroban_sdk::{
     Address, BytesN, Env,
 };
 
+// The loan of a drawn food token, as the app reads it (food_token; get_loan was dropped 30 Oct).
+fn loan(c: &FundCoreClient, union: &Address, token_id: &BytesN<32>) -> Option<Loan> {
+    c.food_token(union, token_id)
+        .filter(|f| f.loan.drawn())
+        .map(|f| to_view(&f.member, &f.loan))
+}
+
 const T0: u64 = 1_700_000_000;
 /// A last draw date far ahead, for the re-attest refusals (not drawn on).
 const FAR: u64 = u64::MAX;
@@ -270,7 +277,7 @@ fn draw_then_repay_with_interest_and_fees() {
         fx.token().balance(&fx.fx_id),
         600 * NIN - 500 * NIN - interest
     );
-    let ln = c.get_loan(&fx.union, &id).unwrap();
+    let ln = loan(&c, &fx.union, &id).unwrap();
     assert!(ln.closed && !ln.defaulted);
     assert_eq!(ln.interest_paid, interest);
     assert_eq!(c.union_treasury(&fx.union), interest / 100);
@@ -589,7 +596,7 @@ fn default_takes_her_investment_first_then_the_junior_pool() {
     assert!((p.invested - 1_000 * NIN).abs() <= 1);
     assert_eq!(c.union_borrows(&fx.union), 0);
     assert_eq!(c.get_junior_market(&fx.union).total_borrows, 0);
-    let ln = c.get_loan(&fx.union, &id).unwrap();
+    let ln = loan(&c, &fx.union, &id).unwrap();
     assert!(ln.defaulted && ln.closed);
     fx.assert_conserved();
 }
@@ -848,7 +855,7 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
     c.draw_loan(&fx.union, &fx.borrower, &tok, &(800 * NIN), &0);
     // The loan lives inside the token's entry; the token id is the loan id (C6).
     assert!(c.food_token(&fx.union, &tok).unwrap().loan.drawn());
-    assert_eq!(c.get_loan(&fx.union, &tok).unwrap().principal, 800 * NIN);
+    assert_eq!(loan(&c, &fx.union, &tok).unwrap().principal, 800 * NIN);
 
     // One loan per token, and no re-attesting a used one.
     assert_eq!(draw(&tok, &l2, NIN), Ok(Error::FoodTokenUsed));
@@ -1054,7 +1061,7 @@ fn cash_scan_invest_draw_repay_with_strict_auth() {
     let e2 = fx
         .scan(Purpose::Repay, &fx.borrower, 500 * NIN, 5, Some(id.clone()))
         .unwrap();
-    assert!(c.get_loan(&fx.union, &id).unwrap().closed);
+    assert!(loan(&c, &fx.union, &id).unwrap().closed);
     assert_eq!(
         f.get_escrow(&fx.union, &e2).unwrap().amount,
         400 * NIN + interest
@@ -2670,7 +2677,7 @@ fn exactly_the_gate_passes_after_interest_raised_the_share_price() {
     let tok = loan_id(&fx.env, 2);
     fx.attest(&her, &tok, 100 * NIN);
     c.draw_loan(&fx.union, &her, &tok, &(100 * NIN), &0);
-    assert!(c.get_loan(&fx.union, &tok).is_some());
+    assert!(loan(&c, &fx.union, &tok).is_some());
 }
 
 /// The move (M1): her burned Polygon nIN is minted once, by the attester, only while she holds an

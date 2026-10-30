@@ -39,7 +39,7 @@ pub struct MarketLite {
     pub claimable_principal: i128,
 }
 
-// A loan as read by the app (`get_loan`). Not stored this way: since C6 the loan lives inside
+// A loan as fund_core works with it (the app reads `food_token` and its flags, 30 Oct). Not stored this way: since C6 the loan lives inside
 // its food token entry (one loan per token, the token id is the loan id), without copies of the
 // borrower or token, and with its flags packed (fund_core `LoanState`).
 #[contracttype]
