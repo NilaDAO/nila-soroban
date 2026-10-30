@@ -1069,21 +1069,23 @@ impl FundCore {
         Ok(())
     }
 
-    // Only the free part: invested minus locked (R27, R28).
-    pub fn request_unbond_junior(
+    // Start a withdrawal (14 days, R28): a member's own investment (junior) or a senior investor's (30 Oct: one call
+    // for both tranches).
+    pub fn request_unbond(
         env: Env,
         union: Address,
-        member: Address,
+        investor: Address,
         shares: i128,
+        senior: bool,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
-        member.require_auth();
+        investor.require_auth();
         require_positive(shares)?;
-        let snap = request_unbond(&env, true, &union, &member, shares)?;
+        let snap = request_unbond(&env, !senior, &union, &investor, shares)?;
         UnbondRequested {
-            investor: member,
+            investor,
             union,
-            tranche: Tranche::Junior,
+            tranche: tranche(!senior),
             shares,
             principal_snap: snap,
         }
@@ -1091,22 +1093,26 @@ impl FundCore {
         Ok(())
     }
 
-    // A leader's own junior investment, paid as nIN to her wallet (for treasury deposits). Members never
-    // hold nIN (executive decision 22 Oct, "No nIN in a member's wallet (desk only)"): they use
-    // `claim_junior_cash`.
-    pub fn claim_junior(
+    // Collect a withdrawal to the wallet: junior for a leader only (members collect over the desk, claim_junior_cash),
+    // senior by the investor (30 Oct: one call for both tranches).
+    pub fn claim(
         env: Env,
         union: Address,
-        member: Address,
+        investor: Address,
         max_shares: i128,
+        senior: bool,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
-        require_leader(&env, &union, &member)?;
-        let amount = claim(&env, true, &union, &member, max_shares, true)?;
+        if senior {
+            investor.require_auth();
+        } else {
+            require_leader(&env, &union, &investor)?;
+        }
+        let amount = claim(&env, !senior, &union, &investor, max_shares, true)?;
         Claimed {
-            investor: member,
+            investor,
             union,
-            tranche: tranche(true),
+            tranche: tranche(!senior),
             amount,
             cash: false,
             cash_settled: 0,
@@ -1169,49 +1175,6 @@ impl FundCore {
             tranche: Tranche::Senior,
             amount,
             shares_out: shares,
-        }
-        .publish(&env);
-        bump_instance(&env);
-        Ok(())
-    }
-
-    pub fn request_unbond_senior(
-        env: Env,
-        union: Address,
-        investor: Address,
-        shares: i128,
-    ) -> Result<(), Error> {
-        require_not_paused(&env)?;
-        investor.require_auth();
-        require_positive(shares)?;
-        let snap = request_unbond(&env, false, &union, &investor, shares)?;
-        UnbondRequested {
-            investor,
-            union,
-            tranche: Tranche::Senior,
-            shares,
-            principal_snap: snap,
-        }
-        .publish(&env);
-        Ok(())
-    }
-
-    pub fn claim_senior(
-        env: Env,
-        union: Address,
-        investor: Address,
-        max_shares: i128,
-    ) -> Result<(), Error> {
-        require_not_paused(&env)?;
-        investor.require_auth();
-        let amount = claim(&env, false, &union, &investor, max_shares, true)?;
-        Claimed {
-            investor,
-            union,
-            tranche: tranche(false),
-            amount,
-            cash: false,
-            cash_settled: 0,
         }
         .publish(&env);
         bump_instance(&env);

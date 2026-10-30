@@ -70,7 +70,7 @@ impl Fx {
         FxPoolContractClient::new(&self.env, &self.fx_id)
     }
 
-    /// `claim_junior` pays a leader's own investment to her wallet (members collect over the desk with
+    /// `claim` (junior) pays a leader's own investment to her wallet (members collect over the desk with
     /// `claim_junior_cash`, 22 Oct): tests of the wallet payout and the cash-out make the investor a leader.
     /// The window the stand-in calendar gives every food token; None: no sowing window.
     fn window(&self, w: Option<(u64, u64)>) {
@@ -401,11 +401,11 @@ fn lock_holds_what_she_owes_and_frees_with_repayment() {
     assert_eq!(p.free, 200 * NIN);
     // Shares are 1:1 with nIN before any interest.
     assert_eq!(
-        c.try_request_unbond_junior(&fx.union, &fx.borrower, &(201 * NIN))
+        c.try_request_unbond(&fx.union, &fx.borrower, &(201 * NIN), &false)
             .unwrap_err(),
         Ok(Error::BadShares)
     );
-    c.request_unbond_junior(&fx.union, &fx.borrower, &(200 * NIN));
+    c.request_unbond(&fx.union, &fx.borrower, &(200 * NIN), &false);
 
     // Half repaid at once: half the lock frees (no interest yet).
     fx.repay(&id, 400 * NIN);
@@ -432,17 +432,17 @@ fn unbond_claim_after_14_days_pays_yield_once() {
 
     fx.make_leader(&fx.neighbour);
     fx.make_leader(&fx.borrower);
-    c.request_unbond_junior(&fx.union, &fx.neighbour, &(1_000 * NIN));
+    c.request_unbond(&fx.union, &fx.neighbour, &(1_000 * NIN), &false);
     assert_eq!(
-        c.try_claim_junior(&fx.union, &fx.neighbour, &0)
+        c.try_claim(&fx.union, &fx.neighbour, &0, &false)
             .unwrap_err(),
         Ok(Error::NotEligibleMaturity)
     );
     fx.at(T0 + YEAR + 14 * 86_400);
-    c.claim_junior(&fx.union, &fx.neighbour, &0);
-    c.request_unbond_junior(&fx.union, &fx.borrower, &(1_000 * NIN));
+    c.claim(&fx.union, &fx.neighbour, &0, &false);
+    c.request_unbond(&fx.union, &fx.borrower, &(1_000 * NIN), &false);
     fx.at(T0 + YEAR + 28 * 86_400);
-    c.claim_junior(&fx.union, &fx.borrower, &0);
+    c.claim(&fx.union, &fx.borrower, &0, &false);
 
     // Everything paid out: only the fees (and rounding dust) stay behind.
     let interest = 125 * NIN;
@@ -711,7 +711,7 @@ fn a_senior_unbond_does_not_hold_back_junior_lending() {
     let lp = Address::generate(&fx.env);
     StellarAssetClient::new(&fx.env, &fx.nin).mint(&fx.fx_id, &(1_000 * NIN));
     c.deposit_senior(&fx.union, &lp, &(1_000 * NIN));
-    c.request_unbond_senior(&fx.union, &lp, &(1_000 * NIN));
+    c.request_unbond(&fx.union, &lp, &(1_000 * NIN), &true);
     fx.invest(&fx.borrower, 1_000 * NIN);
     // The senior queue's reserve is senior's own (I3): all junior cash can still lend.
     fx.draw(&loan_id(&fx.env, 1), 1_000 * NIN);
@@ -1155,9 +1155,9 @@ fn trustline_opens_only_inside_the_payout() {
     fx.scan(Purpose::Invest, &fx.neighbour, 1_000 * NIN, 2, None)
         .unwrap();
     fx.make_leader(&fx.neighbour);
-    c.request_unbond_junior(&fx.union, &fx.neighbour, &(400 * NIN));
+    c.request_unbond(&fx.union, &fx.neighbour, &(400 * NIN), &false);
     fx.at(T0 + 14 * 86_400);
-    c.claim_junior(&fx.union, &fx.neighbour, &0);
+    c.claim(&fx.union, &fx.neighbour, &0, &false);
     assert_eq!(fx.token().balance(&fx.neighbour), 400 * NIN);
     // R10: deauthorised again right after; she cannot send it anywhere herself.
     assert!(!fx.authorized(&fx.neighbour));
@@ -1197,9 +1197,9 @@ fn cash_out_signed_burns_her_nin_at_the_desk() {
         .unwrap();
     // Her nIN in her wallet (in the app: a machine owner's prepay and collected dues).
     fx.make_leader(&fx.neighbour);
-    c.request_unbond_junior(&fx.union, &fx.neighbour, &(600 * NIN));
+    c.request_unbond(&fx.union, &fx.neighbour, &(600 * NIN), &false);
     fx.at(T0 + 14 * 86_400);
-    c.claim_junior(&fx.union, &fx.neighbour, &0);
+    c.claim(&fx.union, &fx.neighbour, &0, &false);
     assert_eq!(fx.token().balance(&fx.neighbour), 600 * NIN);
 
     // Without her signature of (union, amount) a leader cannot burn her nIN.
@@ -1290,9 +1290,9 @@ fn cash_out_pay_out_and_reclaim() {
     fx.scan(Purpose::Invest, &fx.neighbour, 1_000 * NIN, 2, None)
         .unwrap();
     fx.make_leader(&fx.neighbour);
-    c.request_unbond_junior(&fx.union, &fx.neighbour, &(600 * NIN));
+    c.request_unbond(&fx.union, &fx.neighbour, &(600 * NIN), &false);
     fx.at(T0 + 14 * 86_400);
-    c.claim_junior(&fx.union, &fx.neighbour, &0);
+    c.claim(&fx.union, &fx.neighbour, &0, &false);
     let now = T0 + 14 * 86_400;
 
     // A7: her nIN into fx_pool under the code's hash; only she signs.
@@ -1389,9 +1389,9 @@ fn fx_pool_slot_set_once_and_codes_used_once() {
     fx.scan(Purpose::Invest, &fx.neighbour, 1_000 * NIN, 2, None)
         .unwrap();
     fx.make_leader(&fx.neighbour);
-    c.request_unbond_junior(&fx.union, &fx.neighbour, &(400 * NIN));
+    c.request_unbond(&fx.union, &fx.neighbour, &(400 * NIN), &false);
     fx.at(T0 + 14 * 86_400);
-    c.claim_junior(&fx.union, &fx.neighbour, &0);
+    c.claim(&fx.union, &fx.neighbour, &0, &false);
     let code = Bytes::from_array(&fx.env, b"one-time");
     let h: BytesN<32> = fx.env.crypto().sha256(&code).into();
     let exp = T0 + 15 * 86_400;
@@ -2806,12 +2806,12 @@ fn claim_junior_cash_pays_over_the_desk() {
         .unwrap();
     fx.scan(Purpose::Invest, &fx.neighbour, 1_000 * NIN, 2, None)
         .unwrap();
-    c.request_unbond_junior(&fx.union, &fx.neighbour, &(400 * NIN));
+    c.request_unbond(&fx.union, &fx.neighbour, &(400 * NIN), &false);
     fx.at(T0 + 14 * 86_400);
 
     // A member can no longer claim to her wallet.
     assert_eq!(
-        c.try_claim_junior(&fx.union, &fx.neighbour, &0),
+        c.try_claim(&fx.union, &fx.neighbour, &0, &false),
         Err(Ok(Error::NotLeader))
     );
     // Not a leader on the desk side.
@@ -2922,7 +2922,7 @@ fn claim_junior_cash_with_cash_at_hand_short() {
     fx.scan(Purpose::Invest, &fx.neighbour, 1_000 * NIN, 2, None)
         .unwrap();
     fx.invest(&fx.borrower, 1_000 * NIN);
-    c.request_unbond_junior(&fx.union, &fx.neighbour, &(400 * NIN));
+    c.request_unbond(&fx.union, &fx.neighbour, &(400 * NIN), &false);
     fx.at(T0 + 14 * 86_400);
     // The leader already handed out most of the counted cash (a loan's cash part).
     fx.attest(&fx.borrower, &loan_id(&fx.env, 1), 900 * NIN);
@@ -2952,7 +2952,7 @@ fn a_member_holds_no_nin_after_any_member_path() {
     fx.invest(&fx.neighbour, 1_000 * NIN);
     fx.draw(&loan_id(&fx.env, 1), 300 * NIN);
     assert_eq!(fx.token().balance(&fx.borrower), 0);
-    c.request_unbond_junior(&fx.union, &fx.neighbour, &(500 * NIN));
+    c.request_unbond(&fx.union, &fx.neighbour, &(500 * NIN), &false);
     fx.at(T0 + 14 * 86_400);
     c.claim_junior_cash(&fx.union, &fx.neighbour, &fx.leader, &0);
     assert_eq!(fx.token().balance(&fx.neighbour), 0);

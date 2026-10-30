@@ -187,10 +187,10 @@ expect "fx_pool holds no nIN" "$(view "$NIN_SAC" balance --id "$FX")" '"0"'
 
 log "member2 unbonds 400, claims after 14 short days: to her wallet through the flip (R10)"
 TX_UNBOND=$(tx stellar contract invoke --id "$CORE" --source ${P}-member2 -- \
-  request_unbond_junior --union "$UNION" --member ${P}-member2 --shares $((400 * NIN)))
+  request_unbond --union "$UNION" --investor ${P}-member2 --shares $((400 * NIN)))
 wait_until $(($(ledger_now) + 16))
 TX_CLAIM=$(tx stellar contract invoke --id "$CORE" --source ${P}-member2 -- \
-  claim_junior --union "$UNION" --member ${P}-member2 --max_shares 0)
+  claim --union "$UNION" --investor ${P}-member2 --max_shares 0)
 # 400 shares are worth a little more than 400 nIN: the repay's interest raised the index.
 W2=$(view "$NIN_SAC" balance --id ${P}-member2 | tr -d '"')
 ((W2 >= 400 * NIN)) || { echo "member2 claim paid $W2" >&2; exit 1; }
