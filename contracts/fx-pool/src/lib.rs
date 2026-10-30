@@ -128,6 +128,10 @@ pub enum Error {
     QuoteExpired = 32,
     /// The anchor has not checked this account's identity (K1, 22 Oct).
     NotIdChecked = 33,
+    /// No position of this LP in the union, or a Bring above what she owes (30 Oct).
+    NoPosition = 34,
+    /// Nothing to claim: not called, the notice has not passed, or above the claimable (30 Oct).
+    NotClaimable = 35,
 }
 
 /// Where a senior investor's USDC comes from (R24, D1): kept per deposit so the pools can be split later.
@@ -235,6 +239,10 @@ pub enum DataKey {
     IdChecked(Address),
     /// USDC a union's id-checked leaders swapped into nIN in their own wallets: paid back only from here (22 Oct).
     LeaderSwapUsdc(Address),
+    /// An LP's holding of the union's cash (union, LP), the pledge (30 Oct).
+    Position(Address, Address),
+    /// Rupees a union's LPs hold in all (30 Oct).
+    LpOwed(Address),
 }
 
 /// Rupees a leader took in, not yet lent out or settled (R15).
@@ -1686,7 +1694,7 @@ impl FxPoolContract {
 }
 
 mod lp;
-pub use lp::{LpMember, Offer, OfferKind, OfferState, Quote, ACCEPT_PREFIX};
+pub use lp::{LpMember, Offer, OfferKind, OfferState, Position, Quote, ACCEPT_PREFIX};
 
 #[cfg(test)]
 mod test;

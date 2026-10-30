@@ -1146,6 +1146,8 @@ name = "nila-fund-core"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "nila-account",
+ "nila-account-factory",
  "nila-common",
  "nila-crop-calendar",
  "nila-fx-pool",

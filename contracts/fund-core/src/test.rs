@@ -1682,30 +1682,59 @@ fn senior_route_usdc_in_nin_into_the_senior_pool() {
     );
 }
 
-// ---------- C5b: LP offers (member LPs swap cash and USDC; they never lend) ----------
+// ---------- LP pledge (executive decision 30 Oct; was the C5b swap) ----------
 
+use nila_account::{AccountContract, AccountContractClient, Signer as AcctSigner};
+use nila_account_factory::{AccountFactory, AccountFactoryClient};
 use nila_fx_pool::{OfferKind, OfferState};
 use soroban_sdk::String as SString;
 
 impl Fx {
-    /// Anchor accepts the neighbour as LP; ₹95 fix; the union has cash at hand.
+    /// The LP: a Nila account of the union's factory (which names this fx_pool and USDC for the
+    /// pledge), with a title, accepted by the anchor; ₹95 fix; the union has cash at hand.
     fn lp_ready(&self) -> (Address, Address) {
         let f = self.fx();
         let anchor = Address::generate(&self.env);
         f.set_anchor(&anchor);
-        f.set_id_checked(&self.neighbour, &true, &loan_id(&self.env, 0x4B));
-        f.set_lp(
-            &self.union,
-            &self.neighbour,
-            &true,
-            &loan_id(&self.env, 0x4C),
+        let roles = self.core().get_config().roles;
+        let factory = self.env.register(
+            AccountFactory,
+            (
+                self.union.clone(),
+                roles,
+                3_600u64,
+                300u64,
+                soroban_sdk::Vec::<Address>::new(&self.env),
+                BytesN::from_array(&self.env, &[0u8; 32]),
+            ),
         );
+        AccountFactoryClient::new(&self.env, &factory).set_pledge(&self.fx_id, &self.usdc);
+        let lp = self.env.register(
+            AccountContract,
+            (
+                factory,
+                self.union.clone(),
+                AcctSigner::Ed25519(BytesN::from_array(&self.env, &[5u8; 32])),
+            ),
+        );
+        self.give_title(&lp);
+        f.set_id_checked(&lp, &true, &loan_id(&self.env, 0x4B));
+        f.set_lp(&self.union, &lp, &true, &loan_id(&self.env, 0x4C));
         f.override_rate(&(95 * NIN), &(T0 + 86_400));
         self.scan(Purpose::Treasury, &self.leader, 5_000 * NIN, 1, None)
             .unwrap();
         self.scan(Purpose::Invest, &self.borrower, 2_000 * NIN, 2, None)
             .unwrap();
-        (anchor, self.neighbour.clone())
+        (anchor, lp)
+    }
+
+    fn acct(&self, lp: &Address) -> AccountContractClient<'_> {
+        AccountContractClient::new(&self.env, lp)
+    }
+
+    fn offer_of(&self, kind: OfferKind, inr: i128) -> u64 {
+        self.fx()
+            .post_offer(&self.leader, &self.union, &kind, &inr, &(T0 + 3_600))
     }
 
     fn ids(&self) -> (SString, SString) {
@@ -1724,18 +1753,25 @@ fn swap_key() -> ed25519_dalek::SigningKey {
 type TryAcc = Result<Result<i128, soroban_sdk::Error>, Result<FxError, soroban_sdk::InvokeError>>;
 
 impl Fx {
-    /// The anchor's signature for an accept at today's quote (0 USDC when there is no quote).
+    /// The anchor's signature for an accept at today's quote (0 USDC when there is none).
     fn signed(&self, lp: &Address, id: u64, s24: &SString, q: &SString) -> (i128, u64, BytesN<64>) {
         use ed25519_dalek::Signer;
         use soroban_sdk::xdr::ToXdr;
         let f = self.fx();
         let o = f.offer(&id).unwrap();
-        let usdc = f
-            .try_quote(&o.union, &o.kind, &o.inr)
-            .ok()
-            .and_then(|r| r.ok())
-            .map(|q| q.usdc)
-            .unwrap_or(0);
+        // Collect: the USDC her account locks; Bring: what it unlocks of her position.
+        let usdc = match o.kind {
+            OfferKind::Collect => f
+                .try_quote(&o.union, &o.kind, &o.inr)
+                .ok()
+                .and_then(|r| r.ok())
+                .map(|q| q.usdc),
+            OfferKind::Bring => f
+                .try_bring_unlock(&o.union, lp, &o.inr)
+                .ok()
+                .and_then(|r| r.ok()),
+        }
+        .unwrap_or(0);
         let until = self.env.ledger().timestamp() + 600;
         let mut msg = soroban_sdk::Bytes::from_slice(&self.env, nila_fx_pool::ACCEPT_PREFIX);
         msg.append(
@@ -1774,42 +1810,53 @@ fn collect_then_bring_through_an_lp() {
     let usdc = TokenClient::new(&fx.env, &fx.usdc);
     StellarAssetClient::new(&fx.env, &fx.usdc).mint(&lp, &(50 * NIN));
     let (s24, q) = fx.ids();
+    let pool = usdc.balance(&fx.fx_id);
 
-    // C4: ₹950 spare cash; she pays 10 USDC less her 1% fee and takes the rupees.
-    let c = f.post_offer(
-        &fx.leader,
-        &fx.union,
-        &OfferKind::Collect,
-        &(950 * NIN),
-        &(T0 + 3_600),
-    );
-    assert_eq!(fx.acc(&lp, &c, &s24, &q), 99_000_000);
+    // C4: ₹950 spare cash; she takes it, her account locks 110% of 10 USDC.
+    let c = fx.offer_of(OfferKind::Collect, 950 * NIN);
+    assert_eq!(fx.acc(&lp, &c, &s24, &q), 110_000_000);
+    assert_eq!(fx.acct(&lp).lien(), 110_000_000);
     let hand = f.cash_at_hand(&fx.union);
-    assert_eq!(f.confirm(&fx.leader, &c), 99_000_000);
-    assert_eq!(usdc.balance(&lp), 50 * NIN - 99_000_000);
-    assert_eq!(f.lp_usdc(&fx.union), 99_000_000);
+    f.confirm(&fx.leader, &c);
+    // No USDC moves: hers stays in her account, the pool's in the pool.
+    assert_eq!(usdc.balance(&lp), 50 * NIN);
+    assert_eq!(usdc.balance(&fx.fx_id), pool);
     assert_eq!(f.cash_at_hand(&fx.union), hand - 950 * NIN);
+    let p = f.position(&fx.union, &lp).unwrap();
+    assert_eq!(
+        (p.owed, p.locked, p.called_at),
+        (950 * NIN, 110_000_000, None)
+    );
+    assert_eq!(f.lp_owed(&fx.union), 950 * NIN);
     assert_eq!(f.offer(&c).unwrap().state, OfferState::Done);
 
-    // L11 #short: ₹475 needed; she brings it and gets 5 USDC plus 1%, from LP-collected USDC.
-    let b = f.post_offer(
-        &fx.leader,
-        &fx.union,
-        &OfferKind::Bring,
-        &(475 * NIN),
-        &(T0 + 3_600),
-    );
-    assert_eq!(fx.acc(&lp, &b, &s24, &q), 50_500_000);
-    assert_eq!(f.lp_usdc(&fx.union), 99_000_000 - 50_500_000);
+    // Half back: she brings ₹475 less her 1% (₹470.25); the fee is the union's, from its treasury;
+    // half her lock unlocks.
+    let treasury = fx.core().union_treasury(&fx.union);
+    let b = fx.offer_of(OfferKind::Bring, 475 * NIN);
+    assert_eq!(fx.acc(&lp, &b, &s24, &q), 55_000_000);
+    let hand = f.cash_at_hand(&fx.union);
     f.confirm(&fx.leader, &b);
-    assert_eq!(usdc.balance(&lp), 50 * NIN - 99_000_000 + 50_500_000);
-    // fx_pool also holds the treasury's USDC backing (the fixture's treasury top-up).
+    assert_eq!(f.cash_at_hand(&fx.union), hand + 470 * NIN + 2_500_000);
     assert_eq!(
-        usdc.balance(&fx.fx_id) - f.treasury_usdc(&fx.union),
-        99_000_000 - 50_500_000
+        fx.core().union_treasury(&fx.union),
+        treasury - 4 * NIN - 7_500_000
     );
+    assert_eq!(fx.acct(&lp).lien(), 55_000_000);
+    let p = f.position(&fx.union, &lp).unwrap();
+    assert_eq!((p.owed, p.locked), (475 * NIN, 55_000_000));
+
+    // The rest: everything unlocks and the position closes.
+    let b2 = fx.offer_of(OfferKind::Bring, 475 * NIN);
+    assert_eq!(fx.acc(&lp, &b2, &s24, &q), 55_000_000);
+    f.confirm(&fx.leader, &b2);
+    assert_eq!(f.position(&fx.union, &lp), None);
+    assert_eq!(fx.acct(&lp).lien(), 0);
+    assert_eq!(f.lp_owed(&fx.union), 0);
+    assert_eq!(usdc.balance(&lp), 50 * NIN);
+    assert_eq!(usdc.balance(&fx.fx_id), pool);
     assert_eq!(f.offers_of(&fx.union).len(), 0);
-    // The LP never holds nIN; nIN books are untouched by swaps.
+    // The LP never holds nIN.
     assert_eq!(fx.token().balance(&lp), 0);
     fx.assert_fx_empty();
     fx.assert_conserved();
@@ -1826,30 +1873,25 @@ fn quote_matches_what_accept_fixes() {
 
     // C9: SEP-38 reads the same numbers accept fixes on the offer.
     let qc = f.quote(&fx.union, &OfferKind::Collect, &(950 * NIN));
-    assert_eq!((qc.usdc, qc.fee, qc.fee_bp), (99_000_000, 1_000_000, 100));
+    assert_eq!((qc.usdc, qc.fee_inr, qc.fee_bp), (110_000_000, 0, 100));
     assert_eq!((qc.inr_per_usd, qc.valid_until), (95 * NIN, T0 + 86_400));
-    let c = f.post_offer(
-        &fx.leader,
-        &fx.union,
-        &OfferKind::Collect,
-        &(950 * NIN),
-        &(T0 + 3_600),
-    );
+    let c = fx.offer_of(OfferKind::Collect, 950 * NIN);
     assert_eq!(fx.acc(&lp, &c, &s24, &q), qc.usdc);
-    // Nothing collected yet and no senior USDC: a Bring has no USDC to pay from.
-    assert_eq!(qc.usdc_free, 0);
-    assert_eq!(qc.day_left, f.daily_cap());
     f.confirm(&fx.leader, &c);
+    // A Bring: the rupees' USDC value and her fee in rupees; what unlocks is hers, pro rata.
     let qb = f.quote(&fx.union, &OfferKind::Bring, &(475 * NIN));
-    assert_eq!((qb.usdc, qb.fee), (50_500_000, 500_000));
-    assert_eq!(qb.usdc_free, 99_000_000);
+    assert_eq!((qb.usdc, qb.fee_inr), (50_000_000, 4 * NIN + 7_500_000));
+    assert_eq!(f.bring_unlock(&fx.union, &lp, &(475 * NIN)), 55_000_000);
+    assert_eq!(
+        f.try_bring_unlock(&fx.union, &lp, &(951 * NIN)),
+        Err(Ok(FxError::NoPosition))
+    );
 
     // The fee follows set_lp_fee; amounts outside the scan cap are refused like post_offer.
     f.set_lp_fee(&200);
-    assert_eq!(f.lp_fee(), 200);
     assert_eq!(
-        f.quote(&fx.union, &OfferKind::Bring, &(475 * NIN)).usdc,
-        51_000_000
+        f.quote(&fx.union, &OfferKind::Bring, &(475 * NIN)).fee_inr,
+        9 * NIN + 5_000_000
     );
     assert_eq!(
         f.try_quote(&fx.union, &OfferKind::Bring, &0),
@@ -1868,67 +1910,51 @@ fn quote_matches_what_accept_fixes() {
     );
 }
 
+/// No pool USDC reaches an LP (executive decision 30 Oct): a Bring only closes her own position,
+/// and senior USDC is never touched.
 #[test]
-fn bring_draws_senior_usdc_only_above_the_voucher_floor() {
+fn a_bring_only_closes_her_own_position() {
     let fx = setup();
     let f = fx.fx();
     let (_anchor, lp) = fx.lp_ready();
     let (s24, q) = fx.ids();
-    // A senior investor's 100 USDC, offshore; 90 of it kept back for vouchers.
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&lp, &(50 * NIN));
     let investor = Address::generate(&fx.env);
     StellarAssetClient::new(&fx.env, &fx.usdc).mint(&investor, &(100 * NIN));
     f.set_senior_investor(&investor, &true, &loan_id(&fx.env, 0x49));
     f.mint_senior(&investor, &fx.union, &(100 * NIN), &Tag::Offshore);
-    f.set_voucher_floor(&fx.union, &(90 * NIN));
 
-    // ₹1,900 → 20.2 USDC: would cut into the floor.
-    let big = f.post_offer(
-        &fx.leader,
-        &fx.union,
-        &OfferKind::Bring,
-        &(1_900 * NIN),
-        &(T0 + 3_600),
-    );
+    // No position: no Bring.
+    let b = fx.offer_of(OfferKind::Bring, 95 * NIN);
+    assert_eq!(fx.try_acc(&lp, &b, &s24, &q), Err(Ok(FxError::NoPosition)));
+    f.cancel_offer(&fx.leader, &b);
+    let c = fx.offer_of(OfferKind::Collect, 950 * NIN);
+    fx.acc(&lp, &c, &s24, &q);
+    f.confirm(&fx.leader, &c);
+    // Above what she owes: refused.
+    let big = fx.offer_of(OfferKind::Bring, 1_900 * NIN);
     assert_eq!(
         fx.try_acc(&lp, &big, &s24, &q),
-        Err(Ok(FxError::BelowVoucherFloor))
+        Err(Ok(FxError::NoPosition))
     );
-    // Withdrawn, so the next amount is an offer of its own (an open one would take it, 25 Oct).
-    f.cancel_offer(&fx.leader, &big);
-    // Only 10 USDC are free above the floor: ₹950 (10.1 USDC with the fee) is refused, ₹900 fits.
-    let mid = f.post_offer(
-        &fx.leader,
-        &fx.union,
-        &OfferKind::Bring,
-        &(950 * NIN),
-        &(T0 + 3_600),
-    );
-    assert_eq!(
-        fx.try_acc(&lp, &mid, &s24, &q),
-        Err(Ok(FxError::BelowVoucherFloor))
-    );
-    f.cancel_offer(&fx.leader, &mid);
-    let ok = f.post_offer(
-        &fx.leader,
-        &fx.union,
-        &OfferKind::Bring,
-        &(900 * NIN),
-        &(T0 + 3_600),
-    );
-    let paid = fx.acc(&lp, &ok, &s24, &q);
-    let o = f.offer(&ok).unwrap();
-    assert_eq!((o.from_lp, o.from_domestic, o.from_offshore), (0, 0, paid));
-    assert_eq!(f.senior_usdc(&fx.union, &Tag::Offshore), 100 * NIN - paid);
-    // Cancelling hands the reservation back; expiry does the same.
-    f.cancel_offer(&fx.leader, &ok);
     assert_eq!(f.senior_usdc(&fx.union, &Tag::Offshore), 100 * NIN);
-    let again = f.post_offer(
-        &fx.leader,
-        &fx.union,
-        &OfferKind::Bring,
-        &(900 * NIN),
-        &(T0 + 3_600),
-    );
+}
+
+#[test]
+fn a_collect_not_handed_over_unlocks_again() {
+    let fx = setup();
+    let f = fx.fx();
+    let (_anchor, lp) = fx.lp_ready();
+    let (s24, q) = fx.ids();
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&lp, &(50 * NIN));
+    // Cancelled by the leader after she accepted.
+    let c = fx.offer_of(OfferKind::Collect, 950 * NIN);
+    fx.acc(&lp, &c, &s24, &q);
+    assert_eq!(fx.acct(&lp).lien(), 110_000_000);
+    f.cancel_offer(&fx.leader, &c);
+    assert_eq!(fx.acct(&lp).lien(), 0);
+    // Not collected before the offer ran out: anyone expires it, the lock goes.
+    let again = fx.offer_of(OfferKind::Collect, 950 * NIN);
     fx.acc(&lp, &again, &s24, &q);
     assert_eq!(f.try_expire_offer(&again), Err(Ok(FxError::NotExpired)));
     fx.at(T0 + 3_600);
@@ -1939,8 +1965,9 @@ fn bring_draws_senior_usdc_only_above_the_voucher_floor() {
     fx.env.set_auths(&[]);
     f.expire_offer(&again);
     fx.env.mock_all_auths();
-    assert_eq!(f.senior_usdc(&fx.union, &Tag::Offshore), 100 * NIN);
+    assert_eq!(fx.acct(&lp).lien(), 0);
     assert_eq!(f.offer(&again).unwrap().state, OfferState::Expired);
+    assert_eq!(f.position(&fx.union, &lp), None);
 }
 
 #[test]
@@ -1969,18 +1996,12 @@ fn only_member_lps_accepted_by_the_anchor() {
         .is_err());
     fx.env.mock_all_auths();
     let _ = anchor;
-    let c = f.post_offer(
-        &fx.leader,
-        &fx.union,
-        &OfferKind::Collect,
-        &(95 * NIN),
-        &(T0 + 3_600),
-    );
+    let c = fx.offer_of(OfferKind::Collect, 95 * NIN);
     assert_eq!(
         fx.try_acc(&fx.borrower, &c, &s24, &q),
         Err(Ok(FxError::NotLp))
     );
-    // Only a leader posts and confirms; offers are capped at ₹10,000 and 7 days.
+    // Only a leader posts and confirms; offers are capped at the max scan and 7 days.
     assert_eq!(
         f.try_post_offer(&lp, &fx.union, &OfferKind::Bring, &NIN, &(T0 + 3_600)),
         Err(Ok(FxError::NotLeader))
@@ -2005,66 +2026,88 @@ fn only_member_lps_accepted_by_the_anchor() {
         ),
         Err(Ok(FxError::BadExpiry))
     );
-    // A Bring with no USDC in the union.
-    let b = f.post_offer(
-        &fx.leader,
-        &fx.union,
-        &OfferKind::Bring,
-        &(95 * NIN),
-        &(T0 + 3_600),
-    );
-    assert_eq!(fx.try_acc(&lp, &b, &s24, &q), Err(Ok(FxError::NoUsdc)));
     // A dropped LP cannot accept.
     f.set_lp(&fx.union, &lp, &false, &loan_id(&fx.env, 1));
     assert_eq!(fx.try_acc(&lp, &c, &s24, &q), Err(Ok(FxError::NotLp)));
 }
 
 #[test]
-fn collect_accept_needs_only_the_lp_signature() {
+fn a_collect_locks_only_her_free_usdc_with_her_signature_alone() {
     let fx = setup();
     let f = fx.fx();
     let (_anchor, lp) = fx.lp_ready();
-    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&lp, &(50 * NIN));
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&lp, &(15 * NIN));
     let (s24, q) = fx.ids();
-    let c = f.post_offer(
-        &fx.leader,
-        &fx.union,
-        &OfferKind::Collect,
-        &(950 * NIN),
-        &(T0 + 3_600),
-    );
-    let expiry_ledger = fx.env.ledger().sequence() + (3_600 / 5 + 1) as u32;
+    let c = fx.offer_of(OfferKind::Collect, 950 * NIN);
     let (usdc, until, sig) = fx.signed(&lp, c, &s24, &q);
-    fx.env.mock_auths(&[MockAuth {
-        address: &lp,
-        invoke: &MockAuthInvoke {
-            contract: &fx.fx_id,
-            fn_name: "accept",
-            args: (
-                lp.clone(),
-                c,
-                s24.clone(),
-                q.clone(),
-                usdc,
-                until,
-                sig.clone(),
-            )
-                .into_val(&fx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &fx.usdc,
-                fn_name: "approve",
-                args: (lp.clone(), fx.fx_id.clone(), 99_000_000i128, expiry_ledger)
-                    .into_val(&fx.env),
-                sub_invokes: &[],
-            }],
-        },
-    }]);
+    // Her one signature, on accept, with nothing under it: the lock is fx_pool's own call into her
+    // account (no approve, no transfer).
     f.accept(&lp, &c, &s24, &q, &usdc, &until, &sig);
+    let auths = fx.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, lp);
+    assert!(auths[0].1.sub_invocations.is_empty());
     fx.env.mock_all_auths();
+    assert_eq!(fx.acct(&lp).lien(), 110_000_000);
     assert_eq!(
         TokenClient::new(&fx.env, &fx.usdc).allowance(&lp, &fx.fx_id),
-        99_000_000
+        0
     );
+    // 4 USDC free: a second Collect of ₹950 (11 USDC) is refused by her account.
+    let c2 = fx.offer_of(OfferKind::Collect, 950 * NIN);
+    assert!(fx.try_acc(&lp, &c2, &s24, &q).is_err());
+    assert_eq!(fx.acct(&lp).lien(), 110_000_000);
+    // Only fx_pool may lock or unlock.
+    fx.env.set_auths(&[]);
+    assert!(fx.acct(&lp).try_unlock(&NIN).is_err());
+    assert!(fx.acct(&lp).try_lock(&NIN).is_err());
+    fx.env.mock_all_auths();
+}
+
+/// A called position, after 7 days' notice: the union's multisig claims through her account the
+/// USDC worth what she owes at today's fix; the rest unlocks. fx_pool never moves her USDC.
+#[test]
+fn a_called_position_is_claimed_through_her_account_after_the_notice() {
+    let fx = setup();
+    let f = fx.fx();
+    let (_anchor, lp) = fx.lp_ready();
+    let usdc = TokenClient::new(&fx.env, &fx.usdc);
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&lp, &(50 * NIN));
+    let (s24, q) = fx.ids();
+    let c = fx.offer_of(OfferKind::Collect, 950 * NIN);
+    fx.acc(&lp, &c, &s24, &q);
+    f.confirm(&fx.leader, &c);
+    let a = fx.acct(&lp);
+
+    // Not called: nothing to claim.
+    assert_eq!(f.claimable(&fx.union, &lp), 0);
+    assert!(a.try_claim(&NIN).is_err());
+    // Only a leader calls.
+    assert_eq!(
+        f.try_call_position(&fx.borrower, &fx.union, &lp),
+        Err(Ok(FxError::NotLeader))
+    );
+    assert_eq!(f.call_position(&fx.leader, &fx.union, &lp), T0 + 7 * 86_400);
+    assert_eq!(f.position(&fx.union, &lp).unwrap().called_at, Some(T0));
+    fx.at(T0 + 7 * 86_400 - 1);
+    assert_eq!(f.claimable(&fx.union, &lp), 0);
+    // After the notice, at today's fix: ₹950 at ₹95 = 10 USDC.
+    fx.at(T0 + 7 * 86_400);
+    f.override_rate(&(95 * NIN), &(T0 + 8 * 86_400));
+    assert_eq!(f.claimable(&fx.union, &lp), 10 * NIN);
+    // fx_pool books a claim only from her account itself.
+    fx.env.set_auths(&[]);
+    assert!(f.try_book_claim(&fx.union, &lp, &NIN).is_err());
+    // Only the union's multisig claims.
+    assert!(a.try_claim(&(10 * NIN)).is_err());
+    fx.env.mock_all_auths();
+    assert!(a.try_claim(&(11 * NIN)).is_err());
+    assert_eq!(a.claim(&(10 * NIN)), NIN);
+    assert_eq!(usdc.balance(&fx.union), 10 * NIN);
+    assert_eq!(usdc.balance(&lp), 40 * NIN);
+    assert_eq!(a.lien(), 0);
+    assert_eq!(f.position(&fx.union, &lp), None);
+    assert_eq!(f.lp_owed(&fx.union), 0);
 }
 
 // ---------- C5: machinery vouchers ----------
@@ -2506,53 +2549,6 @@ fn self_claim_rate_rise_and_handing_hours_back() {
 }
 
 #[test]
-fn bring_respects_the_daily_cap_and_the_voucher_earmark() {
-    let v = vsetup();
-    let (fx, c, f) = (&v.fx, v.fx.core(), v.fx.fx());
-    let anchor = Address::generate(&fx.env);
-    f.set_anchor(&anchor);
-    f.set_id_checked(&v.owner, &true, &loan_id(&fx.env, 0x4B));
-    f.set_lp(&fx.union, &v.owner, &true, &loan_id(&fx.env, 0x4C));
-    fx.scan(Purpose::Treasury, &fx.leader, 5_000 * NIN, 1, None)
-        .unwrap();
-    let (s24, q) = fx.ids();
-    // 200 senior USDC at ₹50; a voucher of 6.76 tractor hours sets aside ₹9,802 = 196.04 USDC.
-    let id = loan_id(&fx.env, 1);
-    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &676);
-    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &676);
-    // ₹250 → 5 USDC + 1% would cut into the 196 USDC held for the voucher.
-    let b = f.post_offer(
-        &fx.leader,
-        &fx.union,
-        &OfferKind::Bring,
-        &(250 * NIN),
-        &(T0 + 3_600),
-    );
-    assert_eq!(
-        fx.try_acc(&v.owner, &b, &s24, &q),
-        Err(Ok(FxError::BelowVoucherFloor))
-    );
-    f.cancel_offer(&fx.leader, &b);
-    // ₹150 → 3.03 USDC fits in the 4 free.
-    let ok = f.post_offer(
-        &fx.leader,
-        &fx.union,
-        &OfferKind::Bring,
-        &(150 * NIN),
-        &(T0 + 3_600),
-    );
-    fx.acc(&v.owner, &ok, &s24, &q);
-    // The daily cap: set it below the payout and the confirm is refused.
-    f.set_daily_cap(&NIN);
-    assert_eq!(
-        f.try_confirm(&fx.leader, &ok),
-        Err(Ok(FxError::CapExceeded))
-    );
-    f.set_daily_cap(&(2_500 * NIN));
-    f.confirm(&fx.leader, &ok);
-}
-
-#[test]
 fn a_title_in_any_union_makes_her_junior_never_senior() {
     let fx = setup();
     let f = fx.fx();
@@ -2604,39 +2600,26 @@ fn handing_hours_back_is_hers_only() {
 }
 
 #[test]
-fn repaid_cash_goes_out_by_collect_and_a_loan_comes_in_by_bring() {
+fn repaid_cash_goes_out_with_an_lp_and_comes_back_for_a_loan() {
     let fx = setup();
     let (c, f) = (fx.core(), fx.fx());
     let (_anchor, lp) = fx.lp_ready(); // treasury 5,000; the borrower invested 2,000 (escrow)
     StellarAssetClient::new(&fx.env, &fx.usdc).mint(&lp, &(100 * NIN));
     let (s24, q) = fx.ids();
-    // No other borrower for the 2,000 in the drawer: an LP collects it for USDC.
-    let col = f.post_offer(
-        &fx.leader,
-        &fx.union,
-        &OfferKind::Collect,
-        &(1_900 * NIN),
-        &(T0 + 3_600),
-    );
+    // No other borrower for the 2,000 in the drawer: an LP takes 1,900 of it against her lock.
+    let col = fx.offer_of(OfferKind::Collect, 1_900 * NIN);
     fx.acc(&lp, &col, &s24, &q);
     f.confirm(&fx.leader, &col);
     assert_eq!(f.cash_at_hand(&fx.union), 100 * NIN);
-    // Later a member wants 950 in cash and the drawer is short: an LP brings it.
-    let br = f.post_offer(
-        &fx.leader,
-        &fx.union,
-        &OfferKind::Bring,
-        &(950 * NIN),
-        &(T0 + 3_600),
-    );
+    // Later a member wants cash and the drawer is short: the LP brings ₹950 back (₹940.50 less her fee).
+    let br = fx.offer_of(OfferKind::Bring, 950 * NIN);
     fx.acc(&lp, &br, &s24, &q);
     f.confirm(&fx.leader, &br);
-    // Her rupees are cash at hand until the draw hands them out.
-    assert_eq!(f.cash_at_hand(&fx.union), 1_050 * NIN);
+    assert_eq!(f.cash_at_hand(&fx.union), 1_040 * NIN + 5_000_000);
     let id = loan_id(&fx.env, 1);
-    fx.attest(&fx.borrower, &id, 950 * NIN);
-    c.draw_loan(&fx.union, &fx.borrower, &id, &(950 * NIN), &0);
-    assert_eq!(f.cash_at_hand(&fx.union), 100 * NIN);
+    fx.attest(&fx.borrower, &id, 900 * NIN);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &(900 * NIN), &0);
+    assert_eq!(f.cash_at_hand(&fx.union), 140 * NIN + 5_000_000);
     // A scan can never open a Bring escrow itself.
     assert!(fx.scan(Purpose::Bring, &fx.borrower, NIN, 9, None).is_err());
     fx.assert_conserved();

@@ -74,6 +74,9 @@ pub enum DataKey {
     SessionContracts,
     AccountWasm,
     PendingWasm,
+    /// The LP pledge (30 Oct): the fx_pool that may lock and unlock an account's USDC, and the USDC.
+    FxPool,
+    Usdc,
 }
 
 #[contractevent]
@@ -185,6 +188,14 @@ impl AccountFactory {
         Ok(())
     }
 
+    /// The LP pledge (30 Oct): the fx_pool whose positions put liens on the accounts' USDC.
+    pub fn set_pledge(env: Env, fx_pool: Address, usdc: Address) {
+        require_union(&env);
+        env.storage().instance().set(&DataKey::FxPool, &fx_pool);
+        env.storage().instance().set(&DataKey::Usdc, &usdc);
+        bump_instance(&env);
+    }
+
     /// A new account code: each account moves to it with its own `upgrade` once the timelock
     /// has passed and it is applied here.
     pub fn propose_account_wasm(env: Env, hash: BytesN<32>) {
@@ -237,6 +248,14 @@ impl AccountFactory {
     pub fn account_wasm(env: Env) -> BytesN<32> {
         get(&env, DataKey::AccountWasm)
     }
+    pub fn fx_pool(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::FxPool)
+    }
+
+    pub fn usdc(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Usdc)
+    }
+
     pub fn pending_account_wasm(env: Env) -> Option<PendingWasm> {
         env.storage().instance().get(&DataKey::PendingWasm)
     }

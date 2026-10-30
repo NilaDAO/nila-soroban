@@ -17,6 +17,10 @@ mod mocks {
         Allowed,
         Union,
         Leaders,
+        Pool,
+        Usdc,
+        Claimable,
+        Unlocks,
     }
     #[contract]
     pub struct Factory;
@@ -44,6 +48,33 @@ mod mocks {
         }
         pub fn account_wasm(env: Env) -> BytesN<32> {
             BytesN::from_array(&env, &[0; 32])
+        }
+        pub fn set_pledge(env: Env, pool: Address, usdc: Address) {
+            env.storage().instance().set(&K::Pool, &pool);
+            env.storage().instance().set(&K::Usdc, &usdc);
+        }
+        pub fn fx_pool(env: Env) -> Option<Address> {
+            env.storage().instance().get(&K::Pool)
+        }
+        pub fn usdc(env: Env) -> Option<Address> {
+            env.storage().instance().get(&K::Usdc)
+        }
+    }
+    /// fx_pool as the account sees it in a claim: what may be claimed, and what unlocks after.
+    #[contract]
+    pub struct Pool;
+    #[contractimpl]
+    impl Pool {
+        pub fn set(env: Env, claimable: i128, unlocks: i128) {
+            env.storage().instance().set(&K::Claimable, &claimable);
+            env.storage().instance().set(&K::Unlocks, &unlocks);
+        }
+        pub fn claimable(env: Env, _union: Address, _lp: Address) -> i128 {
+            env.storage().instance().get(&K::Claimable).unwrap_or(0)
+        }
+        pub fn book_claim(env: Env, _union: Address, lp: Address, _usdc: i128) -> i128 {
+            lp.require_auth();
+            env.storage().instance().get(&K::Unlocks).unwrap_or(0)
         }
     }
     #[contract]
@@ -353,4 +384,112 @@ fn a_pending_recovery_freezes_the_account_and_only_the_union_cancels() {
     );
     assert!(check(&t, [3; 32], sign(&t.env, &t.key, &[3; 32]), &draw).is_err());
     assert_eq!(t.c.start_session(&1_800_172_900), 1_800_172_800 + 300);
+}
+
+// ---------- the LP pledge (30 Oct) ----------
+
+struct P {
+    t: T,
+    pool: Address,
+    usdc: Address,
+}
+
+/// The factory names fx_pool (the mock) and a USDC asset; the account holds 50 USDC.
+fn pledge() -> P {
+    let t = setup();
+    let pool = t.env.register(mocks::Pool, ());
+    let usdc = t
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&t.env))
+        .address();
+    let factory = t.c.factory();
+    mocks::FactoryClient::new(&t.env, &factory).set_pledge(&pool, &usdc);
+    soroban_sdk::token::StellarAssetClient::new(&t.env, &usdc).mint(&t.acct, &50);
+    P { t, pool, usdc }
+}
+
+fn usdc_call(env: &Env, usdc: &Address, f: &str) -> Vec<Context> {
+    vec![
+        env,
+        Context::Contract(ContractContext {
+            contract: usdc.clone(),
+            fn_name: soroban_sdk::Symbol::new(env, f),
+            args: vec![env],
+        }),
+    ]
+}
+
+#[test]
+fn only_fx_pool_locks_and_never_above_her_free_usdc() {
+    let p = pledge();
+    let t = &p.t;
+    assert_eq!(t.c.lock(&30), 30);
+    let auths = t.env.auths();
+    assert_eq!(auths[0].0, p.pool);
+    assert_eq!(t.c.try_lock(&21), Err(Ok(Error::Locked)));
+    assert_eq!(t.c.try_lock(&0), Err(Ok(Error::BadAmount)));
+    assert_eq!(t.c.lock(&20), 50);
+    assert_eq!(t.c.unlock(&45), 5);
+    assert_eq!(t.c.unlock(&99), 0);
+    // Nobody else.
+    t.env.set_auths(&[]);
+    assert!(t.c.try_lock(&1).is_err());
+    assert!(t.c.try_unlock(&1).is_err());
+}
+
+#[test]
+fn while_a_lien_stands_usdc_leaves_only_by_send_usdc_within_the_free_part() {
+    let p = pledge();
+    let t = &p.t;
+    let k = |n: u8| sign(&t.env, &t.key, &[n; 32]);
+    let transfer = usdc_call(&t.env, &p.usdc, "transfer");
+    // No lien: her signer may move USDC directly; an approve never.
+    assert_eq!(check(t, [1; 32], k(1), &transfer), Ok(()));
+    assert_eq!(
+        check(t, [1; 32], k(1), &usdc_call(&t.env, &p.usdc, "approve")),
+        Err(Ok(Error::Locked))
+    );
+    t.c.lock(&30);
+    for f in ["transfer", "burn", "approve"] {
+        assert_eq!(
+            check(t, [1; 32], k(1), &usdc_call(&t.env, &p.usdc, f)),
+            Err(Ok(Error::Locked))
+        );
+    }
+    // Other contracts are unaffected.
+    assert_eq!(
+        check(t, [1; 32], k(1), &call_on(&t.env, &t.fund_core)),
+        Ok(())
+    );
+    // Her free 20 go out with send_usdc; more does not.
+    let to = Address::generate(&t.env);
+    assert_eq!(t.c.try_send_usdc(&to, &21), Err(Ok(Error::Locked)));
+    t.c.send_usdc(&to, &20);
+    let tok = soroban_sdk::token::TokenClient::new(&t.env, &p.usdc);
+    assert_eq!((tok.balance(&t.acct), tok.balance(&to)), (30, 20));
+    assert_eq!(t.c.try_send_usdc(&to, &1), Err(Ok(Error::Locked)));
+}
+
+#[test]
+fn only_the_unions_multisig_claims_and_only_what_fx_pool_allows() {
+    let p = pledge();
+    let t = &p.t;
+    let pc = mocks::PoolClient::new(&t.env, &p.pool);
+    t.c.lock(&33);
+    // Not claimable yet (no call, or the notice runs).
+    assert_eq!(t.c.try_claim(&10), Err(Ok(Error::NotClaimable)));
+    pc.set(&30, &3);
+    assert_eq!(t.c.try_claim(&31), Err(Ok(Error::NotClaimable)));
+    // A frozen account (a recovery pending) is still claimed.
+    t.c.recover_by_leaders(&signer_of(&t.env, &t.key), &t.leaders[0], &t.leaders[1]);
+    assert_eq!(t.c.claim(&30), 3);
+    let auths = t.env.auths();
+    assert_eq!(auths[0].0, t.union_ms);
+    let tok = soroban_sdk::token::TokenClient::new(&t.env, &p.usdc);
+    assert_eq!((tok.balance(&t.acct), tok.balance(&t.union_ms)), (20, 30));
+    assert_eq!(t.c.lien(), 0);
+    // Nobody else.
+    t.c.lock(&5);
+    t.env.set_auths(&[]);
+    assert!(t.c.try_claim(&1).is_err());
 }
