@@ -1326,11 +1326,9 @@ impl FundCore {
             bump_instance(&env);
             return Ok(());
         }
-        if cash > uc.max_loan {
-            return Err(Error::CapExceeded);
-        }
-        // During testing the union may give more than the attested amount (executive decision, 9 Oct);
-        // the ₹10,000 cap above still holds.
+        // No ₹10,000 cap in code (30 Oct, executive decision): the crop plan and the leaders keep it as the agreement
+        // for the first cycle; `max_loan` stays in the union config only as that recommendation. During testing the
+        // union may give more than the attested amount (executive decision, 9 Oct).
         if uc.enforce_token_amount && (cash > ft.amount || hours > ft.hours) {
             return Err(Error::AboveFoodToken);
         }

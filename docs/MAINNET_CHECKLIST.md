@@ -100,7 +100,7 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
       the trust account.
 - [ ] The nIN SAC `admin` = fx_pool. The issuer has master weight 0 and no other signers.
 - [ ] fx_pool `fund_core` and fund_core `fx_pool` point at each other.
-- [ ] `is_paused` = false. `max_scan` = 10,000 nIN. `daily_cap` = 2,500 USDC: it caps the USDC
+- [ ] `is_paused` = false. `max_scan` = 10,000 nIN (leader swaps, USDC into the treasury and the move mint only; cash scans, desk payouts and LP offers are uncapped since 30 Oct). `daily_cap` = 2,500 USDC: it caps the USDC
       Bring offers pay out in a day.
 - [ ] LP offers: `anchor` = the trust's anchor account (nila-anchor), `lp_fee` = 100 (1%),
       `voucher_floor` per union as decided.
@@ -150,8 +150,9 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
   5. Lowering the delay waits out the current delay, and must then be applied within 7 days.
      Any raise or `cancel_upgrade` voids a filed lowering. The delay is never above 30 days.
 - **Caps.** Raise in steps, each evented:
-  - fx_pool `set_max_scan` (per scan and per cash-out);
-  - per union `max_loan`.
+  - fx_pool `set_max_scan` (leader swaps, USDC into the treasury, the move mint);
+  - per union `max_loan` is a recommendation only since 30 Oct (the crop plan and the leaders hold ₹10,000 for the
+    first cycle; `draw_loan` does not check it).
 - **TTL and archival.**
   - Contract instances and code stay alive while they are used.
   - Idle persistent entries (an old title, a closed loan) are archived after about 120 days

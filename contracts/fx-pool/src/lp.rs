@@ -734,7 +734,7 @@ impl FxPoolContract {
 
 /// An open offer of the union's rupees (post_offer, and the cash scan's own Collect over the treasury, 24 Oct).
 /// Merged (25 Oct): while the union has an open offer of the same kind no LP has accepted yet, the rupees are added
-/// to it (up to the most one offer can be, the max scan) and its expiry moved to the later one, instead of a new
+/// to it (no size limit since 30 Oct) and its expiry moved to the later one, instead of a new
 /// offer; the id returned is that offer's.
 pub(crate) fn open_offer(
     env: &Env,
@@ -747,11 +747,7 @@ pub(crate) fn open_offer(
     let now = env.ledger().timestamp();
     for oid in ids.iter() {
         if let Ok(mut o) = load_offer(env, oid) {
-            if o.kind == kind
-                && o.state == OfferState::Open
-                && o.expires > now
-                && o.inr + inr <= max_scan(env)
-            {
+            if o.kind == kind && o.state == OfferState::Open && o.expires > now {
                 o.inr += inr;
                 o.expires = core::cmp::max(o.expires, expires);
                 save_offer(env, oid, &o);

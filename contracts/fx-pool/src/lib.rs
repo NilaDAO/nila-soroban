@@ -520,12 +520,20 @@ pub(crate) fn max_scan(env: &Env) -> i128 {
         .unwrap_or(DEFAULT_MAX_SCAN)
 }
 
+// Swaps, USDC into the treasury and the move mint stay capped at max_scan.
 fn check_amount(env: &Env, amount: i128) -> Result<(), Error> {
-    if amount <= 0 {
-        return Err(Error::AmountZero);
-    }
+    check_positive(amount)?;
     if amount > max_scan(env) {
         return Err(Error::CapExceeded);
+    }
+    Ok(())
+}
+
+// Cash scans and desk payouts are not capped (30 Oct, executive decision): the ₹10,000 is the crop plan's and the
+// leaders' agreement for the first cycle, not code.
+fn check_positive(amount: i128) -> Result<(), Error> {
+    if amount <= 0 {
+        return Err(Error::AmountZero);
     }
     Ok(())
 }
@@ -842,7 +850,7 @@ impl FxPoolContract {
     ) -> Result<u64, Error> {
         require_not_paused(&env)?;
         require_leader(&env, &union, &leader)?;
-        check_amount(&env, amount)?;
+        check_positive(amount)?;
         let core = core_addr(&env)?;
         let fc = FundCoreClient::new(&env, &core);
         // Counted cash never goes into the treasury (executive decision 22 Oct); a Bring is opened
@@ -1440,7 +1448,7 @@ impl FxPoolContract {
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         member.require_auth();
-        check_amount(&env, amount)?;
+        check_positive(amount)?;
         let now = env.ledger().timestamp();
         if expires <= now || expires > now + MAX_CASH_OUT_TERM {
             return Err(Error::BadExpiry);
@@ -1527,7 +1535,7 @@ impl FxPoolContract {
         require_not_paused(&env)?;
         require_leader(&env, &union, &leader)?;
         member.require_auth_for_args((union.clone(), amount).into_val(&env));
-        check_amount(&env, amount)?;
+        check_positive(amount)?;
         if !is_member_or_leader(&env, &union, &member) {
             return Err(Error::NotMember);
         }

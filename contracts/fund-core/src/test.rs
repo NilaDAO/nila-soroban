@@ -323,11 +323,7 @@ fn draw_checks_title_gate_cap_and_cash() {
 
     fx.invest(&fx.borrower, NIN);
     fx.invest(&fx.neighbour, 20_000 * NIN);
-    // R34: ₹10,000 per loan.
-    let err = c
-        .try_draw_loan(&fx.union, &fx.borrower, &id, &(10_000 * NIN + 1), &0)
-        .unwrap_err();
-    assert_eq!(err, Ok(Error::CapExceeded));
+    // R34's ₹10,000 per loan is the plan's and the leaders' since 30 Oct, not code.
     c.draw_loan(&fx.union, &fx.borrower, &id, &(10_000 * NIN), &0);
     // One loan per token: the token id is the loan id.
     let err = c
@@ -849,9 +845,8 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
     uc.enforce_token_amount = true;
     c.set_union_config(&fx.union, &uc);
     assert_eq!(draw(&tok, &l1, 500 * NIN + 1), Ok(Error::AboveFoodToken));
-    // Testing (gate off): the union may give more than attested, within the ₹10,000 cap.
+    // Testing (gate off): the union may give more than attested (no ₹10,000 cap in code since 30 Oct).
     c.set_union_config(&fx.union, &union_cfg());
-    assert_eq!(draw(&tok, &l1, 10_000 * NIN + 1), Ok(Error::CapExceeded));
     c.draw_loan(&fx.union, &fx.borrower, &tok, &(800 * NIN), &0);
     // The loan lives inside the token's entry; the token id is the loan id (C6).
     assert!(c.food_token(&fx.union, &tok).unwrap().loan.drawn());
@@ -999,13 +994,13 @@ fn cash_over_the_treasury_opens_a_collect_offer() {
     let ids = f.offers_of(&fx.union);
     assert_eq!(ids.len(), 1);
     assert_eq!(f.offer(&ids.get(0).unwrap()).unwrap().inr, 300 * NIN);
-    // Up to the max scan only: a part that would take it past gets an offer of its own.
+    // No size limit (30 Oct): it keeps growing past the max scan.
     f.set_max_scan(&(350 * NIN));
     fx.scan(Purpose::Invest, &fx.neighbour, 100 * NIN, 5, None)
         .unwrap();
     let ids = f.offers_of(&fx.union);
-    assert_eq!(ids.len(), 2);
-    assert_eq!(f.offer(&ids.get(1).unwrap()).unwrap().inr, 100 * NIN);
+    assert_eq!(ids.len(), 1);
+    assert_eq!(f.offer(&ids.get(0).unwrap()).unwrap().inr, 400 * NIN);
     fx.assert_conserved();
 }
 
@@ -1080,11 +1075,9 @@ fn scan_caps_and_roles() {
     let fx = setup();
     fx.scan(Purpose::Treasury, &fx.leader, 10_000 * NIN, 1, None)
         .unwrap();
-    // ₹10,000 per scan (R76).
-    assert_eq!(
-        fx.scan(Purpose::Invest, &fx.borrower, 10_000 * NIN + 1, 2, None),
-        Err(FxError::CapExceeded)
-    );
+    // No ₹10,000 per scan since 30 Oct (R76 is the leaders' agreement).
+    fx.scan(Purpose::Invest, &fx.borrower, 10_000 * NIN + 1, 2, None)
+        .unwrap();
     assert_eq!(
         fx.scan(Purpose::Invest, &fx.borrower, 0, 3, None),
         Err(FxError::AmountZero)
@@ -1268,10 +1261,6 @@ fn cash_out_signed_burns_her_nin_at_the_desk() {
         f.try_cash_out_signed(&fx.leader, &fx.union, &stranger, &NIN),
         Err(Ok(FxError::NotMember))
     );
-    assert_eq!(
-        f.try_cash_out_signed(&fx.leader, &fx.union, &fx.neighbour, &(10_000 * NIN + 1)),
-        Err(Ok(FxError::CapExceeded))
-    );
 
     let hand = f.cash_at_hand(&fx.union);
     assert_eq!(
@@ -1344,12 +1333,8 @@ fn cash_out_pay_out_and_reclaim() {
     assert_eq!(f.try_pay_out(&fx.leader, &code), Err(Ok(FxError::NotFound)));
     fx.assert_fx_empty();
 
-    // Caps: ₹10,000, at most 7 days, a code is used once while open.
+    // Caps: at most 7 days, a code is used once while open (no ₹10,000 cap since 30 Oct).
     let h2 = hash(&fx.env, 9);
-    assert_eq!(
-        f.try_request_cash_out(&fx.neighbour, &fx.union, &(10_000 * NIN + 1), &h2, &expires),
-        Err(Ok(FxError::CapExceeded))
-    );
     assert_eq!(
         f.try_request_cash_out(&fx.neighbour, &fx.union, &NIN, &h2, &(now + 8 * 86_400)),
         Err(Ok(FxError::BadExpiry))
