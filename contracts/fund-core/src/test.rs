@@ -1834,18 +1834,15 @@ fn collect_then_bring_through_an_lp() {
     );
     assert_eq!(f.offer(&c).unwrap().state, OfferState::Done);
 
-    // Half back: she brings ₹475 less her 1% (₹470.25); the fee is the union's, from its treasury;
+    // Half back: she brings ₹475 less her 1% in whole rupees (₹471); the fee is the union's, from its treasury;
     // half her lock unlocks.
     let treasury = fx.core().union_treasury(&fx.union);
     let b = fx.offer_of(OfferKind::Bring, 475 * NIN);
     assert_eq!(fx.acc(&lp, &b, &s24, &q), 55_000_000);
     let hand = f.cash_at_hand(&fx.union);
     f.confirm(&fx.leader, &b);
-    assert_eq!(f.cash_at_hand(&fx.union), hand + 470 * NIN + 2_500_000);
-    assert_eq!(
-        fx.core().union_treasury(&fx.union),
-        treasury - 4 * NIN - 7_500_000
-    );
+    assert_eq!(f.cash_at_hand(&fx.union), hand + 471 * NIN);
+    assert_eq!(fx.core().union_treasury(&fx.union), treasury - 4 * NIN);
     assert_eq!(fx.acct(&lp).lien(), 55_000_000);
     let p = f.position(&fx.union, &lp).unwrap();
     assert_eq!((p.owed, p.locked), (475 * NIN, 55_000_000));
@@ -1885,7 +1882,7 @@ fn quote_matches_what_accept_fixes() {
     f.confirm(&fx.leader, &c);
     // A Bring: the rupees' USDC value and her fee in rupees; what unlocks is hers, pro rata.
     let qb = f.quote(&fx.union, &OfferKind::Bring, &(475 * NIN));
-    assert_eq!((qb.usdc, qb.fee_inr), (50_000_000, 4 * NIN + 7_500_000));
+    assert_eq!((qb.usdc, qb.fee_inr), (50_000_000, 4 * NIN));
     assert_eq!(f.bring_unlock(&fx.union, &lp, &(475 * NIN)), 55_000_000);
     assert_eq!(
         f.try_bring_unlock(&fx.union, &lp, &(951 * NIN)),
@@ -1896,7 +1893,7 @@ fn quote_matches_what_accept_fixes() {
     f.set_lp_fee(&200);
     assert_eq!(
         f.quote(&fx.union, &OfferKind::Bring, &(475 * NIN)).fee_inr,
-        9 * NIN + 5_000_000
+        9 * NIN
     );
     assert_eq!(
         f.try_quote(&fx.union, &OfferKind::Bring, &0),
@@ -2616,15 +2613,15 @@ fn repaid_cash_goes_out_with_an_lp_and_comes_back_for_a_loan() {
     fx.acc(&lp, &col, &s24, &q);
     f.confirm(&fx.leader, &col);
     assert_eq!(f.cash_at_hand(&fx.union), 100 * NIN);
-    // Later a member wants cash and the drawer is short: the LP brings ₹950 back (₹940.50 less her fee).
+    // Later a member wants cash and the drawer is short: the LP brings ₹950 back (₹941 after her ₹9 fee).
     let br = fx.offer_of(OfferKind::Bring, 950 * NIN);
     fx.acc(&lp, &br, &s24, &q);
     f.confirm(&fx.leader, &br);
-    assert_eq!(f.cash_at_hand(&fx.union), 1_040 * NIN + 5_000_000);
+    assert_eq!(f.cash_at_hand(&fx.union), 1_041 * NIN);
     let id = loan_id(&fx.env, 1);
     fx.attest(&fx.borrower, &id, 900 * NIN);
     c.draw_loan(&fx.union, &fx.borrower, &id, &(900 * NIN), &0);
-    assert_eq!(f.cash_at_hand(&fx.union), 140 * NIN + 5_000_000);
+    assert_eq!(f.cash_at_hand(&fx.union), 141 * NIN);
     // A scan can never open a Bring escrow itself.
     assert!(fx.scan(Purpose::Bring, &fx.borrower, NIN, 9, None).is_err());
     fx.assert_conserved();

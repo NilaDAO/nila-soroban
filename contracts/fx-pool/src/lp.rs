@@ -333,7 +333,11 @@ fn price(env: &Env, kind: OfferKind, inr: i128) -> Result<Quote, Error> {
     let (usdc, fee_inr) = match kind {
         // Rounded up: the lock never sits below 110%.
         OfferKind::Collect => ((base * LOCK_MARGIN_BP + 9_999) / 10_000, 0),
-        OfferKind::Bring => (base, inr * i128::from(fee_bp) / 10_000),
+        // Whole rupees, rounded down: she hands over notes.
+        OfferKind::Bring => (
+            base,
+            inr * i128::from(fee_bp) / 10_000 / NIN_UNIT * NIN_UNIT,
+        ),
     };
     Ok(Quote {
         usdc,
