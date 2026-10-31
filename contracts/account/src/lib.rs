@@ -19,11 +19,12 @@
 //! needs none of this unless the member's number is lost.) The node holds no power here.
 //! Settings (roles, wait, session length and contracts, the account code) come from the
 //! factory that deployed the account, one per union.
-//! LP pledge (executive decision 30 Oct): an LP's USDC stays in this account. fx_pool (the one
-//! the factory names) puts a lien on part of it when she takes the union's cash and lifts it as
-//! she brings the cash back. While a lien stands the signer cannot authorize a USDC transfer,
-//! burn or approve directly; free USDC goes out with `send_usdc`, which keeps the lien covered.
-//! Only the union's multisig takes locked USDC, with `claim`, after a called position's notice.
+//! LP positions (executive decision 31 Oct): fx_pool (the one the factory names) locks USDC in
+//! this account. A Collect locks the LP's own USDC at accept and takes it into fx_pool at the
+//! scan (`pay`); a Bring puts the union's USDC here and locks it, until a Collect of the same LP
+//! takes it back (`pay`) or a settle past the rate margin unlocks it. While a lien stands the
+//! signer cannot authorize a USDC transfer, burn or approve directly; free USDC goes out with
+//! `send_usdc`, which keeps the lien covered. Only fx_pool locks, unlocks or takes locked USDC.
 
 use nila_common::{bump_instance, RolesClient};
 use soroban_sdk::{
@@ -66,7 +67,7 @@ pub enum Error {
     NotPool = 9,
     /// Locked USDC: a lock above the free USDC, a send above it, or a direct USDC move while a lien stands.
     Locked = 10,
-    /// The union's claim is above what fx_pool says it may claim, or above the lien.
+    /// fx_pool asked for more than the lien.
     NotClaimable = 11,
     /// A zero or negative amount.
     BadAmount = 12,
@@ -126,22 +127,15 @@ pub trait FactoryTrait {
     fn usdc(env: Env) -> Option<Address>;
 }
 
-/// What the account asks fx_pool about the union's claim (fx_pool never calls back into it).
-#[contractclient(name = "PoolClient")]
-pub trait PoolTrait {
-    fn claimable(env: Env, union: Address, lp: Address) -> i128;
-    fn book_claim(env: Env, union: Address, lp: Address, usdc: i128) -> i128;
-}
-
 #[contractevent]
 pub struct LienSet {
     pub lien: i128,
 }
 
+/// fx_pool took locked USDC into itself (a Collect closing or opening an LP position, 31 Oct).
 #[contractevent]
-pub struct Claimed {
+pub struct PaidPool {
     pub usdc: i128,
-    pub unlocked: i128,
 }
 
 #[contractevent]
@@ -370,9 +364,10 @@ impl AccountContract {
         Ok(())
     }
 
-    // ---------- the LP pledge (30 Oct) ----------
+    // ---------- LP positions (31 Oct) ----------
 
-    /// fx_pool only (an LP accepts a Collect): locks `amount` of her free USDC. Returns the lien.
+    /// fx_pool only (an LP accepts a Collect, or a Bring put the union's USDC here): locks `amount`
+    /// of the free USDC. Returns the lien.
     pub fn lock(env: Env, amount: i128) -> Result<i128, Error> {
         pool(&env)?.require_auth();
         if amount <= 0 {
@@ -386,8 +381,8 @@ impl AccountContract {
         Ok(l)
     }
 
-    /// fx_pool only (a Bring, or an accepted Collect that expired or was cancelled). Allowed while
-    /// frozen. Returns the lien.
+    /// fx_pool only (a settle past the margin, or an accepted Collect that expired or was
+    /// cancelled). Allowed while frozen. Returns the lien.
     pub fn unlock(env: Env, amount: i128) -> Result<i128, Error> {
         pool(&env)?.require_auth();
         if amount <= 0 {
@@ -414,28 +409,19 @@ impl AccountContract {
         Ok(())
     }
 
-    /// The union's multisig claims locked USDC after a called position's notice (allowed while
-    /// frozen): `amount` (at most fx_pool's `claimable`) goes to the union's account, fx_pool books
-    /// it and says what unlocks. Returns the USDC unlocked.
-    pub fn claim(env: Env, amount: i128) -> Result<i128, Error> {
-        let f = factory(&env);
-        let union = f.union();
-        union.require_auth();
-        let me = env.current_contract_address();
-        let p = PoolClient::new(&env, &pool(&env)?);
+    /// fx_pool only, at a Collect's scan (allowed while frozen): `amount` of the lien goes to
+    /// fx_pool and the lien drops by it. Returns the lien.
+    pub fn pay(env: Env, amount: i128) -> Result<i128, Error> {
+        let pool = pool(&env)?;
+        pool.require_auth();
         let l = lien(&env);
-        if amount <= 0 || amount > l || amount > p.claimable(&union, &me) {
+        if amount <= 0 || amount > l {
             return Err(Error::NotClaimable);
         }
-        usdc(&env)?.transfer(&me, &union, &amount);
-        let unlocked = p.book_claim(&union, &me, &amount);
-        set_lien(&env, l - amount - unlocked);
-        Claimed {
-            usdc: amount,
-            unlocked,
-        }
-        .publish(&env);
-        Ok(unlocked)
+        usdc(&env)?.transfer(&env.current_contract_address(), &pool, &amount);
+        set_lien(&env, l - amount);
+        PaidPool { usdc: amount }.publish(&env);
+        Ok(l - amount)
     }
 
     pub fn lien(env: Env) -> i128 {
