@@ -2073,7 +2073,7 @@ fn only_member_lps_accepted_by_the_anchor() {
         fx.try_acc(&fx.borrower, &c, &s24, &q),
         Err(Ok(FxError::NotLp))
     );
-    // Only a leader posts and confirms; offers are capped at the max scan and 7 days.
+    // Only a leader posts and confirms.
     assert_eq!(
         f.try_post_offer(&lp, &fx.union, &OfferKind::Bring, &NIN, &(T0 + 3_600)),
         Err(Ok(FxError::NotLeader))
@@ -2088,16 +2088,13 @@ fn only_member_lps_accepted_by_the_anchor() {
         ),
         Err(Ok(FxError::CapExceeded))
     );
+    // No fixed period (31 Oct): open until accepted or cancelled; only a time already past is refused.
     assert_eq!(
-        f.try_post_offer(
-            &fx.leader,
-            &fx.union,
-            &OfferKind::Bring,
-            &NIN,
-            &(T0 + 8 * 86_400)
-        ),
+        f.try_post_offer(&fx.leader, &fx.union, &OfferKind::Bring, &NIN, &T0),
         Err(Ok(FxError::BadExpiry))
     );
+    let open = f.post_offer(&fx.leader, &fx.union, &OfferKind::Bring, &NIN, &u64::MAX);
+    assert_eq!(f.offer(&open).unwrap().expires, u64::MAX);
     // A dropped LP cannot accept.
     f.set_lp(&fx.union, &lp, &false, &loan_id(&fx.env, 1));
     assert_eq!(fx.try_acc(&lp, &c, &s24, &q), Err(Ok(FxError::NotLp)));

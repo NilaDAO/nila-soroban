@@ -616,7 +616,7 @@ impl FxPoolContract {
 
     // ---------- offers ----------
 
-    /// L11 #short / A7 (Bring) or C4 (Collect): a leader posts rupees, at most 7 days out.
+    /// L11 #short / A7 (Bring) or C4 (Collect): a leader posts rupees, open until accepted or cancelled.
     pub fn post_offer(
         env: Env,
         leader: Address,
@@ -628,8 +628,9 @@ impl FxPoolContract {
         require_not_paused(&env)?;
         require_leader(&env, &union, &leader)?;
         check_amount(&env, inr)?;
-        let now = env.ledger().timestamp();
-        if expires <= now || expires > now + MAX_CASH_OUT_TERM {
+        // No fixed period (31 Oct): an offer may stay open until an LP accepts it or a leader cancels it
+        // (u64::MAX); only a time already past is refused.
+        if expires <= env.ledger().timestamp() {
             return Err(Error::BadExpiry);
         }
         let id = open_offer(&env, &union, kind, inr, expires)?;
