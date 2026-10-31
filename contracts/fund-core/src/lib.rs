@@ -87,6 +87,9 @@ pub enum DataKey {
     FoodToken(Address, BytesN<32>),
     // Its last draw date and lapsed flag (25 Oct), apart so stored `FoodToken` entries keep their layout.
     FoodTokenFinal(Address, BytesN<32>),
+    // The cash parts of a union's undrawn food tokens whose window closes in a week (union, week index; 31 Oct):
+    // added at the attestation, taken off at the draw or the lapse. Read by `cash_room`.
+    ShareCash(Address, u64),
     // A loan's voucher part (C5).
     Vouchers(Address, BytesN<32>),
     // An owner's settled pending parts, ready to collect (union, owner).
@@ -124,6 +127,20 @@ fn save_cfg(env: &Env, c: &Config) {
 
 fn final_of(env: &Env, key: &DataKey) -> Option<FoodTokenFinal> {
     env.storage().persistent().get(key)
+}
+
+/// Weeks of closing food token windows `cash_room` counts ahead (31 Oct: a share can be taken up for about 8 weeks).
+pub const ROOM_WEEKS: u64 = 9;
+
+/// Adds `d` to the undrawn cash parts of the union's food tokens closing in the week of `final_date`.
+fn add_share_cash(env: &Env, union: &Address, final_date: u64, d: i128) {
+    if d == 0 {
+        return;
+    }
+    let k = DataKey::ShareCash(union.clone(), final_date / (7 * DAY));
+    let v: i128 = env.storage().persistent().get(&k).unwrap_or(0) + d;
+    env.storage().persistent().set(&k, &v);
+    bump_key(env, &k);
 }
 
 fn bump_key(env: &Env, key: &DataKey) {
@@ -1213,15 +1230,21 @@ impl FundCore {
             })
             .ok_or(Error::BadDates)?;
         let key = DataKey::FoodToken(union.clone(), token_id.clone());
+        let fk = DataKey::FoodTokenFinal(union.clone(), token_id.clone());
+        let was = final_of(&env, &fk);
+        if was.as_ref().is_some_and(|f| f.lapsed) {
+            return Err(Error::FoodTokenLapsed);
+        }
         if let Some(old) = env.storage().persistent().get::<_, FoodToken>(&key) {
             if old.loan.drawn() {
                 return Err(Error::FoodTokenUsed);
             }
+            // A correction: its old cash part leaves the running total.
+            if let Some(f) = &was {
+                add_share_cash(&env, &union, f.final_date, -old.amount);
+            }
         }
-        let fk = DataKey::FoodTokenFinal(union.clone(), token_id.clone());
-        if final_of(&env, &fk).is_some_and(|f| f.lapsed) {
-            return Err(Error::FoodTokenLapsed);
-        }
+        add_share_cash(&env, &union, final_date, amount);
         // Usable in its window (25 Oct): from a week before its sowing window up to its last day.
         let ft = FoodToken {
             member: member.clone(),
@@ -1305,6 +1328,10 @@ impl FundCore {
             }
             if env.ledger().timestamp() > f.final_date {
                 return Err(Error::TooLate);
+            }
+            // Taken up: its cash part is no longer waiting at the office (31 Oct, `cash_room`).
+            if !more {
+                add_share_cash(&env, &union, f.final_date, -ft.amount);
             }
         }
 
@@ -2009,6 +2036,7 @@ impl FundCore {
         f.lapsed = true;
         env.storage().persistent().set(&fk, &f);
         bump_key(&env, &fk);
+        add_share_cash(&env, &union, f.final_date, -ft.amount);
         FoodTokenLapsed {
             union,
             token_id,
@@ -2040,6 +2068,24 @@ impl FundCore {
 
     pub fn union_treasury(env: Env, union: Address) -> i128 {
         i_get(&env, &Counter::Treasury(union))
+    }
+
+    // How much cash the union's office may hold (executive decision 30 Oct, on-chain 31 Oct): the treasury, the
+    // withdrawals started and not collected (junior claimable principal), and the cash parts of undrawn food tokens
+    // whose window closes in this week or the next `ROOM_WEEKS`: cash members are due to take out again. fx_pool
+    // refuses a cash scan above it.
+    pub fn cash_room(env: Env, union: Address) -> i128 {
+        let w = env.ledger().timestamp() / (7 * DAY);
+        let mut room = i_get(&env, &Counter::Treasury(union.clone()))
+            + load_market(&env, true, &union).claimable_principal;
+        for i in w..=w + ROOM_WEEKS {
+            room += env
+                .storage()
+                .persistent()
+                .get::<_, i128>(&DataKey::ShareCash(union.clone(), i))
+                .unwrap_or(0);
+        }
+        room
     }
 
     // Her loan's voucher part: hours, earmark, senior prepay out, owners' pending parts.

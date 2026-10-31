@@ -964,12 +964,11 @@ impl Fx {
     }
 }
 
-/// Cash at hand may pass the treasury (executive decision 24 Oct): what a scan adds above it opens a Collect offer
-/// for the union's LPs, in whole rupees, for as long as the cash batch lasts; a scan within the treasury opens none.
-/// Merged (25 Oct): while that offer is open and no LP has accepted it, the next part above the treasury is added
-/// to it (up to the max scan) instead of a new offer; once an LP accepted it, a new one opens.
+/// Cash at the office may pass the treasury up to `cash_room` (executive decision 30 Oct, on-chain 31 Oct): the
+/// treasury, withdrawals started and not collected, and the cash parts of undrawn food tokens closing within
+/// `ROOM_WEEKS`. Above it a scan is refused; within it no Collect offer opens (the cash goes back out to members).
 #[test]
-fn cash_over_the_treasury_opens_a_collect_offer() {
+fn cash_scan_is_refused_above_the_cash_room() {
     let fx = setup();
     let c = fx.core();
     let f = fx.fx();
@@ -977,30 +976,39 @@ fn cash_over_the_treasury_opens_a_collect_offer() {
         .unwrap();
     fx.scan(Purpose::Invest, &fx.borrower, 1_000 * NIN, 2, None)
         .unwrap();
-    assert_eq!(f.offers_of(&fx.union).len(), 0);
-    // 700 more: 200 above the treasury.
-    fx.scan(Purpose::Invest, &fx.neighbour, 700 * NIN, 3, None)
-        .unwrap();
-    assert_eq!(f.cash_at_hand(&fx.union), 1_700 * NIN);
-    assert_eq!(c.union_treasury(&fx.union), 1_500 * NIN);
-    let ids = f.offers_of(&fx.union);
-    assert_eq!(ids.len(), 1);
-    let o = f.offer(&ids.get(0).unwrap()).unwrap();
-    assert_eq!(o.kind, nila_fx_pool::OfferKind::Collect);
-    assert_eq!(o.inr, 200 * NIN);
-    // Another 100: added to the open offer, no new one.
-    fx.scan(Purpose::Invest, &fx.neighbour, 100 * NIN, 4, None)
-        .unwrap();
-    let ids = f.offers_of(&fx.union);
-    assert_eq!(ids.len(), 1);
-    assert_eq!(f.offer(&ids.get(0).unwrap()).unwrap().inr, 300 * NIN);
-    // No size limit (30 Oct): it keeps growing past the max scan.
-    f.set_max_scan(&(350 * NIN));
-    fx.scan(Purpose::Invest, &fx.neighbour, 100 * NIN, 5, None)
-        .unwrap();
-    let ids = f.offers_of(&fx.union);
-    assert_eq!(ids.len(), 1);
-    assert_eq!(f.offer(&ids.get(0).unwrap()).unwrap().inr, 400 * NIN);
+    assert_eq!(c.cash_room(&fx.union), 1_500 * NIN);
+    // 700 more would make 1,700 at the office: refused.
+    assert_eq!(
+        fx.scan(Purpose::Invest, &fx.neighbour, 700 * NIN, 3, None),
+        Err(FxError::AboveTreasury)
+    );
+    // A crop share's cash part waiting to be taken up makes room for it.
+    let id = loan_id(&fx.env, 1);
+    let fin = {
+        fx.attest(&fx.borrower, &id, 400 * NIN);
+        c.food_token(&fx.union, &id).unwrap().final_date
+    };
+    let near = fin / (7 * 86_400) <= fx.env.ledger().timestamp() / (7 * 86_400) + crate::ROOM_WEEKS;
+    assert_eq!(
+        c.cash_room(&fx.union),
+        1_500 * NIN + if near { 400 * NIN } else { 0 }
+    );
+    // A correction replaces its part, never adds twice.
+    fx.attest(&fx.borrower, &id, 300 * NIN);
+    assert_eq!(
+        c.cash_room(&fx.union),
+        1_500 * NIN + if near { 300 * NIN } else { 0 }
+    );
+    if near {
+        fx.scan(Purpose::Invest, &fx.neighbour, 300 * NIN, 3, None)
+            .unwrap();
+        assert_eq!(f.cash_at_hand(&fx.union), 1_300 * NIN);
+        assert_eq!(f.offers_of(&fx.union).len(), 0);
+    }
+    // Taken up: its part leaves the room again.
+    fx.at(c.food_token(&fx.union, &id).unwrap().from_date);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &0);
+    assert_eq!(c.cash_room(&fx.union), c.union_treasury(&fx.union));
     fx.assert_conserved();
 }
 
@@ -1074,6 +1082,9 @@ fn cash_scan_invest_draw_repay_with_strict_auth() {
 fn scan_caps_and_roles() {
     let fx = setup();
     fx.scan(Purpose::Treasury, &fx.leader, 10_000 * NIN, 1, None)
+        .unwrap();
+    // Room for the scan below (31 Oct: cash at the office within `cash_room`).
+    fx.scan(Purpose::Treasury, &fx.leader, NIN, 1, None)
         .unwrap();
     // No ₹10,000 per scan since 30 Oct (R76 is the leaders' agreement).
     fx.scan(Purpose::Invest, &fx.borrower, 10_000 * NIN + 1, 2, None)
