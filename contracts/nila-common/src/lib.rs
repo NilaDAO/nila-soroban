@@ -123,9 +123,17 @@ pub trait FundCoreTrait {
     // Senior money set aside for unclaimed voucher hours (the floor under Bring offers).
     fn senior_earmark(union: Address) -> i128;
     // machinery only: an owner claimed work on a voucher (`units`: the centi tractor acres they
-    // used); pay the owner `amount` in full from the voucher's reserve (26 Oct: the voucher is
-    // the member's, its debt is separate).
-    fn pay_voucher(union: Address, token_id: BytesN<32>, owner: Address, units: u32, amount: i128);
+    // used). The owner is paid `prepay` now from the voucher's reserve; `postpaid` is held for her
+    // and settled into her balance as the member repays, in full when the loan closes, and by senior
+    // at a default (owner split, 1 Nov: the owner carries no default risk).
+    fn pay_voucher(
+        union: Address,
+        token_id: BytesN<32>,
+        owner: Address,
+        units: u32,
+        prepay: i128,
+        postpaid: i128,
+    );
 }
 
 // The crop calendar (25 Oct): a crop share's window from its crop code and planned sowing.

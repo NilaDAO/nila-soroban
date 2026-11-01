@@ -16,7 +16,8 @@
 //!   ledger, ~48 h); the owner scans it and claims the acres worked (D19), never more than the crop
 //!   share's own area (its token id's area), within the machine's acres a week (R84).
 //! - **Pay** (D18, R85): at the claim fund_core pays the owner the prepay (diesel plus a share of
-//!   the driver part, X32) from senior money; the rest is pending until she repays.
+//!   the driver part, X32) from senior money; the rest is postpaid, paid as she repays and by senior
+//!   if she defaults (owner split, 1 Nov), so the owner carries no default risk.
 //!
 //! Money never sits here: fund_core moves it. This contract keeps the facts.
 
@@ -710,7 +711,9 @@ impl MachineryContract {
     /// acre (27 Oct; were hours), never more than the crop share's own area, using ≤ `max_units` centi tractor
     /// acres, the units she signed for: her authorisation of (union, token_id, max_units) is used once, its
     /// expiry ledger ~48 h out. The price is the machine type's on the share's crop (its own crop price if the
-    /// union set one). fund_core pays the owner in full from the voucher's reserve (26 Oct).
+    /// union set one). Owner split (1 Nov): fund_core pays the prepay (diesel plus the union's share of the
+    /// driver part, X32) at once from the voucher's reserve; the rest is postpaid, paid when she repays and by
+    /// senior if she defaults.
     #[allow(clippy::too_many_arguments)]
     pub fn claim(
         env: Env,
@@ -765,15 +768,19 @@ impl MachineryContract {
         env.storage()
             .temporary()
             .extend_ttl(&wk, WEEK_USE_LEDGERS, WEEK_USE_LEDGERS);
-        // The owner is paid in full at the claim (26 Oct): the price an acre × the acres worked,
-        // from the voucher's reserve; her debt is separate.
-        let prepay = total_per_acre(&r) * i128::from(acres) / 100;
-        let pending = 0;
+        // Owner split (1 Nov): the price an acre × the acres worked, the prepay part now, the rest
+        // postpaid from her repayment (D18, X32). Her debt is separate.
+        let total = total_per_acre(&r) * i128::from(acres) / 100;
+        let prepay = core::cmp::min(
+            prepay_per_acre(&r, prepay_driver_bp(&env, &union)) * i128::from(acres) / 100,
+            total,
+        );
+        let pending = total - prepay;
         // One claim per signature; the rest of her voucher stays with her (R55).
         v.used += units;
         save_voucher(&env, &union, &token_id, &v);
         FundCoreClient::new(&env, &core_addr(&env)?)
-            .pay_voucher(&union, &token_id, &owner, &units, &prepay);
+            .pay_voucher(&union, &token_id, &owner, &units, &prepay, &pending);
         VoucherClaimed {
             union,
             token_id,
