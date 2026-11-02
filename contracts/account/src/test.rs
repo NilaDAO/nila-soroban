@@ -19,6 +19,7 @@ mod mocks {
         Leaders,
         Pool,
         Usdc,
+        Sms,
     }
     #[contract]
     pub struct Factory;
@@ -56,6 +57,12 @@ mod mocks {
         }
         pub fn usdc(env: Env) -> Option<Address> {
             env.storage().instance().get(&K::Usdc)
+        }
+        pub fn set_sms_key(env: Env, key: Address) {
+            env.storage().instance().set(&K::Sms, &key);
+        }
+        pub fn sms_key(env: Env) -> Option<Address> {
+            env.storage().instance().get(&K::Sms)
         }
     }
     /// fx_pool as the account sees it: only its address matters (it locks, unlocks and takes).
@@ -476,4 +483,38 @@ fn only_fx_pool_takes_locked_usdc_and_never_above_the_lien() {
     // Nobody else.
     t.env.set_auths(&[]);
     assert!(t.c.try_pay(&1).is_err());
+}
+
+/// A lost keypad phone (executive decision 2 Nov): one leader and the node's SMS key together
+/// propose the new device key; both must sign, the leader must lead the union, and the wait and
+/// the freeze apply as for two leaders.
+#[test]
+fn one_leader_and_the_sms_key_recover_a_keypad_phone() {
+    let t = setup();
+    let new_key = SigningKey::from_slice(&[12u8; 32]).unwrap();
+    let new = signer_of(&t.env, &new_key);
+    assert_eq!(
+        t.c.try_recover_by_sms(&new, &t.leaders[0]),
+        Err(Ok(Error::NoSmsKey))
+    );
+    let sms = Address::generate(&t.env);
+    mocks::FactoryClient::new(&t.env, &t.c.factory()).set_sms_key(&sms);
+    assert_eq!(
+        t.c.try_recover_by_sms(&new, &Address::generate(&t.env)),
+        Err(Ok(Error::NotLeaders))
+    );
+    t.c.recover_by_sms(&new, &t.leaders[0]);
+    // Both the leader and the SMS key authorized it.
+    let auths = t.env.auths();
+    assert!(auths.iter().any(|(a, _)| *a == t.leaders[0]));
+    assert!(auths.iter().any(|(a, _)| *a == sms));
+    // Frozen until the wait has passed; a second proposal is refused.
+    assert_eq!(
+        t.c.try_recover_by_sms(&new, &t.leaders[1]),
+        Err(Ok(Error::Frozen))
+    );
+    assert_eq!(t.c.try_execute_recovery(), Err(Ok(Error::NotReady)));
+    t.env.ledger().set_timestamp(1_800_000_000 + 172_800);
+    t.c.execute_recovery();
+    assert_eq!(t.c.signer(), new);
 }
