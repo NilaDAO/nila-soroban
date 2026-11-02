@@ -9,14 +9,15 @@
 //! each signed by the leader's own account. A session reaches only the contracts the factory
 //! lists (fund_core, machinery), never this account itself or a token.
 //! Recovery replaces the signer on the same address, so titles, shares, investments and
-//! balances stay: proposed by two leaders of the union (a lost phone, smartphone or keypad;
-//! executive decision 29 Oct, no SMS key: Nila holds no key with any power here) or by the
-//! union's multisig account;
+//! balances stay: proposed by one leader of the union together with the node's SMS key, once
+//! the new phone has opened the one-time SMS link (a lost keypad phone; executive decision 2 Nov,
+//! reverses 29 Oct's "no SMS key": neither the leader nor the node can propose alone), by two
+//! leaders of the union, or by the union's multisig account;
 //! it takes effect after the factory's wait. A pending recovery freezes the account
 //! (executive decision 29 Oct, a stolen phone): the current signer signs nothing, no task and
 //! no session, and cannot cancel; only the union's multisig account cancels, so a member
 //! disputes a recovery through the union. Neither proposer can sign a task. (A smartphone gets its Privy key back at login, so it
-//! needs none of this unless the member's number is lost.) The node holds no power here.
+//! needs none of this unless the member's number is lost.) The node's SMS key alone can do nothing.
 //! Settings (roles, wait, session length and contracts, the account code) come from the
 //! factory that deployed the account, one per union.
 //! LP positions (executive decision 31 Oct): fx_pool (the one the factory names) locks USDC in
@@ -71,6 +72,8 @@ pub enum Error {
     NotClaimable = 11,
     /// A zero or negative amount.
     BadAmount = 12,
+    /// The factory names no SMS key (SMS recovery is off for this union).
+    NoSmsKey = 13,
 }
 
 #[contracttype]
@@ -125,6 +128,7 @@ pub trait FactoryTrait {
     fn account_wasm(env: Env) -> BytesN<32>;
     fn fx_pool(env: Env) -> Option<Address>;
     fn usdc(env: Env) -> Option<Address>;
+    fn sms_key(env: Env) -> Option<Address>;
 }
 
 #[contractevent]
@@ -323,6 +327,23 @@ impl AccountContract {
         }
         // Two leaders cannot replace a pending proposal (restarting the wait would keep the account frozen, and
         // could swap the key): only the union's multisig cancels it or overrides it with `recover`.
+        if frozen(&env) {
+            return Err(Error::Frozen);
+        }
+        propose(&env, signer);
+        Ok(())
+    }
+
+    /// One leader of the union and the node's SMS key together propose a new signer (2 Nov): the
+    /// node co-signs only for the device key the new phone registered through the SMS link.
+    pub fn recover_by_sms(env: Env, signer: Signer, leader: Address) -> Result<(), Error> {
+        leader.require_auth();
+        let sms = factory(&env).sms_key().ok_or(Error::NoSmsKey)?;
+        sms.require_auth();
+        if !is_leader(&env, &leader) {
+            return Err(Error::NotLeaders);
+        }
+        // As with two leaders: a pending recovery is cancelled or overridden by the union only.
         if frozen(&env) {
             return Err(Error::Frozen);
         }

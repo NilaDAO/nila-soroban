@@ -58,3 +58,15 @@ fn the_address_follows_from_the_key() {
     assert_eq!(f.address_of(&s(4)), f.address_of(&s(4)));
     assert_ne!(f.address_of(&s(4)), f.address_of(&s(5)));
 }
+
+/// The SMS key (2 Nov) is set and cleared by the union's multisig.
+#[test]
+fn the_sms_key_is_the_unions_choice() {
+    let (env, f) = setup();
+    assert_eq!(f.sms_key(), None);
+    let k = Address::generate(&env);
+    f.set_sms_key(&Some(k.clone()));
+    assert_eq!(f.sms_key(), Some(k));
+    f.set_sms_key(&None);
+    assert_eq!(f.sms_key(), None);
+}
