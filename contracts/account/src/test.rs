@@ -19,8 +19,6 @@ mod mocks {
         Leaders,
         Pool,
         Usdc,
-        Claimable,
-        Unlocks,
     }
     #[contract]
     pub struct Factory;
@@ -60,22 +58,12 @@ mod mocks {
             env.storage().instance().get(&K::Usdc)
         }
     }
-    /// fx_pool as the account sees it in a claim: what may be claimed, and what unlocks after.
+    /// fx_pool as the account sees it: only its address matters (it locks, unlocks and takes).
     #[contract]
     pub struct Pool;
     #[contractimpl]
     impl Pool {
-        pub fn set(env: Env, claimable: i128, unlocks: i128) {
-            env.storage().instance().set(&K::Claimable, &claimable);
-            env.storage().instance().set(&K::Unlocks, &unlocks);
-        }
-        pub fn claimable(env: Env, _union: Address, _lp: Address) -> i128 {
-            env.storage().instance().get(&K::Claimable).unwrap_or(0)
-        }
-        pub fn book_claim(env: Env, _union: Address, lp: Address, _usdc: i128) -> i128 {
-            lp.require_auth();
-            env.storage().instance().get(&K::Unlocks).unwrap_or(0)
-        }
+        pub fn ping(_env: Env) {}
     }
     #[contract]
     pub struct Roles;
@@ -471,25 +459,21 @@ fn while_a_lien_stands_usdc_leaves_only_by_send_usdc_within_the_free_part() {
 }
 
 #[test]
-fn only_the_unions_multisig_claims_and_only_what_fx_pool_allows() {
+fn only_fx_pool_takes_locked_usdc_and_never_above_the_lien() {
     let p = pledge();
     let t = &p.t;
-    let pc = mocks::PoolClient::new(&t.env, &p.pool);
     t.c.lock(&33);
-    // Not claimable yet (no call, or the notice runs).
-    assert_eq!(t.c.try_claim(&10), Err(Ok(Error::NotClaimable)));
-    pc.set(&30, &3);
-    assert_eq!(t.c.try_claim(&31), Err(Ok(Error::NotClaimable)));
-    // A frozen account (a recovery pending) is still claimed.
+    assert_eq!(t.c.try_pay(&34), Err(Ok(Error::NotClaimable)));
+    assert_eq!(t.c.try_pay(&0), Err(Ok(Error::NotClaimable)));
+    // A frozen account (a recovery pending) still pays a Collect it accepted.
     t.c.recover_by_leaders(&signer_of(&t.env, &t.key), &t.leaders[0], &t.leaders[1]);
-    assert_eq!(t.c.claim(&30), 3);
+    assert_eq!(t.c.pay(&30), 3);
     let auths = t.env.auths();
-    assert_eq!(auths[0].0, t.union_ms);
+    assert_eq!(auths[0].0, p.pool);
     let tok = soroban_sdk::token::TokenClient::new(&t.env, &p.usdc);
-    assert_eq!((tok.balance(&t.acct), tok.balance(&t.union_ms)), (20, 30));
-    assert_eq!(t.c.lien(), 0);
+    assert_eq!((tok.balance(&t.acct), tok.balance(&p.pool)), (20, 30));
+    assert_eq!(t.c.lien(), 3);
     // Nobody else.
-    t.c.lock(&5);
     t.env.set_auths(&[]);
-    assert!(t.c.try_claim(&1).is_err());
+    assert!(t.c.try_pay(&1).is_err());
 }

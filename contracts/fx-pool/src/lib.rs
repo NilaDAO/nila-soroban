@@ -128,10 +128,10 @@ pub enum Error {
     QuoteExpired = 32,
     /// The anchor has not checked this account's identity (K1, 22 Oct).
     NotIdChecked = 33,
-    /// No position of this LP in the union, or a Bring above what she owes (30 Oct).
+    /// No position of this LP in the union (31 Oct).
     NoPosition = 34,
-    /// Nothing to claim: not called, the notice has not passed, or above the claimable (30 Oct).
-    NotClaimable = 35,
+    /// The fix is within the 5% margin of the position's opening rate: no settle (31 Oct).
+    InMargin = 35,
 }
 
 /// Where a senior investor's USDC comes from (R24, D1): kept per deposit so the pools can be split later.
@@ -239,12 +239,12 @@ pub enum DataKey {
     IdChecked(Address),
     /// USDC a union's id-checked leaders swapped into nIN in their own wallets: paid back only from here (22 Oct).
     LeaderSwapUsdc(Address),
-    /// An LP's holding of the union's cash (union, LP), the pledge (30 Oct).
-    Position(Address, Address),
-    /// Rupees a union's LPs hold in all (30 Oct).
-    LpOwed(Address),
-    /// The union's LPs who hold its cash (30 Oct), for the leaders' list.
-    LpsOwing(Address),
+    /// An LP's position in a union (union, LP), 31 Oct.
+    LpPos(Address, Address),
+    /// USDC held in fx_pool for a union's LPs' Collect positions (31 Oct).
+    LpLocked(Address),
+    /// An LP's accepted offer not scanned yet (union, LP): one at a time (31 Oct).
+    Busy(Address, Address),
 }
 
 /// Rupees a leader took in, not yet lent out or settled (R15).
@@ -597,13 +597,13 @@ fn open_escrow(
     id
 }
 
-/// Cash at hand may not exceed the union's treasury (R15), nor the open escrows the limit.
+/// Cash at hand may not exceed fund_core's `cash_room` (31 Oct; was the treasury, R15), nor the open escrows the limit.
 fn check_room(env: &Env, union: &Address, amount: i128) -> Result<(), Error> {
     if open_escrows(env, union).len() >= MAX_OPEN_ESCROWS {
         return Err(Error::TooManyEscrows);
     }
     if cash_at_hand(env, union) + amount
-        > FundCoreClient::new(env, &core_addr(env)?).union_treasury(union)
+        > FundCoreClient::new(env, &core_addr(env)?).cash_room(union)
     {
         return Err(Error::AboveTreasury);
     }
@@ -868,12 +868,11 @@ impl FxPoolContract {
         if purpose == Purpose::Treasury || purpose == Purpose::Bring {
             return Err(Error::Unauthorized);
         }
-        // Cash at hand may pass the treasury (executive decision 24 Oct): what this scan adds above it is offered to
-        // the union's LPs as a Collect (below). Only the open-escrow limit still refuses.
+        // Cash at the office may pass the treasury up to fund_core's `cash_room` (executive decision 30 Oct, on-chain
+        // 31 Oct): the treasury plus the cash members are due to take out again. Above it the scan is refused (below).
         if open_escrows(&env, &union).len() >= MAX_OPEN_ESCROWS {
             return Err(Error::TooManyEscrows);
         }
-        let hand_before = cash_at_hand(&env, &union);
 
         let me = env.current_contract_address();
         let nin = nin_addr(&env);
@@ -908,21 +907,15 @@ impl FxPoolContract {
         }
 
         let mut escrow_id = 0u64;
-        let mut collect_offer = 0u64;
         if taken > 0 {
             escrow_id = open_escrow(&env, &union, &member, purpose, taken);
-            // The part of this scan above the treasury goes to an LP: a Collect offer, whole rupees, for as long as
-            // the cash batch lasts. A union whose offers are full gets none (the scan still stands).
-            let treasury = fc.union_treasury(&union);
-            let over = |h: i128| if h > treasury { h - treasury } else { 0 };
-            let add = over(cash_at_hand(&env, &union)) - over(hand_before);
-            if add > 0 {
-                let inr = (add + NIN_UNIT - 1) / NIN_UNIT * NIN_UNIT;
-                let expires = env.ledger().timestamp() + ESCROW_TERM;
-                collect_offer =
-                    lp::open_offer(&env, &union, OfferKind::Collect, inr, expires).unwrap_or(0);
+            // After the deposit, so fund_core's room already holds what this scan changed there.
+            if cash_at_hand(&env, &union) > fc.cash_room(&union) {
+                return Err(Error::AboveTreasury);
             }
         }
+        // No Collect offer from a scan any more (31 Oct): cash within the room goes back out to members.
+        let collect_offer = 0u64;
         CashScanned {
             union,
             member,
@@ -1696,7 +1689,7 @@ impl FxPoolContract {
 }
 
 mod lp;
-pub use lp::{LpMember, Offer, OfferKind, OfferState, Position, Quote, ACCEPT_PREFIX};
+pub use lp::{LpMember, LpPosition, LpQuote, Offer, OfferKind, OfferState, Quote, ACCEPT_PREFIX};
 
 #[cfg(test)]
 mod test;
