@@ -78,6 +78,10 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     the calendar is linked and the families' windows are set, every attestation is refused (`BadDates`).
     Trust: `crop_calendar.set_roles(roles)` (26 Oct), so a union's leaders can set its local crop prices
     (`set_price`); until then every `set_price` is refused (`NotLeader`).
+17. Deployer: `senior(admin = trust, usdc_sac, fund_core, fx_pool, roles)` (executive decision 2 Nov). Trust:
+    `fx_pool.set_senior(senior)` and `fund_core.set_senior(senior)`, **both set once**. Trust: `senior.set_cap(usdc)`
+    at the agreed total: the contract is **unaudited**, and with cap 0 (the default) no deposit is taken. Then
+    `senior.set_investor(investor, true, kyc_ref, tag)` per accepted senior investor (residency set once).
 
 ### C2. Upgrading a deployment from before 25 Oct (instead of C. for an existing set)
 
@@ -102,8 +106,9 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 - [ ] fx_pool `fund_core` and fund_core `fx_pool` point at each other.
 - [ ] `is_paused` = false. `max_scan` = 10,000 nIN (leader swaps, USDC into the treasury and the move mint only; cash scans, desk payouts and LP offers are uncapped since 30 Oct). `daily_cap` = 2,500 USDC: it caps the USDC
       Bring offers pay out in a day.
-- [ ] LP offers: `anchor` = the trust's anchor account (nila-anchor), `lp_fee` = 100 (1%),
-      `voucher_floor` per union as decided.
+- [ ] LP offers: `anchor` = the trust's anchor account (nila-anchor), `lp_fee` = 100 (1%).
+- [ ] Senior: `fx_pool.senior()` and `fund_core.get_config().senior` = the senior contract; `senior.cap()` as agreed;
+      `senior.total()` = the USDC balance of the senior contract (no other way in or out than deposit and redeem).
 - [ ] `fund_core` has the crop calendar linked, and `crop_calendar.window(family × 1000, <a sowing date>)` gives the
       catalogue's window for each family (one week before the sowing window up to its last day, UTC).
 - [ ] `swap_key` = the anchor's swap key (C9b; `set_swap_key`, admin). Without it every LP accept is
@@ -137,15 +142,17 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 - **Pause.** The trust signs `pause`.
   - **fund_core** stops every money path, and expiry burns stop with it. The public
     `mark_default` stops too (D-d), so a long pause delays defaults.
-  - **fx_pool** stops scans, cash-outs, pay-outs and expiry burns. Reclaim of her own nIN
-    stays open.
+  - **fx_pool** stops scans, cash-outs, pay-outs and expiry burns, the attester's fix and LP settles (2 Nov).
+    Reclaim of her own nIN stays open.
+  - **senior** (`set_paused`) stops deposits, exits, income payouts and the vault's guarantee (2 Nov).
   - **land_title** stops title writes (`set_title`, `set_record`, `burn_title`).
   - **roles and fund_viewer have no pause**; they move no money.
 - **Upgrade.**
   1. Upload the wasm and check the layout guard in that commit.
   2. Trust: `upgrade(hash)`. Filing again replaces the earlier filing; nothing ever applies
      in the same call.
-  3. Announce it, and let the indexer alert on `UpgradeProposed`.
+  3. Announce it, and let the indexer alert on `UpgradeProposed`, on every contract, **the senior contract
+     included** (it holds all senior USDC).
   4. After 48 h, trust: `execute_upgrade`. `cancel_upgrade` stops it at any point.
   5. Lowering the delay waits out the current delay, and must then be applied within 7 days.
      Any raise or `cancel_upgrade` voids a filed lowering. The delay is never above 30 days.
@@ -182,7 +189,8 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 - Q36: the indexer. Q34: which button calls which function. X22: what a pay-out releases.
 - In this release (Nov 7): USDC through the senior route and the LP offers (C5b, C9); the anchor
   (SEP-1/10/12/24/38) is the trust's own, in nila-anchor.
-- T2 work is not in this release: senior payouts (X15, R46–R47) and Reflector (R77).
+- Senior payouts (2 Nov): the senior contract pays principal back at par in USDC (`redeem`); interest is paid
+  in USDC by a member LP of the union (`pay_income`). Reflector (R77) is still T2.
 
 ## G. Storage layout
 

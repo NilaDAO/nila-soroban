@@ -112,43 +112,6 @@ fn upgrade_waits_out_the_timelock() {
     assert_eq!(f.upgrade_delay(), 72 * 3_600);
 }
 
-/// Escrows stored one record each (before 24 Oct, a testnet deployment upgraded in place) read as the
-/// union's list; the first save moves them into it and drops the old records.
-#[test]
-fn old_escrow_records_move_into_the_list() {
-    let (env, f, _) = setup();
-    let union = Address::generate(&env);
-    let member = Address::generate(&env);
-    let old = |amount: i128| Escrow {
-        union: union.clone(),
-        member: member.clone(),
-        purpose: Purpose::Invest,
-        amount,
-        remaining: amount,
-        expires: 1_700_000_000 + ESCROW_TERM,
-    };
-    env.as_contract(&f.address, || {
-        let p = env.storage().persistent();
-        p.set(&DataKey::Escrow(3), &old(100 * NIN));
-        p.set(&DataKey::Escrow(5), &old(40 * NIN));
-        p.set(
-            &DataKey::EscrowsOf(union.clone()),
-            &soroban_sdk::vec![&env, 3u64, 5u64],
-        );
-    });
-    assert_eq!(f.escrows_of(&union), soroban_sdk::vec![&env, 3u64, 5u64]);
-    assert_eq!(f.get_escrow(&union, &5).unwrap().remaining, 40 * NIN);
-    env.as_contract(&f.address, || {
-        let mut rows = open_escrows(&env, &union);
-        rows.remove(0);
-        save_open_escrows(&env, &union, &rows);
-        let p = env.storage().persistent();
-        assert!(!p.has(&DataKey::Escrow(3)) && !p.has(&DataKey::Escrow(5)));
-        assert!(!p.has(&DataKey::EscrowsOf(union.clone())));
-    });
-    assert_eq!(f.escrows_of(&union), soroban_sdk::vec![&env, 5u64]);
-}
-
 #[test]
 fn unknown_escrow_and_code() {
     let (env, f, _) = setup();
@@ -184,19 +147,15 @@ fn storage_layout_is_frozen() {
     v.push_back(DataKey::MaxScan.into_val(&env));
     v.push_back(DataKey::Paused.into_val(&env));
     v.push_back(DataKey::NextEscrow.into_val(&env));
-    v.push_back(DataKey::Escrow(1).into_val(&env));
-    v.push_back(DataKey::EscrowsOf(a.clone()).into_val(&env));
     v.push_back(DataKey::OpenEscrows(a.clone()).into_val(&env));
     v.push_back(DataKey::CashAtHand(a.clone()).into_val(&env));
-    v.push_back(DataKey::Scan(h.clone()).into_val(&env));
     v.push_back(DataKey::CashOut(h.clone()).into_val(&env));
     v.push_back(DataKey::CodeUsed(h.clone()).into_val(&env));
-    v.push_back(DataKey::SeniorInvestor(a.clone()).into_val(&env));
+    v.push_back(DataKey::Senior.into_val(&env));
+    v.push_back(DataKey::AttesterFixAt.into_val(&env));
     v.push_back(DataKey::Rate.into_val(&env));
-    v.push_back(DataKey::VoucherFloor(a.clone()).into_val(&env));
     v.push_back(DataKey::Anchor.into_val(&env));
     v.push_back(DataKey::LpOf(a.clone(), a.clone()).into_val(&env));
-    v.push_back(DataKey::LpUsdc(a.clone()).into_val(&env));
     v.push_back(DataKey::LpFeeBp.into_val(&env));
     v.push_back(DataKey::NextOffer.into_val(&env));
     v.push_back(DataKey::Offer(1).into_val(&env));
@@ -243,16 +202,6 @@ fn storage_layout_is_frozen() {
         }
         .into_val(&env),
     );
-    for t in [Tag::Offshore, Tag::Domestic] {
-        v.push_back(DataKey::SeniorUsdc(a.clone(), t).into_val(&env));
-    }
-    v.push_back(
-        SeniorInvestor {
-            accepted: true,
-            kyc_ref: h.clone(),
-        }
-        .into_val(&env),
-    );
     v.push_back(
         RateFix {
             inr_per_usd: 1,
@@ -270,17 +219,6 @@ fn storage_layout_is_frozen() {
     ] {
         v.push_back(pu.into_val(&env));
     }
-    v.push_back(
-        Escrow {
-            union: a.clone(),
-            member: a.clone(),
-            purpose: Purpose::Repay,
-            amount: 1,
-            remaining: 2,
-            expires: 3,
-        }
-        .into_val(&env),
-    );
     v.push_back(
         CashOut {
             member: a.clone(),
@@ -324,7 +262,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "5fde18bac14a217352086fe6ff1f3b1062ca430386e60abeb0e2231e7e42fb59",
+        hex, "eaf082fef0aa88eec7d23fa02115dd307da928366fe6dce6a4460151f34534f1",
         "fx_pool storage layout changed"
     );
 }

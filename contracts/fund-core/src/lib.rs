@@ -19,7 +19,7 @@ use types::{LoanState, Market, UnionBook, FLAG_CLOSED, FLAG_DEFAULTED, FLAG_DRAW
 
 pub use types::{
     Config, Dues, Error, FoodToken, FoodTokenFinal, FoodTokenView, Investor, OwnerDue, Position,
-    UnionConfig, VoucherBook,
+    SeniorPosition, UnionConfig, VoucherBook,
 };
 
 contractmeta!(key = "binver", val = "0.2.0");
@@ -101,6 +101,11 @@ pub enum DataKey {
     // What a voucher's owners are still owed, and her repayment not yet paid on to them (union, token id;
     // owner split, 1 Nov).
     Dues(Address, BytesN<32>),
+    // Senior interest taken out of the pool at an exit, owed to the investor until an LP pays it in USDC
+    // (union, investor; executive decision 2 Nov). Held in fund_core, outside senior cash.
+    SeniorOwed(Address, Address),
+    // Voucher interest senior earned in a union and has not yet taken out (2 Nov; nUSD's harvest reads it).
+    SeniorIncome(Address),
 }
 
 #[contract]
@@ -398,6 +403,11 @@ fn require_admin(env: &Env) -> Result<Config, Error> {
 }
 
 // All money into fund_core comes through fx_pool's cash scan (executive decision, 9 Oct).
+fn require_senior(env: &Env) -> Result<(), Error> {
+    cfg(env).senior.ok_or(Error::NotSenior)?.require_auth();
+    Ok(())
+}
+
 fn require_fx_pool(env: &Env) -> Result<Address, Error> {
     let fx = cfg(env).fx_pool.ok_or(Error::NotFxPool)?;
     fx.require_auth();
@@ -621,7 +631,7 @@ fn claim(
     who: &Address,
     max_shares: i128,
     to_wallet: bool,
-) -> Result<i128, Error> {
+) -> Result<(i128, i128), Error> {
     if max_shares < 0 {
         return Err(Error::NegativeAmount);
     }
@@ -666,16 +676,27 @@ fn claim(
     m.claimable_principal -= release;
     save_inv(env, junior, union, who, &inv);
     save_market(env, junior, union, &m);
-    // Over the desk (`to_wallet` false) the caller burns it and settles it against cash at hand.
+    // Over the desk (`to_wallet` false) the caller burns it and settles it against cash at hand; a senior
+    // exit (never to a wallet) is burned and booked by `claim_senior`.
     if to_wallet {
-        if junior {
-            pay_member(env, union, who, amount)?;
-        } else {
-            // Senior payouts go out through fx_pool's USDC redeem (R47, X15): T2.
-            nin(env).transfer(&env.current_contract_address(), who, &amount);
-        }
+        pay_member(env, union, who, amount)?;
     }
-    Ok(amount)
+    Ok((amount, cost_out))
+}
+
+fn p_i128(env: &Env, k: &DataKey) -> i128 {
+    env.storage().persistent().get(k).unwrap_or(0)
+}
+
+fn p_add(env: &Env, k: &DataKey, by: i128) -> Result<i128, Error> {
+    let v = p_i128(env, k).checked_add(by).ok_or(Error::Overflow)?;
+    if v == 0 {
+        env.storage().persistent().remove(k);
+    } else {
+        env.storage().persistent().set(k, &v);
+        bump_key(env, k);
+    }
+    Ok(v)
 }
 
 // R10: fx_pool (the nIN SAC admin) authorises her trustline for this payout only.
@@ -750,6 +771,7 @@ fn senior_interest(env: &Env, union: &Address, interest: i128) -> Result<(), Err
     sm.cash += interest;
     if sm.total_shares > 0 {
         sm.index = index_bump(env, sm.index, sm.total_shares, interest).ok_or(Error::Overflow)?;
+        p_add(env, &DataKey::SeniorIncome(union.clone()), interest)?;
     } else {
         // No senior shareholders to earn it: it stays with the union.
         sm.cash -= interest;
@@ -968,6 +990,7 @@ impl FundCore {
                 nin: nin_token,
                 fx_pool: None,
                 machinery: None,
+                senior: None,
             },
         );
         env.storage().instance().set(&DataKey::Paused, &false);
@@ -1014,6 +1037,18 @@ impl FundCore {
         c.machinery = Some(machinery.clone());
         save_cfg(&env, &c);
         MachinerySet { machinery }.publish(&env);
+        Ok(())
+    }
+
+    // The senior contract (executive decision 2 Nov): holds all senior USDC. Set once, like machinery.
+    pub fn set_senior(env: Env, senior: Address) -> Result<(), Error> {
+        let mut c = require_admin(&env)?;
+        if c.senior.is_some() {
+            return Err(Error::SeniorAlreadySet);
+        }
+        c.senior = Some(senior.clone());
+        save_cfg(&env, &c);
+        SeniorSet { senior }.publish(&env);
         Ok(())
     }
 
@@ -1240,7 +1275,11 @@ impl FundCore {
         } else {
             require_leader(&env, &union, &investor)?;
         }
-        let amount = claim(&env, !senior, &union, &investor, max_shares, true)?;
+        // A senior exit goes through fx_pool, which pays the USDC (executive decision 2 Nov).
+        if senior {
+            return Err(Error::SeniorViaFxPool);
+        }
+        let (amount, _) = claim(&env, true, &union, &investor, max_shares, true)?;
         Claimed {
             investor,
             union,
@@ -1269,7 +1308,7 @@ impl FundCore {
         require_not_paused(&env)?;
         member.require_auth_for_args((union.clone(), max_shares).into_val(&env));
         require_leader(&env, &union, &leader)?;
-        let amount = claim(&env, true, &union, &member, max_shares, false)?;
+        let (amount, _) = claim(&env, true, &union, &member, max_shares, false)?;
         nin(&env).burn(&env.current_contract_address(), &amount);
         let fx = cfg(&env).fx_pool.ok_or(Error::NotFxPool)?;
         let settled = FxPoolClient::new(&env, &fx).settle_cash(&union, &amount);
@@ -1288,7 +1327,79 @@ impl FundCore {
 
     // ---------- senior (T2: LPs who are not members) ----------
 
-    // fx_pool only (mint_senior): a senior investor holds no land title in any union (executive decision,
+    // The senior contract only (`redeem`): a senior exit (executive decision 2 Nov: principal back at par in
+    // USDC, interest at the fix). After the 14 days, the claimed shares are burned; their principal (what was
+    // paid in for them, less any haircut) is burned too, and the senior contract pays that USDC; the interest
+    // stays here as owed to the investor (`SeniorOwed`) until an LP turns the rupees into USDC
+    // (`take_senior_income`). The investor signs the senior call. Returns (principal, interest, cost) in nIN.
+    pub fn claim_senior(
+        env: Env,
+        union: Address,
+        investor: Address,
+        max_shares: i128,
+    ) -> Result<(i128, i128, i128), Error> {
+        require_not_paused(&env)?;
+        require_senior(&env)?;
+        let before = load_inv(&env, false, &union, &investor).shares;
+        let (amount, cost) = claim(&env, false, &union, &investor, max_shares, false)?;
+        let shares = before - load_inv(&env, false, &union, &investor).shares;
+        let principal = core::cmp::min(cost, amount);
+        let interest = amount - principal;
+        nin(&env).burn(&env.current_contract_address(), &principal);
+        if interest > 0 {
+            p_add(
+                &env,
+                &DataKey::SeniorOwed(union.clone(), investor.clone()),
+                interest,
+            )?;
+            let k = DataKey::SeniorIncome(union.clone());
+            let take = core::cmp::min(interest, p_i128(&env, &k));
+            p_add(&env, &k, -take)?;
+        }
+        SeniorRedeemed {
+            union,
+            investor,
+            shares,
+            principal,
+            interest,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok((principal, interest, cost))
+    }
+
+    // The senior contract only (`pay_income`, 2 Nov): an LP took `amount` rupees of the investor's owed
+    // interest at the union office and paid the USDC; the nIN is burned here and the rupees are booked off
+    // cash at hand (`fx_pool.settle_cash`), as `claim_junior_cash` does. Returns what cash at hand covered.
+    pub fn take_senior_income(
+        env: Env,
+        union: Address,
+        investor: Address,
+        amount: i128,
+    ) -> Result<i128, Error> {
+        require_not_paused(&env)?;
+        require_senior(&env)?;
+        require_positive(amount)?;
+        let k = DataKey::SeniorOwed(union.clone(), investor.clone());
+        if amount > p_i128(&env, &k) {
+            return Err(Error::AboveOwed);
+        }
+        p_add(&env, &k, -amount)?;
+        nin(&env).burn(&env.current_contract_address(), &amount);
+        let fx = cfg(&env).fx_pool.ok_or(Error::NotFxPool)?;
+        let settled = FxPoolClient::new(&env, &fx).settle_cash(&union, &amount);
+        SeniorIncomeTaken {
+            union,
+            investor,
+            amount,
+            cash_settled: settled,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(settled)
+    }
+
+    // fx_pool only (mint_senior_nin, for the senior contract): a senior investor holds no land title in any union (executive decision,
     // 12 Oct: junior vs senior is simply holding a title or not; R46).
     pub fn deposit_senior(
         env: Env,
@@ -2029,6 +2140,7 @@ impl FundCore {
         sm.total_borrows -= core::cmp::min(sm.total_borrows, v_rest);
         if m_vi > 0 && sm.total_shares > 0 {
             sm.index = index_bump(&env, sm.index, sm.total_shares, m_vi).ok_or(Error::Overflow)?;
+            p_add(&env, &DataKey::SeniorIncome(union.clone()), m_vi)?;
         }
 
         // 2. Unpaid principal: junior pool, then senior (index haircuts). Unpaid interest
@@ -2276,6 +2388,26 @@ impl FundCore {
     // rainy-day fund, the senior earmark and the loans past payback (lending is on hold while on_hold > 0, R34).
     pub fn union_book(env: Env, union: Address) -> UnionBook {
         load_union(&env, &union)
+    }
+
+    // A senior investor's shares, their value, any exit under way and the interest owed (2 Nov).
+    pub fn senior_position(env: Env, union: Address, investor: Address) -> SeniorPosition {
+        let inv = load_inv(&env, false, &union, &investor);
+        let m = load_market(&env, false, &union);
+        SeniorPosition {
+            shares: inv.shares,
+            value: to_underlying(&env, inv.shares, m.index).unwrap_or(0),
+            pending_shares: inv.pending,
+            claimable_shares: inv.claimable,
+            request_ts: inv.request_ts,
+            cost: inv.cost,
+            owed: p_i128(&env, &DataKey::SeniorOwed(union, investor)),
+        }
+    }
+
+    // Voucher interest senior earned in the union and has not yet taken out (2 Nov).
+    pub fn senior_income(env: Env, union: Address) -> i128 {
+        p_i128(&env, &DataKey::SeniorIncome(union))
     }
 
     pub fn union_treasury(env: Env, union: Address) -> i128 {

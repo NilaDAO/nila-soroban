@@ -64,7 +64,7 @@ storage:
 
 | Key | Tier | Value |
 |---|---|---|
-| `Config` | instance | `Config{admin, roles, land_title, nin, fx_pool: Option, machinery: Option}` |
+| `Config` | instance | `Config{admin, roles, land_title, nin, fx_pool: Option, machinery: Option, senior: Option}` (`senior` 2 Nov: the senior contract, set once) |
 | `Paused` | instance | bool |
 | `UnionCfg(union)` | persistent | `UnionConfig{max_loan, gate, rate_bp, treasury_fee_bp, rainy_fee_bp, safety_bp, safety_floor, hard_stop, enforce_token_amount}` |
 | `JuniorMarket(union)`, `SeniorMarket(union)` | persistent | `Market{cash, index, total_shares, total_borrows, claimable_principal, exists}` |
@@ -79,6 +79,8 @@ storage:
 | `ShareCash(union, week)` | persistent | i128 cash parts of the union's undrawn food tokens whose window closes that week (31 Oct; read by `cash_room`) |
 | `Dues(union, token_id)` | persistent | `Dues{owners: Vec<OwnerDue{owner, amount}>, credit, union_due}` (1 Nov, owner split): owners' postpaid parts still owed on a voucher, oldest claim first (max 8 owners), her repayment of the voucher's value not yet paid on, and (2 Nov) the union's parts of the price, into its treasury after the owners, back to senior at a default |
 | `CropCalendar` | instance | Address of the crop_calendar contract (25 Oct) |
+| `SeniorOwed(union, investor)` | persistent | i128 senior interest taken out of the pool at an exit, owed until an LP pays it in USDC (`take_senior_income`, 2 Nov); the nIN stays in fund_core, outside senior cash |
+| `SeniorIncome(union)` | persistent | i128 voucher interest senior earned in the union and has not yet taken out (2 Nov) |
 
 ## crop_calendar (25 Oct)
 
@@ -112,25 +114,36 @@ storage:
 | `DailyCap`, `MaxScan` | instance | i128 |
 | `Paused` | instance | bool |
 | `NextEscrow` | instance | u64 |
-| `Escrow(id)` | persistent | `Escrow{union, member, purpose, amount, remaining, expires}` |
-| `EscrowsOf(union)` | persistent | Vec of open escrow ids, oldest first (max 64) |
+| `OpenEscrows(union)` | persistent | Vec of `OpenEscrow{id, member, purpose, amount, remaining, expires}`, oldest first (max 64; 24 Oct) |
 | `CashAtHand(union)` | persistent | i128 |
-| `Scan(receipt_hash)` | persistent | bool (a receipt is used once) |
 | `CashOut(code_hash)` | persistent | `CashOut{member, union, amount, expires}` |
 | `CodeUsed(code_hash)` | persistent | bool (a code is closed for good) |
-| `SeniorInvestor(investor)` | persistent | `SeniorInvestor{accepted, kyc_ref}`: a senior investor the trust accepted (never a member; not an LP) |
 | `Rate` | instance | `RateFix{inr_per_usd, valid_until, set_by}` (R77) |
-| `SeniorUsdc(union, Tag)` | persistent | i128 USDC taken in, per tag offshore / domestic (R24) |
-| `VoucherFloor(union)` | persistent | i128 senior USDC kept back as the voucher guarantee |
+| `AttesterFixAt` | instance | u64 when the attester last set the fix: at most one per 12 hours (2 Nov) |
+| `Senior` | instance | Address of the senior contract, the one caller of `mint_senior_nin` (2 Nov, set once) |
 | `Anchor` | instance | Address (the trust's anchor account) |
 | `LpOf(union, lp)` | persistent | `LpMember{accepted, kyc_ref}`: a member LP the anchor accepted (R20) |
-| `LpUsdc(union)` | persistent | i128 USDC LPs brought in through Collect offers |
 | `LpFeeBp`, `NextOffer` | instance | u32, u64 |
 | `Offer(id)` | persistent | `Offer{union, kind, inr, expires, state, lp, usdc, inr_per_usd, sep24_id, quote_id, from_lp, from_domestic, from_offshore}` |
 | `OffersOf(union)` | persistent | Vec of open offer ids (max 64) |
 | `DayOut(day)` | **temporary** | i128 USDC paid out that day, against the daily cap |
 | `RateBandBp` | instance | u32 how far the attester's fix may move (default 500 = 5%) |
 | `SwapKey` | instance | BytesN<32> the anchor's ed25519 swap key; `accept` needs its signature (C9b) |
+
+## senior (executive decision 2 Nov): all senior USDC
+
+| Key | Tier | Value |
+|---|---|---|
+| `Admin`, `Usdc`, `FundCore`, `FxPool`, `Roles` | instance | Address |
+| `Paused` | instance | bool (stops deposit, redeem, pay_income, mint_guaranteed) |
+| `Cap` | instance | i128 the most senior USDC held in all (0 until the trust sets it: no deposits) |
+| `Total` | instance | i128 senior USDC held: deposits less what `redeem` paid out |
+| `Vault` | instance | Address of the nUSD vault (later), set once |
+| `Investor(investor)` | persistent | `Investor{accepted, kyc_ref, tag}`: accepted by the trust; `tag` (Offshore 0, Domestic 1) set once |
+| `Principal(union, investor)` | persistent | `Principal{usdc, nin}` paid in for the union's senior shares still held |
+| `UnionUsdc(union, Tag)` | persistent | i128 USDC taken in for the union under one residency, less what was paid back (R24) |
+
+No call moves the contract's USDC except `redeem` (to the investor, at par). There is no admin withdrawal.
 
 ## Layout changes before the freeze
 
@@ -176,6 +189,10 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
   `postpaid` instead of one amount, so fund_core and machinery are upgraded together, fund_core first, with
   machinery paused in between. The frozen-layout hash changed because the sample list grew (it now also samples
   `ShareCash`, missing since 31 Oct).
+- **Senior contract (executive decision 2 Nov, fresh mainnet deploy):** the senior route left fx_pool for the new
+  `senior` contract, which holds all senior USDC. fx_pool lost `SeniorInvestor`, `SeniorUsdc` and `Tag`, and with
+  them the dead `Escrow`/`EscrowsOf` (pre-24 Oct migration), `Scan`, `VoucherFloor` and `LpUsdc`; it gained `Senior`
+  and `AttesterFixAt`. fund_core gained `Config.senior`, `SeniorOwed` and `SeniorIncome`. Fresh deploy only.
 - **Union parts (executive decision 2 Nov, fresh mainnet deploy):** `Dues` gained `union_due` (a layout change, fine
   on a fresh deploy only) and machinery gained `UnionParts(union)`. `pay_voucher` takes `to_union` too; machinery
   takes the union's parts out of the price before the owner's prepay and postpaid part.

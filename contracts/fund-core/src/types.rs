@@ -76,6 +76,26 @@ pub enum Error {
     TooLate = 60,
     // The food token's last draw date has not passed yet (25 Oct).
     NotLapsedYet = 61,
+    // A senior exit goes through the senior contract's `redeem`, which pays the USDC (executive decision 2 Nov).
+    SeniorViaFxPool = 62,
+    // More than the senior income owed (2 Nov).
+    AboveOwed = 63,
+    SeniorAlreadySet = 64,
+    NotSenior = 65,
+}
+
+// A senior investor's place in a union's senior pool (executive decision 2 Nov): `owed` is interest
+// already taken out of the pool at an exit and not yet paid in USDC by an LP (`pay_senior_income`).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SeniorPosition {
+    pub shares: i128,
+    pub value: i128,
+    pub pending_shares: i128,
+    pub claimable_shares: i128,
+    pub request_ts: u64,
+    pub cost: i128,
+    pub owed: i128,
 }
 
 #[contracttype]
@@ -89,6 +109,8 @@ pub struct Config {
     pub fx_pool: Option<Address>,
     // machinery: machine registry, vouchers and owner claims (C5).
     pub machinery: Option<Address>,
+    // senior: holds all senior USDC; the one caller of `claim_senior` and `take_senior_income` (2 Nov).
+    pub senior: Option<Address>,
 }
 
 // Per-union lending terms, set by the admin (R26, R34, R37, R42, R76).

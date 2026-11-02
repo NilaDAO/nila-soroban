@@ -138,6 +138,11 @@ pub trait FundCoreTrait {
         postpaid: i128,
         to_union: i128,
     );
+    // The senior contract only (`redeem`, executive decision 2 Nov): a senior exit; (principal, interest, cost) in nIN.
+    fn claim_senior(union: Address, investor: Address, max_shares: i128) -> (i128, i128, i128);
+    // The senior contract only (`pay_income`, 2 Nov): owed senior interest an LP paid in USDC; burned and
+    // booked off cash at hand. Returns what cash at hand covered.
+    fn take_senior_income(union: Address, investor: Address, amount: i128) -> i128;
 }
 
 // The crop calendar (25 Oct): a crop share's window from its crop code and planned sowing.

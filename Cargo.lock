@@ -1155,6 +1155,7 @@ dependencies = [
  "nila-machinery",
  "nila-math",
  "nila-roles",
+ "nila-senior",
  "soroban-sdk",
 ]
 
@@ -1202,6 +1203,14 @@ dependencies = [
 
 [[package]]
 name = "nila-roles"
+version = "0.1.0"
+dependencies = [
+ "nila-common",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "nila-senior"
 version = "0.1.0"
 dependencies = [
  "nila-common",

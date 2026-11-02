@@ -184,6 +184,11 @@ pub struct MachinerySet {
     pub machinery: Address,
 }
 
+#[contractevent]
+pub struct SeniorSet {
+    pub senior: Address,
+}
+
 // An owner claimed work on a voucher: `prepay` paid to her now, `pending` held as her postpaid part (R85,
 // owner split 1 Nov).
 #[contractevent]
@@ -221,6 +226,30 @@ pub struct UnionDueSettled {
     pub token_id: BytesN<32>,
     pub amount: i128,
     pub lost: bool,
+}
+
+// A senior exit through fx_pool (executive decision 2 Nov): `principal` burned (fx_pool pays the USDC
+// at par), `interest` owed to the investor until an LP pays it in USDC.
+#[contractevent]
+pub struct SeniorRedeemed {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub investor: Address,
+    pub shares: i128,
+    pub principal: i128,
+    pub interest: i128,
+}
+
+// Senior income owed paid out (2 Nov): the nIN burned; an LP took the rupees and paid the USDC.
+#[contractevent]
+pub struct SeniorIncomeTaken {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub investor: Address,
+    pub amount: i128,
+    pub cash_settled: i128,
 }
 
 // An owner collected her balance.
