@@ -1,4 +1,6 @@
 #![no_std]
+// The generated clients carry each call's arguments; `pay_voucher` has eight (2 Nov).
+#![allow(clippy::too_many_arguments)]
 //! Shared types, TTL policy, and cross-contract client traits.
 //!
 //! Storage policy (TAD §4.3):
@@ -125,7 +127,8 @@ pub trait FundCoreTrait {
     // machinery only: an owner claimed work on a voucher (`units`: the centi tractor acres they
     // used). The owner is paid `prepay` now from the voucher's reserve; `postpaid` is held for her
     // and settled into her balance as the member repays, in full when the loan closes, and by senior
-    // at a default (owner split, 1 Nov: the owner carries no default risk).
+    // at a default (owner split, 1 Nov: the owner carries no default risk). `to_union` is the union's
+    // parts of the price (2 Nov), into its treasury as she repays; lost to senior at a default.
     fn pay_voucher(
         union: Address,
         token_id: BytesN<32>,
@@ -133,6 +136,7 @@ pub trait FundCoreTrait {
         units: u32,
         prepay: i128,
         postpaid: i128,
+        to_union: i128,
     );
 }
 

@@ -791,12 +791,13 @@ fn load_dues(env: &Env, union: &Address, token_id: &BytesN<32>) -> Dues {
         .unwrap_or(Dues {
             owners: vec![env],
             credit: 0,
+            union_due: 0,
         })
 }
 
 fn save_dues(env: &Env, union: &Address, token_id: &BytesN<32>, d: &Dues) {
     let k = dues_key(union, token_id);
-    if d.owners.is_empty() && d.credit == 0 {
+    if d.owners.is_empty() && d.credit == 0 && d.union_due == 0 {
         env.storage().persistent().remove(&k);
     } else {
         env.storage().persistent().set(&k, d);
@@ -858,6 +859,34 @@ fn settle_dues(
         }
     }
     d.owners = left;
+    // The union's parts come after the owners (2 Nov): into its treasury from what is left of her
+    // repayment, all of it at the close; at a default senior keeps them (the union's own loss).
+    let pay = if all {
+        d.union_due
+    } else {
+        core::cmp::min(d.union_due, d.credit)
+    };
+    if pay > 0 {
+        if !all {
+            d.credit -= pay;
+        }
+        d.union_due -= pay;
+        i_add(env, &Counter::Earmark(union.clone()), -pay)?;
+        if default {
+            let mut sm = load_market(env, false, union);
+            sm.cash += pay;
+            save_market(env, false, union, &sm);
+        } else {
+            i_add(env, &Counter::Treasury(union.clone()), pay)?;
+        }
+        UnionDueSettled {
+            union: union.clone(),
+            token_id: token_id.clone(),
+            amount: pay,
+            lost: default,
+        }
+        .publish(env);
+    }
     Ok(settled)
 }
 
@@ -1724,7 +1753,9 @@ impl FundCore {
     // and settled into her balance (`collect`) as the member repays the voucher's value, in full when
     // the loan closes, and by senior at a default. What she already repaid and the work after the close
     // are paid at once. Never more than this voucher set aside (a rate may have risen since the draw):
-    // the prepay comes first.
+    // the prepay comes first, then the owner's postpaid part, then `to_union`, the union's parts of the
+    // price (executive decision 2 Nov), which go to its treasury after the owners as she repays.
+    #[allow(clippy::too_many_arguments)]
     pub fn pay_voucher(
         env: Env,
         union: Address,
@@ -1733,28 +1764,34 @@ impl FundCore {
         units: u32,
         prepay: i128,
         postpaid: i128,
+        to_union: i128,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         cfg(&env)
             .machinery
             .ok_or(Error::NotMachinery)?
             .require_auth();
-        if prepay < 0 || postpaid < 0 {
+        if prepay < 0 || postpaid < 0 || to_union < 0 {
             return Err(Error::NegativeAmount);
         }
         let mut b = load_book(&env, &union, &token_id).ok_or(Error::NotExists)?;
         let take = core::cmp::min(
-            prepay.checked_add(postpaid).ok_or(Error::Overflow)?,
+            prepay
+                .checked_add(postpaid)
+                .and_then(|x| x.checked_add(to_union))
+                .ok_or(Error::Overflow)?,
             b.reserve,
         );
         let pre = core::cmp::min(prepay, take);
-        let post = take - pre;
+        let post = core::cmp::min(postpaid, take - pre);
+        let uni = take - pre - post;
         b.reserve -= take;
         save_book(&env, &union, &token_id, &b);
         // What she has repaid and not yet paid on covers the postpaid part at once; after the close
         // (her hours stay hers) all of it is paid at once.
         let mut d = load_dues(&env, &union, &token_id);
-        let now_post = if load_loan(&env, &union, &token_id)?.closed {
+        let closed = load_loan(&env, &union, &token_id)?.closed;
+        let now_post = if closed {
             post
         } else {
             core::cmp::min(post, d.credit)
@@ -1781,6 +1818,12 @@ impl FundCore {
                 }
             }
             d.owners = owners;
+        }
+        // The union's parts (2 Nov): held like the owner's, into the treasury at once from what she
+        // already repaid (or after the close).
+        if uni > 0 {
+            d.union_due += uni;
+            settle_dues(&env, &union, &token_id, &mut d, closed, false)?;
         }
         save_dues(&env, &union, &token_id, &d);
         let now = pre + now_post;

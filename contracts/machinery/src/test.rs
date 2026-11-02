@@ -147,6 +147,7 @@ fn storage_layout_is_frozen() {
         DataKey::Voucher(a.clone(), h.clone()),
         DataKey::WeekUse(1, 2),
         DataKey::CropRate(a.clone(), 9, 2),
+        DataKey::UnionParts(a.clone()),
     ] {
         v.push_back(k.into_val(&env));
     }
@@ -190,7 +191,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "087ff61db3496835463e9190c95049c48e2ac3acd7e96f776fbc7cd1d4c0a997",
+        hex, "59058a28b8b43244ab854efa46fbf68c33260d28a415a4e39c5abbab139b83c3",
         "machinery storage layout changed"
     );
 }

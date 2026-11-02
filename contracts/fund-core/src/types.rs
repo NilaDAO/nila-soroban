@@ -307,4 +307,7 @@ pub struct OwnerDue {
 pub struct Dues {
     pub owners: Vec<OwnerDue>,
     pub credit: i128,
+    /// The union's parts of the price (executive decision 2 Nov), settled into its treasury after the
+    /// owners; lost to senior at a default.
+    pub union_due: i128,
 }

@@ -211,6 +211,18 @@ pub struct OwnerDueSettled {
     pub default: bool,
 }
 
+// The union's parts of a voucher's price (2 Nov): into its treasury (`lost` false), or back to senior
+// at a default (`lost` true).
+#[contractevent]
+pub struct UnionDueSettled {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub token_id: BytesN<32>,
+    pub amount: i128,
+    pub lost: bool,
+}
+
 // An owner collected her balance.
 #[contractevent]
 pub struct OwnerCollected {

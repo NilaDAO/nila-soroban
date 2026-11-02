@@ -1571,6 +1571,7 @@ fn storage_layout_is_frozen() {
                 }
             ],
             credit: 2,
+            union_due: 3,
         }
         .into_val(&env),
     );
@@ -1581,7 +1582,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "fe9f478af7c97fab022aa18e8bc9d946c7371dd220d5205382f767a5f38ea968",
+        hex, "e7b04ab882a6181a6475dc4a6ba65faf0cf0d7ac77d9c6e1d0ad68a3c798726f",
         "fund_core storage layout changed"
     );
 }
@@ -2219,6 +2220,8 @@ fn vsetup() -> Vx {
     fx.core().set_machinery(&m);
     // The union account (its leaders) sets the price of a tractor hour in parts (R57).
     mc.set_rate(&fx.union, &1, &tractor(NIN));
+    // Every part to the owner here (mask 0); the union's parts (2 Nov) have their own tests.
+    mc.set_union_parts(&fx.union, &0);
     let owner = fx.neighbour.clone();
     let machine = mc.register_machine(&fx.leader, &fx.union, &owner, &1, &40, &loan_id(env, 0x50));
     mc.confirm_machine(&owner, &machine);
@@ -2521,6 +2524,91 @@ fn default_takes_the_voucher_value_from_her_investment_first() {
     v.assert_conserved();
 }
 
+/// The union's parts of the price (executive decision 2 Nov): one 4-acre job under `mask`, then the
+/// loan repaid in full (`default` false) or defaulted. Returns (treasury change, owner paid in all,
+/// senior cash after, union due right after the claim).
+fn union_parts_run(mask: u32, default: bool) -> (i128, i128, i128, i128) {
+    let v = vsetup();
+    let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
+    mc.set_union_parts(&fx.union, &mask);
+    let id = loan_id(&fx.env, 1);
+    fx.invest(&fx.borrower, 3_000 * NIN);
+    c.attest_food_token(
+        &fx.attester,
+        &fx.union,
+        &id,
+        &fx.borrower,
+        &(300 * NIN),
+        &400,
+    );
+    c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &400);
+    let t0 = c.union_treasury(&fx.union);
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &400, &400);
+    let due = c.owner_dues(&fx.union, &id).union_due;
+    v.assert_conserved();
+    if default {
+        c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
+        fx.at(T0 + 111 * 86_400 + 1);
+        c.mark_default(&fx.union, &id);
+    } else {
+        fx.at(T0 + YEAR / 2);
+        StellarAssetClient::new(&fx.env, &fx.nin).mint(&fx.fx_id, &(20_000 * NIN));
+        assert!(c.repay_loan(&fx.union, &id, &(20_000 * NIN)));
+    }
+    let d = c.owner_dues(&fx.union, &id);
+    assert_eq!((d.owners.len(), d.union_due), (0, 0));
+    if c.owner_balance(&fx.union, &v.owner) > 0 {
+        c.collect(&fx.union, &v.owner);
+    }
+    assert_eq!(c.senior_earmark(&fx.union), 0);
+    v.assert_conserved();
+    (
+        c.union_treasury(&fx.union) - t0,
+        fx.token().balance(&v.owner),
+        c.get_senior_market(&fx.union).cash,
+        due,
+    )
+}
+
+#[test]
+fn union_parts_go_to_the_treasury_as_she_repays_and_to_senior_at_a_default() {
+    use nila_machinery::{PART_DEPRECIATION, PART_INSURANCE, PART_MAINTENANCE, PART_MARGIN};
+    // Default (unset): depreciation and margin are the union's: ₹250 of the ₹1,450 acre.
+    let v = vsetup();
+    v.mach()
+        .set_union_parts(&v.fx.union, &(PART_DEPRECIATION | PART_MARGIN));
+    assert_eq!(
+        v.mach().union_parts(&Address::generate(&v.fx.env)),
+        PART_DEPRECIATION | PART_MARGIN
+    );
+    // Driver and diesel are always the owner's.
+    assert_eq!(
+        v.mach().try_set_union_parts(&v.fx.union, &1),
+        Err(Ok(nila_machinery::Error::BadArg))
+    );
+    let dep = 4 * 250 * NIN;
+    let (t_all, o_all, _, d_all) = union_parts_run(0, false);
+    let (t_dep, o_dep, _, d_dep) = union_parts_run(PART_DEPRECIATION | PART_MARGIN, false);
+    // Repaid: the owner gets ₹250 an acre less, the treasury the same more; the prepay is unchanged.
+    assert_eq!((d_all, d_dep), (0, dep));
+    assert_eq!((o_all - o_dep, t_dep - t_all), (dep, dep));
+    // A union taking maintenance, insurance and depreciation too: ₹550 an acre.
+    let all4 = PART_MAINTENANCE | PART_INSURANCE | PART_DEPRECIATION | PART_MARGIN;
+    let (t_4, o_4, _, d_4) = union_parts_run(all4, false);
+    assert_eq!(
+        (d_4, o_all - o_4, t_4 - t_all),
+        (4 * 550 * NIN, 4 * 550 * NIN, 4 * 550 * NIN)
+    );
+    assert_eq!(o_4, 4 * PRE + 4 * 200 * NIN);
+    // Defaulted: senior pays the owner's part (the guarantee) but keeps the union's: the union's loss.
+    let (td_all, od_all, sd_all, _) = union_parts_run(0, true);
+    let (td_dep, od_dep, sd_dep, _) = union_parts_run(PART_DEPRECIATION | PART_MARGIN, true);
+    assert_eq!(
+        (od_all - od_dep, sd_dep - sd_all, td_dep - td_all),
+        (dep, dep, 0)
+    );
+}
+
 #[test]
 fn default_unused_hours_go_back_to_senior_and_it_takes_the_rest() {
     let v = vsetup();
@@ -2650,7 +2738,7 @@ fn a_default_pays_owners_in_full_and_owners_per_voucher_are_capped() {
     assert_eq!(c.owner_dues(&fx.union, &id).owners.len(), 8);
     let (o9, m9) = owners.last().unwrap();
     assert_eq!(
-        c.try_pay_voucher(&fx.union, &id, o9, &10, &NIN, &NIN),
+        c.try_pay_voucher(&fx.union, &id, o9, &10, &NIN, &NIN, &0),
         Err(Ok(Error::TooManyOwners))
     );
     assert!(mc.try_claim(o9, m9, &fx.union, &id, &10, &10).is_err());

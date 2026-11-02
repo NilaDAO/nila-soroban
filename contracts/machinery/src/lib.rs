@@ -145,6 +145,9 @@ pub enum DataKey {
     CropRate(Address, u32, u32),
     Types(Address),
     PrepayDriverBp(Address),
+    /// Which parts of the price go to the union treasury, not the owner (executive decision 2 Nov): a mask
+    /// of `PART_*` bits; unset = depreciation and margin.
+    UnionParts(Address),
     NextMachine,
     Machine(u64),
     Voucher(Address, BytesN<32>),
@@ -224,6 +227,15 @@ pub struct VoucherClaimed {
     pub units: u32,
     pub prepay: i128,
     pub pending: i128,
+    /// The union's part of the price (2 Nov), held until she repays.
+    pub to_union: i128,
+}
+
+#[contractevent]
+pub struct UnionPartsSet {
+    #[topic]
+    pub union: Address,
+    pub mask: u32,
 }
 
 #[contractevent]
@@ -291,6 +303,31 @@ fn bump(env: &Env, key: &DataKey) {
     env.storage()
         .persistent()
         .extend_ttl(key, nila_common::TTL_THRESHOLD, nila_common::TTL_BUMP);
+}
+
+// The union's share of the price (executive decision 2 Nov): not every part of a voucher is the owner's.
+// The union picks which of maintenance, insurance, depreciation and margin go to its treasury; driver
+// and diesel are always the owner's (they are the prepay).
+pub const PART_MAINTENANCE: u32 = 1 << 2;
+pub const PART_INSURANCE: u32 = 1 << 3;
+pub const PART_DEPRECIATION: u32 = 1 << 4;
+pub const PART_MARGIN: u32 = 1 << 5;
+const UNION_PART_BITS: u32 = PART_MAINTENANCE | PART_INSURANCE | PART_DEPRECIATION | PART_MARGIN;
+const DEFAULT_UNION_PARTS: u32 = PART_DEPRECIATION | PART_MARGIN;
+
+fn union_parts(env: &Env, union: &Address) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::UnionParts(union.clone()))
+        .unwrap_or(DEFAULT_UNION_PARTS)
+}
+
+fn union_per_acre(r: &RateParts, mask: u32) -> i128 {
+    let pick = |bit: u32, v: i128| if mask & bit != 0 { v } else { 0 };
+    pick(PART_MAINTENANCE, r.maintenance)
+        + pick(PART_INSURANCE, r.insurance)
+        + pick(PART_DEPRECIATION, r.depreciation)
+        + pick(PART_MARGIN, r.margin)
 }
 
 fn prepay_driver_bp(env: &Env, union: &Address) -> u32 {
@@ -524,6 +561,21 @@ impl MachineryContract {
         env.storage().persistent().set(&k, &driver_bp);
         bump(&env, &k);
         PrepayShareSet { union, driver_bp }.publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// Which parts of the price go to the union treasury (executive decision 2 Nov): `PART_*` bits of
+    /// maintenance, insurance, depreciation and margin; driver and diesel stay the owner's.
+    pub fn set_union_parts(env: Env, union: Address, mask: u32) -> Result<(), Error> {
+        union.require_auth();
+        if mask & !UNION_PART_BITS != 0 {
+            return Err(Error::BadArg);
+        }
+        let k = DataKey::UnionParts(union.clone());
+        env.storage().persistent().set(&k, &mask);
+        bump(&env, &k);
+        UnionPartsSet { union, mask }.publish(&env);
         bump_instance(&env);
         Ok(())
     }
@@ -769,18 +821,22 @@ impl MachineryContract {
             .temporary()
             .extend_ttl(&wk, WEEK_USE_LEDGERS, WEEK_USE_LEDGERS);
         // Owner split (1 Nov): the price an acre × the acres worked, the prepay part now, the rest
-        // postpaid from her repayment (D18, X32). Her debt is separate.
+        // postpaid from her repayment (D18, X32). Her debt is separate. The union's parts (2 Nov) are
+        // taken out first and go to its treasury as she repays.
         let total = total_per_acre(&r) * i128::from(acres) / 100;
+        let to_union = union_per_acre(&r, union_parts(&env, &union)) * i128::from(acres) / 100;
+        let owner_total = total - to_union;
         let prepay = core::cmp::min(
             prepay_per_acre(&r, prepay_driver_bp(&env, &union)) * i128::from(acres) / 100,
-            total,
+            owner_total,
         );
-        let pending = total - prepay;
+        let pending = owner_total - prepay;
         // One claim per signature; the rest of her voucher stays with her (R55).
         v.used += units;
         save_voucher(&env, &union, &token_id, &v);
-        FundCoreClient::new(&env, &core_addr(&env)?)
-            .pay_voucher(&union, &token_id, &owner, &units, &prepay, &pending);
+        FundCoreClient::new(&env, &core_addr(&env)?).pay_voucher(
+            &union, &token_id, &owner, &units, &prepay, &pending, &to_union,
+        );
         VoucherClaimed {
             union,
             token_id,
@@ -790,6 +846,7 @@ impl MachineryContract {
             units,
             prepay,
             pending,
+            to_union,
         }
         .publish(&env);
         bump_instance(&env);
@@ -831,6 +888,11 @@ impl MachineryContract {
     /// A crop share's (crop family, area in centi acres) as this contract reads them from its token id.
     pub fn share_of(token_id: BytesN<32>) -> (u32, u64) {
         share_of(&token_id)
+    }
+
+    /// The union's parts of the price (`PART_*` bits; default depreciation and margin).
+    pub fn union_parts(env: Env, union: Address) -> u32 {
+        union_parts(&env, &union)
     }
 
     pub fn prepay_share(env: Env, union: Address) -> u32 {

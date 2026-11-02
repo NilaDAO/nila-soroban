@@ -77,7 +77,7 @@ storage:
 | `Vouchers(union, token_id)` | persistent | `VoucherBook{hours, per_hour, value, repaid, interest_accrued, interest_paid, last_accrual_ts, reserve, fee_due}` (26 Oct: the voucher's value is senior's loan from the draw, with interest; `reserve` is the money for her unclaimed work: at a claim the prepay leaves it to the owner and the postpaid part into `Dues` (1 Nov); `fee_due` is 5% of handed-back hours, the union treasury's) |
 | `OwnerBalance(union, owner)` | persistent | i128 owner's settled postpaid parts, ready to `collect` (credited again since 1 Nov, owner split) |
 | `ShareCash(union, week)` | persistent | i128 cash parts of the union's undrawn food tokens whose window closes that week (31 Oct; read by `cash_room`) |
-| `Dues(union, token_id)` | persistent | `Dues{owners: Vec<OwnerDue{owner, amount}>, credit}` (1 Nov, owner split): owners' postpaid parts still owed on a voucher, oldest claim first (max 8 owners), and her repayment of the voucher's value not yet paid on |
+| `Dues(union, token_id)` | persistent | `Dues{owners: Vec<OwnerDue{owner, amount}>, credit, union_due}` (1 Nov, owner split): owners' postpaid parts still owed on a voucher, oldest claim first (max 8 owners), her repayment of the voucher's value not yet paid on, and (2 Nov) the union's parts of the price, into its treasury after the owners, back to senior at a default |
 | `CropCalendar` | instance | Address of the crop_calendar contract (25 Oct) |
 
 ## crop_calendar (25 Oct)
@@ -99,6 +99,7 @@ storage:
 | `CropRate(union, machine_type, crop_family)` | persistent | `RateParts` per acre for one crop family (27 Oct; optional, else `Rate`) |
 | `Types(union)` | persistent | Vec<u32> machine types with a rate (max 16) |
 | `PrepayDriverBp(union)` | persistent | u32 share of the driver part paid at the job (X32) |
+| `UnionParts(union)` | persistent | u32 mask of the price parts that go to the union treasury, not the owner (2 Nov): maintenance 4, insurance 8, depreciation 16, margin 32; unset = depreciation + margin |
 | `Machine(id)` | persistent | `Machine{union, owner, machine_type, acres_per_week, photos_hash, confirmed, on_hold, hold_reason}` |
 | `Voucher(union, token_id)` | persistent | `Voucher{member, units, used, void, code_hash: Option, code_max, code_expires}` (the three code fields unused since the signed claim, 23 Oct; kept for the layout) |
 | `WeekUse(machine_id, week)` | **temporary** | u32 centi acres worked that week; lives ~8 days, then the network deletes it (C7) |
@@ -175,6 +176,9 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
   `postpaid` instead of one amount, so fund_core and machinery are upgraded together, fund_core first, with
   machinery paused in between. The frozen-layout hash changed because the sample list grew (it now also samples
   `ShareCash`, missing since 31 Oct).
+- **Union parts (executive decision 2 Nov, fresh mainnet deploy):** `Dues` gained `union_due` (a layout change, fine
+  on a fresh deploy only) and machinery gained `UnionParts(union)`. `pay_voucher` takes `to_union` too; machinery
+  takes the union's parts out of the price before the owner's prepay and postpaid part.
 
 ## account (26 Oct): every Nila account (members, leaders, machine owners, LPs)
 
