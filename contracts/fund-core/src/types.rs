@@ -1,4 +1,4 @@
-use soroban_sdk::{contracterror, contracttype, Address, BytesN};
+use soroban_sdk::{contracterror, contracttype, Address, BytesN, Vec};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -252,9 +252,10 @@ pub struct Investor {
 
 // A loan's voucher part (executive decision 26 Oct, revises D6): its value is lent by senior at
 // the draw and is debt from then on, with interest that senior earns (senior keeps USDC on-chain
-// to back it). The hours are hers to use whenever she likes: owners are paid in full from the
-// reserve, also after the loan is repaid. Handing hours back takes their whole value off her
-// debt and adds 5% of it owed to the union treasury.
+// to back it). The hours are hers to use whenever she likes, also after the loan is repaid. At a
+// claim the owner's prepay leaves the reserve at once and the postpaid part is held for her in
+// `Dues` (owner split, 1 Nov). Handing hours back takes their whole value off her debt and adds 5%
+// of it owed to the union treasury.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VoucherBook {
@@ -268,7 +269,8 @@ pub struct VoucherBook {
     pub interest_accrued: i128,
     pub interest_paid: i128,
     pub last_accrual_ts: u64,
-    // Senior money set aside for her unclaimed hours (pays owners; outside senior cash).
+    // Senior money set aside for her unclaimed hours (pays owners; outside senior cash). Claimed
+    // work leaves it: the prepay to the owner, the postpaid part into `Dues`.
     pub reserve: i128,
     // 5% of handed-back hours' value, owed to the union treasury.
     pub fee_due: i128,
@@ -286,4 +288,23 @@ pub struct UnionBook {
     pub earmark: i128,
     // Loans past their payback date and not repaid or defaulted (R34).
     pub on_hold: u32,
+}
+
+// One owner's postpaid part of the work she did on a voucher (owner split, 1 Nov).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnerDue {
+    pub owner: Address,
+    pub amount: i128,
+}
+
+// What a voucher's owners are still owed, oldest claim first, and the member's repayment of the
+// voucher's value not yet paid on to them (`credit`). Owners are paid from that repayment as it
+// comes in, in full when the loan closes, and by senior at a default: the guarantee. The money is
+// senior's, held under the earmark until paid. Its own key, so `VoucherBook` keeps its layout.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Dues {
+    pub owners: Vec<OwnerDue>,
+    pub credit: i128,
 }

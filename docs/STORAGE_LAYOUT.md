@@ -74,8 +74,10 @@ storage:
 | `Union(union)` | persistent | `UnionBook{borrows, treasury, rainy, earmark, on_hold}`: one entry for the union's counters (C6) |
 | `FoodToken(union, token_id)` | persistent | `FoodToken{member, amount, hours, from_date, loan: LoanState}`. Amount and hours are the plan's recommendations; from_date is the opening of its window since 25 Oct, attested: a week before its crop's sowing window in that season; a token attested before keeps its SOS or six weeks before its last date. **The loan lives here** (C6): `LoanState{principal, rate_bp, drawdown_ts, maturity_ts, principal_paid, interest_paid, interest_accrued, last_accrual_ts, flags}`, flags = overdue 1, defaulted 2, closed 4, drawn 8. The token id is the loan id. |
 | `FoodTokenFinal(union, token_id)` | persistent | `FoodTokenFinal{final_date, lapsed}` (25 Oct): the last draw date (`draw_loan` refuses after it, `TooLate`) and whether the token lapsed unused (`lapse_food_token`, anyone, after the last date). A token without it has no last date (attested before 25 Oct). |
-| `Vouchers(union, token_id)` | persistent | `VoucherBook{hours, per_hour, value, repaid, interest_accrued, interest_paid, last_accrual_ts, reserve, fee_due}` (26 Oct: the voucher's value is senior's loan from the draw, with interest; `reserve` pays owners in full at the claim, also after repayment; `fee_due` is 5% of handed-back hours, the union treasury's) |
-| `OwnerBalance(union, owner)` | persistent | i128 owner's balance to collect (no longer credited since 26 Oct: owners are paid at the claim) |
+| `Vouchers(union, token_id)` | persistent | `VoucherBook{hours, per_hour, value, repaid, interest_accrued, interest_paid, last_accrual_ts, reserve, fee_due}` (26 Oct: the voucher's value is senior's loan from the draw, with interest; `reserve` is the money for her unclaimed work: at a claim the prepay leaves it to the owner and the postpaid part into `Dues` (1 Nov); `fee_due` is 5% of handed-back hours, the union treasury's) |
+| `OwnerBalance(union, owner)` | persistent | i128 owner's settled postpaid parts, ready to `collect` (credited again since 1 Nov, owner split) |
+| `ShareCash(union, week)` | persistent | i128 cash parts of the union's undrawn food tokens whose window closes that week (31 Oct; read by `cash_room`) |
+| `Dues(union, token_id)` | persistent | `Dues{owners: Vec<OwnerDue{owner, amount}>, credit}` (1 Nov, owner split): owners' postpaid parts still owed on a voucher, oldest claim first (max 8 owners), and her repayment of the voucher's value not yet paid on |
 | `CropCalendar` | instance | Address of the crop_calendar contract (25 Oct) |
 
 ## crop_calendar (25 Oct)
@@ -166,6 +168,13 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
   gained one instance key, `CropCalendar` (the calendar's address, set by the admin with `set_crop_calendar`), apart
   from `Config` so the stored config keeps its layout. Until it is set, and the families' windows are set, every
   attestation is refused (`BadDates`). The frozen-layout hash changed only because the sample list grew.
+
+- **Owner split (1 Nov):** fund_core gained `Dues(union, token_id)`, and `OwnerBalance` is written again. Appended
+  only: `VoucherBook` keeps its layout, so a deployed fund_core can be upgraded in place (vouchers claimed under the
+  old code were paid in full and have no dues). The cross-contract call changed: `pay_voucher` takes `prepay` and
+  `postpaid` instead of one amount, so fund_core and machinery are upgraded together, fund_core first, with
+  machinery paused in between. The frozen-layout hash changed because the sample list grew (it now also samples
+  `ShareCash`, missing since 31 Oct).
 
 ## account (26 Oct): every Nila account (members, leaders, machine owners, LPs)
 

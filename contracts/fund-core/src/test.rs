@@ -1448,6 +1448,8 @@ fn storage_layout_is_frozen() {
         DataKey::OwnerBalance(a.clone(), a.clone()),
         DataKey::FoodTokenFinal(a.clone(), h.clone()),
         DataKey::CropCalendar,
+        DataKey::ShareCash(a.clone(), 1),
+        DataKey::Dues(a.clone(), h.clone()),
     ] {
         v.push_back(k.into_val(&env));
     }
@@ -1558,6 +1560,20 @@ fn storage_layout_is_frozen() {
     );
     v.push_back(nila_common::Tranche::Junior.into_val(&env));
     v.push_back(nila_common::Tranche::Senior.into_val(&env));
+    // Appended 1 Nov (owner split): what a voucher's owners are still owed, beside the unchanged book.
+    v.push_back(
+        Dues {
+            owners: soroban_sdk::vec![
+                &env,
+                OwnerDue {
+                    owner: a.clone(),
+                    amount: 1,
+                }
+            ],
+            credit: 2,
+        }
+        .into_val(&env),
+    );
     let got: BytesN<32> = env.crypto().sha256(&v.to_xdr(&env)).into();
     let hex: std::string::String = got
         .to_array()
@@ -1565,7 +1581,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "4e78348ff1d40aff87d6a38344bb18cf3ba661585e63a90dde1697035b413440",
+        hex, "fe9f478af7c97fab022aa18e8bc9d946c7371dd220d5205382f767a5f38ea968",
         "fund_core storage layout changed"
     );
 }
@@ -2254,7 +2270,8 @@ fn voucher_is_debt_from_the_draw_and_its_hours_stay_hers() {
     assert_eq!(p.locked, p.invested);
     v.assert_conserved();
 
-    // A8a: she signs for up to 6 hours; the owner works 4 and is paid all of it at once.
+    // A8a: she signs for up to 6 hours; the owner works 4: the prepay now, the rest postpaid (owner
+    // split, 1 Nov), held for the owner out of the reserve.
     mc.claim(&v.owner, &v.machine, &fx.union, &id, &600, &400);
     use soroban_sdk::{testutils::AuthorizedFunction, IntoVal, Symbol};
     let signed: soroban_sdk::Vec<soroban_sdk::Val> =
@@ -2262,8 +2279,14 @@ fn voucher_is_debt_from_the_draw_and_its_hours_stay_hers() {
     assert!(fx.env.auths().iter().any(|(a, inv)| *a == fx.borrower
         && matches!(&inv.function, AuthorizedFunction::Contract((c, f, args))
             if *c == mc.address && *f == Symbol::new(&fx.env, "claim") && *args == signed)));
-    assert_eq!(fx.token().balance(&v.owner), 4 * HOUR);
-    assert_eq!(c.senior_earmark(&fx.union), 2 * HOUR);
+    assert_eq!(fx.token().balance(&v.owner), 4 * PRE);
+    assert_eq!(c.senior_earmark(&fx.union), 2 * HOUR + 4 * PEND);
+    let d = c.owner_dues(&fx.union, &id);
+    assert_eq!(
+        (d.owners.len(), d.owners.get(0).unwrap().amount),
+        (1, 4 * PEND)
+    );
+    assert_eq!(c.voucher_book(&fx.union, &id).unwrap().reserve, 2 * HOUR);
     // The claim changes nothing in what she owes or what senior lent.
     assert_eq!(c.get_senior_market(&fx.union).total_borrows, value);
     v.assert_conserved();
@@ -2278,11 +2301,20 @@ fn voucher_is_debt_from_the_draw_and_its_hours_stay_hers() {
     assert!(c.repay_loan(&fx.union, &id, &(total + 50 * NIN)));
     let sm = c.get_senior_market(&fx.union);
     assert_eq!((sm.cash, sm.total_borrows), (10_000 * NIN + v_int, 0));
+    // Her repayment settled the owner's postpaid part into the owner's balance; she collects it.
+    assert!(c.owner_dues(&fx.union, &id).owners.is_empty());
+    assert_eq!(c.owner_balance(&fx.union, &v.owner), 4 * PEND);
+    assert_eq!(c.collect(&fx.union, &v.owner), 4 * PEND);
+    assert_eq!(fx.token().balance(&v.owner), 4 * HOUR);
+    assert_eq!(
+        c.try_collect(&fx.union, &v.owner),
+        Err(Ok(Error::NothingToClaim))
+    );
     // Closed, and her 2 unused hours stay hers, with their reserve.
     assert_eq!(c.senior_earmark(&fx.union), 2 * HOUR);
     assert!(!mc.voucher(&fx.union, &id).unwrap().void);
     v.assert_conserved();
-    // She uses them after the loan is repaid: the owner is paid from the reserve.
+    // She uses them after the loan is repaid: the owner is paid from the reserve, all of it at once.
     fx.at(T0 + YEAR / 2 + 8 * 86_400);
     mc.claim(&v.owner, &v.machine, &fx.union, &id, &200, &200);
     assert_eq!(fx.token().balance(&v.owner), 6 * HOUR);
@@ -2370,7 +2402,12 @@ fn acres_are_capped_by_the_shares_area_and_priced_by_its_crop() {
     mc.set_crop_rate(&fx.union, &1, &2, &Some(tractor(2 * NIN)));
     mc.claim(&v.owner, &v.machine, &fx.union, &id, &600, &100);
     assert_eq!(mc.voucher(&fx.union, &id).unwrap().used, 200);
-    assert_eq!(fx.token().balance(&v.owner), 2 * HOUR);
+    // The prepay of the crop's price now (diesel ₹1,000 + half the driver's ₹800); the rest postpaid.
+    assert_eq!(fx.token().balance(&v.owner), 2 * PRE);
+    assert_eq!(
+        c.owner_dues(&fx.union, &id).owners.get(0).unwrap().amount,
+        2 * PEND
+    );
     v.assert_conserved();
     // Removing the crop's price brings the type's back.
     mc.set_crop_rate(&fx.union, &1, &2, &None);
@@ -2472,6 +2509,8 @@ fn default_takes_the_voucher_value_from_her_investment_first() {
     c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
     fx.at(T0 + 111 * 86_400 + 1);
     c.mark_default(&fx.union, &id);
+    // The owner's postpaid part was settled by the default (the guarantee); she collects it.
+    c.collect(&fx.union, &v.owner);
     // Her investment covers it all: the voucher's value and interest to senior, junior in full.
     assert_eq!(fx.token().balance(&v.owner), 2 * HOUR);
     let sm = c.get_senior_market(&fx.union);
@@ -2502,7 +2541,9 @@ fn default_unused_hours_go_back_to_senior_and_it_takes_the_rest() {
     c.mark_default(&fx.union, &id);
     // Her 2 unused hours lapse and their reserve takes ₹2,900 off the ₹5,800 she owed senior. Her
     // 2,000 invested goes to senior first, as far as the junior pool holds cash (₹1,700 after the
-    // ₹300 draw), then to her junior principal; senior loses the rest.
+    // ₹300 draw), then to her junior principal; senior loses the rest. The owner's postpaid part was
+    // settled by the default; she collects it.
+    c.collect(&fx.union, &v.owner);
     assert_eq!(fx.token().balance(&v.owner), 2 * HOUR);
     assert!(mc.voucher(&fx.union, &id).unwrap().void);
     assert_eq!(c.senior_earmark(&fx.union), 0);
@@ -2510,6 +2551,127 @@ fn default_unused_hours_go_back_to_senior_and_it_takes_the_rest() {
     assert_eq!(sm.total_borrows, 0);
     assert_eq!(sm.cash, 10_000 * NIN - 2 * HOUR + 1_700 * NIN);
     assert_eq!(c.position(&fx.union, &fx.borrower).invested, 0);
+    v.assert_conserved();
+}
+
+/// Owner split (1 Nov): her repayment of the voucher's value pays the owners' postpaid parts first,
+/// oldest claim first; repaid value not yet needed waits as credit and pays later work at once.
+#[test]
+fn owners_are_paid_the_rest_from_her_repayment_oldest_claim_first() {
+    let v = vsetup();
+    let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
+    let second = Address::generate(&fx.env);
+    fx.give_title(&second);
+    let m2 = mc.register_machine(
+        &fx.leader,
+        &fx.union,
+        &second,
+        &1,
+        &40,
+        &loan_id(&fx.env, 0x51),
+    );
+    mc.confirm_machine(&second, &m2);
+    let id = loan_id(&fx.env, 1);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &600);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &600);
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &200, &200);
+    mc.claim(&second, &m2, &fx.union, &id, &200, &200);
+    assert_eq!(fx.token().balance(&v.owner), 2 * PRE);
+    assert_eq!(fx.token().balance(&second), 2 * PRE);
+    v.assert_conserved();
+
+    // She brings ₹2,000 the same day (no interest yet): it is the voucher's value, so it settles the
+    // first owner's ₹1,500 and ₹500 of the second's into their balances.
+    StellarAssetClient::new(&fx.env, &fx.nin).mint(&fx.fx_id, &(2_000 * NIN));
+    assert!(!c.repay_loan(&fx.union, &id, &(2_000 * NIN)));
+    assert_eq!(c.owner_balance(&fx.union, &v.owner), 2 * PEND);
+    assert_eq!(c.owner_balance(&fx.union, &second), 500 * NIN);
+    let d = c.owner_dues(&fx.union, &id);
+    assert_eq!((d.owners.len(), d.credit), (1, 0));
+    assert_eq!(d.owners.get(0).unwrap().amount, 1_000 * NIN);
+    // Senior got its money back as it came in; what owners are owed stays under the earmark until
+    // they collect it.
+    assert_eq!(
+        c.senior_earmark(&fx.union),
+        2 * HOUR + 2 * PEND + 1_500 * NIN
+    );
+    c.collect(&fx.union, &v.owner);
+    assert_eq!(fx.token().balance(&v.owner), 2 * HOUR);
+    v.assert_conserved();
+
+    // ₹4,000 more: ₹1,000 to the second owner, ₹3,000 waits as credit for work not done yet.
+    StellarAssetClient::new(&fx.env, &fx.nin).mint(&fx.fx_id, &(4_000 * NIN));
+    assert!(!c.repay_loan(&fx.union, &id, &(4_000 * NIN)));
+    assert_eq!(c.collect(&fx.union, &second), 2 * PEND);
+    assert_eq!(fx.token().balance(&second), 2 * HOUR);
+    assert_eq!(c.owner_dues(&fx.union, &id).credit, 3_000 * NIN);
+    // The first owner works her last 2 hours: prepay, and the postpaid part at once from that credit.
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &200, &200);
+    assert_eq!(fx.token().balance(&v.owner), 4 * HOUR);
+    let d = c.owner_dues(&fx.union, &id);
+    assert_eq!((d.owners.len(), d.credit), (0, 1_500 * NIN));
+    assert_eq!(c.senior_earmark(&fx.union), 0);
+    v.assert_conserved();
+}
+
+/// Owner split: a default pays the owners what they are still owed (the guarantee); a ninth owner on
+/// one voucher is refused.
+#[test]
+fn a_default_pays_owners_in_full_and_owners_per_voucher_are_capped() {
+    let v = vsetup();
+    let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
+    let id = loan_id(&fx.env, 1);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &600);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &600);
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &300, &300);
+    assert_eq!(fx.token().balance(&v.owner), 3 * PRE);
+    // Seven more owners, ten centi acres each: eight in all.
+    let mut owners = std::vec::Vec::new();
+    for i in 0..8u8 {
+        fx.env.cost_estimate().budget().reset_default();
+        let o = Address::generate(&fx.env);
+        fx.give_title(&o);
+        let m = mc.register_machine(
+            &fx.leader,
+            &fx.union,
+            &o,
+            &1,
+            &40,
+            &loan_id(&fx.env, 0x60 + i),
+        );
+        mc.confirm_machine(&o, &m);
+        owners.push((o, m));
+    }
+    for (o, m) in owners.iter().take(7) {
+        fx.env.cost_estimate().budget().reset_default();
+        mc.claim(o, m, &fx.union, &id, &10, &10);
+    }
+    fx.env.cost_estimate().budget().reset_default();
+    assert_eq!(c.owner_dues(&fx.union, &id).owners.len(), 8);
+    let (o9, m9) = owners.last().unwrap();
+    assert_eq!(
+        c.try_pay_voucher(&fx.union, &id, o9, &10, &NIN, &NIN),
+        Err(Ok(Error::TooManyOwners))
+    );
+    assert!(mc.try_claim(o9, m9, &fx.union, &id, &10, &10).is_err());
+
+    c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
+    fx.at(T0 + 111 * 86_400 + 1);
+    // A default with eight owners owed stays well inside one transaction's budget: no transfers in it.
+    fx.env.cost_estimate().budget().reset_default();
+    c.mark_default(&fx.union, &id);
+    assert!(fx.env.cost_estimate().budget().cpu_instruction_cost() < 50_000_000);
+    assert!(c.owner_dues(&fx.union, &id).owners.is_empty());
+    // Every owner collects the whole price of the work done; nothing is left owed or held.
+    fx.env.cost_estimate().budget().reset_default();
+    c.collect(&fx.union, &v.owner);
+    assert_eq!(fx.token().balance(&v.owner), 3 * HOUR);
+    for (o, _) in owners.iter().take(7) {
+        fx.env.cost_estimate().budget().reset_default();
+        c.collect(&fx.union, o);
+        assert_eq!(fx.token().balance(o), HOUR / 10);
+    }
+    assert_eq!(c.senior_earmark(&fx.union), 0);
     v.assert_conserved();
 }
 
@@ -2544,8 +2706,14 @@ fn self_claim_rate_rise_and_handing_hours_back() {
     c.draw_loan(&fx.union, &fx.borrower, &id2, &0, &200);
     mc.set_rate(&fx.union, &1, &tractor(15_000_000));
     mc.claim(&v.owner, &v.machine, &fx.union, &id, &400, &400);
-    assert_eq!(fx.token().balance(&v.owner), 4 * HOUR);
-    assert_eq!(c.senior_earmark(&fx.union), 2 * HOUR);
+    // Owner split: the prepay at the new price (₹4,200) first, then what the reserve still holds
+    // (₹1,600 of the ₹4,500 postpaid) is held for the owner.
+    assert_eq!(fx.token().balance(&v.owner), 6 * PRE);
+    assert_eq!(
+        c.owner_dues(&fx.union, &id).owners.get(0).unwrap().amount,
+        1_600 * NIN
+    );
+    assert_eq!(c.senior_earmark(&fx.union), 2 * HOUR + 1_600 * NIN);
     mc.set_rate(&fx.union, &1, &tractor(NIN));
 
     // She hands back 1 of her 2 unused hours on loan 2: ₹1,450 off what she owes senior, its
@@ -2561,7 +2729,7 @@ fn self_claim_rate_rise_and_handing_hours_back() {
         (HOUR, HOUR)
     );
     assert_eq!(mc.voucher(&fx.union, &id2).unwrap().units, 100);
-    assert_eq!(c.senior_earmark(&fx.union), HOUR);
+    assert_eq!(c.senior_earmark(&fx.union), HOUR + 1_600 * NIN);
     // Not more than she has unclaimed.
     assert!(c
         .try_return_voucher(&fx.borrower, &fx.union, &id2, &200)

@@ -184,7 +184,8 @@ pub struct MachinerySet {
     pub machinery: Address,
 }
 
-// An owner claimed hours on her voucher: prepay paid from senior, the rest pending (R85).
+// An owner claimed work on a voucher: `prepay` paid to her now, `pending` held as her postpaid part (R85,
+// owner split 1 Nov).
 #[contractevent]
 pub struct VoucherPaid {
     #[topic]
@@ -195,6 +196,29 @@ pub struct VoucherPaid {
     pub hours: u32,
     pub prepay: i128,
     pub pending: i128,
+}
+
+// An owner's postpaid part settled into her balance (owner split, 1 Nov): from the member's repayment,
+// at the close, or by senior at a default (`default`). She collects it with `collect`.
+#[contractevent]
+pub struct OwnerDueSettled {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub token_id: BytesN<32>,
+    pub owner: Address,
+    pub amount: i128,
+    pub default: bool,
+}
+
+// An owner collected her balance.
+#[contractevent]
+pub struct OwnerCollected {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub owner: Address,
+    pub amount: i128,
 }
 
 // She released a voucher loan that owed nothing: closed, unclaimed hours lapse.
