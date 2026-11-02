@@ -106,6 +106,8 @@ pub enum DataKey {
     SeniorOwed(Address, Address),
     // Voucher interest senior earned in a union and has not yet taken out (2 Nov; nUSD's harvest reads it).
     SeniorIncome(Address),
+    // All `SeniorOwed` of a union: nIN held in fund_core outside every pool (2 Nov).
+    SeniorOwedTotal(Address),
 }
 
 #[contract]
@@ -838,7 +840,8 @@ fn owner_balance(env: &Env, union: &Address, owner: &Address) -> i128 {
 // her repayment not yet paid on (`credit`), or all of it (`all`: the loan closed, or it defaulted and
 // senior pays as guarantor). A settled part moves to the owner's balance, which she collects with
 // `collect`: no transfers here, so a repay or a default costs the same however many owners there are.
-// The money stays under the earmark until collected. Returns what was settled.
+// The money stays under the earmark until collected. Returns the union's part sent back to senior cash at a
+// default (2 Nov), which `mark_default` takes off the voucher value she owed, like unclaimed hours.
 fn settle_dues(
     env: &Env,
     union: &Address,
@@ -848,7 +851,6 @@ fn settle_dues(
     default: bool,
 ) -> Result<i128, Error> {
     let mut left = vec![env];
-    let mut settled: i128 = 0;
     for mut o in d.owners.iter() {
         let pay = if all {
             o.amount
@@ -860,7 +862,6 @@ fn settle_dues(
                 d.credit -= pay;
             }
             o.amount -= pay;
-            settled += pay;
             let k = DataKey::OwnerBalance(union.clone(), o.owner.clone());
             let bal = owner_balance(env, union, &o.owner)
                 .checked_add(pay)
@@ -888,6 +889,7 @@ fn settle_dues(
     } else {
         core::cmp::min(d.union_due, d.credit)
     };
+    let mut back = 0;
     if pay > 0 {
         if !all {
             d.credit -= pay;
@@ -898,6 +900,7 @@ fn settle_dues(
             let mut sm = load_market(env, false, union);
             sm.cash += pay;
             save_market(env, false, union, &sm);
+            back = pay;
         } else {
             i_add(env, &Counter::Treasury(union.clone()), pay)?;
         }
@@ -909,7 +912,7 @@ fn settle_dues(
         }
         .publish(env);
     }
-    Ok(settled)
+    Ok(back)
 }
 
 // The voucher part of a crop share, at the draw or added later (27 Oct): `hours` (centi tractor hours) at the
@@ -1270,15 +1273,12 @@ impl FundCore {
         senior: bool,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
+        // A senior exit goes through the senior contract's `redeem`, which pays the USDC (executive decision
+        // 2 Nov): here only a leader's junior claim to the wallet.
         if senior {
-            investor.require_auth();
-        } else {
-            require_leader(&env, &union, &investor)?;
+            return Err(Error::UseSeniorContract);
         }
-        // A senior exit goes through fx_pool, which pays the USDC (executive decision 2 Nov).
-        if senior {
-            return Err(Error::SeniorViaFxPool);
-        }
+        require_leader(&env, &union, &investor)?;
         let (amount, _) = claim(&env, true, &union, &investor, max_shares, true)?;
         Claimed {
             investor,
@@ -1325,7 +1325,7 @@ impl FundCore {
         Ok(())
     }
 
-    // ---------- senior (T2: LPs who are not members) ----------
+    // ---------- senior (investors who are not members; their USDC is in the senior contract, 2 Nov) ----------
 
     // The senior contract only (`redeem`): a senior exit (executive decision 2 Nov: principal back at par in
     // USDC, interest at the fix). After the 14 days, the claimed shares are burned; their principal (what was
@@ -1352,6 +1352,7 @@ impl FundCore {
                 &DataKey::SeniorOwed(union.clone(), investor.clone()),
                 interest,
             )?;
+            p_add(&env, &DataKey::SeniorOwedTotal(union.clone()), interest)?;
             let k = DataKey::SeniorIncome(union.clone());
             let take = core::cmp::min(interest, p_i128(&env, &k));
             p_add(&env, &k, -take)?;
@@ -1385,6 +1386,7 @@ impl FundCore {
             return Err(Error::AboveOwed);
         }
         p_add(&env, &k, -amount)?;
+        p_add(&env, &DataKey::SeniorOwedTotal(union.clone()), -amount)?;
         nin(&env).burn(&env.current_contract_address(), &amount);
         let fx = cfg(&env).fx_pool.ok_or(Error::NotFxPool)?;
         let settled = FxPoolClient::new(&env, &fx).settle_cash(&union, &amount);
@@ -2067,10 +2069,12 @@ impl FundCore {
             // The guarantee (owner split, 1 Nov): owners are paid what they are still owed, from senior
             // money already set aside, so they carry no default risk.
             let mut d = load_dues(&env, &union, &token_id);
-            settle_dues(&env, &union, &token_id, &mut d, true, true)?;
+            // The union's parts go back to senior cash (the union's loss) and, like unclaimed hours, come
+            // off the voucher value she owed senior, so senior is not haircut for them as well (2 Nov).
+            let union_back = settle_dues(&env, &union, &token_id, &mut d, true, true)?;
             d.credit = 0;
             save_dues(&env, &union, &token_id, &d);
-            let back = void_vouchers(&env, &union, &token_id, b)?;
+            let back = void_vouchers(&env, &union, &token_id, b)? + union_back;
             sm = load_market(&env, false, &union);
             let v_out = b.value - b.repaid;
             let cover = core::cmp::min(back, v_out);
@@ -2408,6 +2412,16 @@ impl FundCore {
     // Voucher interest senior earned in the union and has not yet taken out (2 Nov).
     pub fn senior_income(env: Env, union: Address) -> i128 {
         p_i128(&env, &DataKey::SeniorIncome(union))
+    }
+
+    // All senior interest owed in the union, held in fund_core outside the pools (2 Nov).
+    pub fn senior_owed_total(env: Env, union: Address) -> i128 {
+        p_i128(&env, &DataKey::SeniorOwedTotal(union))
+    }
+
+    // Whether fund_core knows the union (2 Nov): the senior contract takes no USDC for any other.
+    pub fn union_exists(env: Env, union: Address) -> bool {
+        env.storage().persistent().has(&DataKey::UnionCfg(union))
     }
 
     pub fn union_treasury(env: Env, union: Address) -> i128 {

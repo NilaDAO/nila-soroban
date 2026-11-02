@@ -77,7 +77,7 @@ pub enum Error {
     // The food token's last draw date has not passed yet (25 Oct).
     NotLapsedYet = 61,
     // A senior exit goes through the senior contract's `redeem`, which pays the USDC (executive decision 2 Nov).
-    SeniorViaFxPool = 62,
+    UseSeniorContract = 62,
     // More than the senior income owed (2 Nov).
     AboveOwed = 63,
     SeniorAlreadySet = 64,
@@ -85,7 +85,7 @@ pub enum Error {
 }
 
 // A senior investor's place in a union's senior pool (executive decision 2 Nov): `owed` is interest
-// already taken out of the pool at an exit and not yet paid in USDC by an LP (`pay_senior_income`).
+// already taken out of the pool at an exit and not yet paid in USDC by an LP (the senior contract's `pay_income`).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SeniorPosition {

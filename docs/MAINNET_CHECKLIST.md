@@ -82,6 +82,8 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     `fx_pool.set_senior(senior)` and `fund_core.set_senior(senior)`, **both set once**. Trust: `senior.set_cap(usdc)`
     at the agreed total: the contract is **unaudited**, and with cap 0 (the default) no deposit is taken. Then
     `senior.set_investor(investor, true, kyc_ref, tag)` per accepted senior investor (residency set once).
+    **Do not call `senior.set_vault` until nUSD is audited;** the vault's guarantee is capped apart
+    (`set_guarantee_cap`, 0 by default) and stays 0 until then.
 
 ### C2. Upgrading a deployment from before 25 Oct (instead of C. for an existing set)
 

@@ -143,6 +143,8 @@ pub trait FundCoreTrait {
     // The senior contract only (`pay_income`, 2 Nov): owed senior interest an LP paid in USDC; burned and
     // booked off cash at hand. Returns what cash at hand covered.
     fn take_senior_income(union: Address, investor: Address, amount: i128) -> i128;
+    // Whether fund_core knows the union (2 Nov).
+    fn union_exists(union: Address) -> bool;
 }
 
 // The crop calendar (25 Oct): a crop share's window from its crop code and planned sowing.

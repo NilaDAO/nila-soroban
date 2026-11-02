@@ -48,6 +48,12 @@ fn deposits_wait_for_the_cap_and_residency_is_set_once() {
     s.set_vault(&inv);
     assert_eq!(s.try_set_vault(&union), Err(Ok(Error::VaultAlreadySet)));
     assert_eq!(s.vault(), Some(inv));
+    // The vault's guarantee waits for its own cap (0 until the trust sets it, after nUSD's audit).
+    assert_eq!(s.guarantee_cap(), 0);
+    assert_eq!(
+        s.try_mint_guaranteed(&union, &1),
+        Err(Ok(Error::AboveGuaranteeCap))
+    );
 }
 
 #[test]
@@ -62,6 +68,7 @@ fn only_the_trust_sets_cap_investors_vault_and_upgrades() {
     assert!(s.try_set_cap(&1).is_err());
     assert!(s.try_set_investor(&x, &true, &kyc, &Tag::Offshore).is_err());
     assert!(s.try_set_vault(&x).is_err());
+    assert!(s.try_set_guarantee_cap(&1).is_err());
     assert!(s.try_set_paused(&true).is_err());
     assert!(s.try_upgrade(&kyc).is_err());
     assert_eq!(s.upgrade_delay(), UPGRADE_DELAY);
@@ -91,6 +98,9 @@ fn storage_layout_is_frozen() {
         DataKey::Principal(a.clone(), a.clone()),
         DataKey::UnionUsdc(a.clone(), Tag::Offshore),
         DataKey::UnionUsdc(a.clone(), Tag::Domestic),
+        DataKey::GuaranteeCap,
+        DataKey::Guaranteed,
+        DataKey::HaircutUsdc(a.clone()),
     ] {
         v.push_back(k.into_val(&env));
     }
@@ -110,7 +120,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "cde7d2cb4bdba0377376ccb27347b145637bd9eb7944dc622903b13e5843cd3f",
+        hex, "65a7ee6422aae72c00f3fcfef450a8a79e64112fda9e9a64a129896954e6e42e",
         "senior storage layout changed"
     );
 }

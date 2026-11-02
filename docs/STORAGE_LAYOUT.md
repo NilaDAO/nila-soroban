@@ -81,6 +81,7 @@ storage:
 | `CropCalendar` | instance | Address of the crop_calendar contract (25 Oct) |
 | `SeniorOwed(union, investor)` | persistent | i128 senior interest taken out of the pool at an exit, owed until an LP pays it in USDC (`take_senior_income`, 2 Nov); the nIN stays in fund_core, outside senior cash |
 | `SeniorIncome(union)` | persistent | i128 voucher interest senior earned in the union and has not yet taken out (2 Nov) |
+| `SeniorOwedTotal(union)` | persistent | i128 all `SeniorOwed` of the union: nIN in fund_core outside every pool (counted in the conservation check) |
 
 ## crop_calendar (25 Oct)
 
@@ -137,13 +138,18 @@ storage:
 | `Admin`, `Usdc`, `FundCore`, `FxPool`, `Roles` | instance | Address |
 | `Paused` | instance | bool (stops deposit, redeem, pay_income, mint_guaranteed) |
 | `Cap` | instance | i128 the most senior USDC held in all (0 until the trust sets it: no deposits) |
-| `Total` | instance | i128 senior USDC held: deposits less what `redeem` paid out |
+| `Total` | instance | i128 senior USDC held for investors' principal: deposits less what `redeem` paid out or wrote off (a haircut) |
 | `Vault` | instance | Address of the nUSD vault (later), set once |
+| `GuaranteeCap` | instance | i128 the most guarantee the vault may assign, in USDC (0 until the trust sets it) |
+| `Guaranteed` | instance | i128 guarantee the vault assigned so far, in USDC |
 | `Investor(investor)` | persistent | `Investor{accepted, kyc_ref, tag}`: accepted by the trust; `tag` (Offshore 0, Domestic 1) set once |
 | `Principal(union, investor)` | persistent | `Principal{usdc, nin}` paid in for the union's senior shares still held |
-| `UnionUsdc(union, Tag)` | persistent | i128 USDC taken in for the union under one residency, less what was paid back (R24) |
+| `UnionUsdc(union, Tag)` | persistent | i128 USDC taken in for the union under one residency, less what was paid back or written off (R24) |
+| `HaircutUsdc(union)` | persistent | i128 USDC of the union's investors left here after a haircut: out of `Total`, kept for the loss cover that comes with nUSD; no call moves it yet |
 
-No call moves the contract's USDC except `redeem` (to the investor, at par). There is no admin withdrawal.
+No call moves the contract's USDC except `redeem` (to the investor, at par). There is no admin withdrawal. A
+48-hour upgrade (the trust, `nila_common::upgrade`) can change anything, so `UpgradeProposed` on this contract is
+watched. Error codes start at 101, apart from fund_core's and fx_pool's.
 
 ## Layout changes before the freeze
 

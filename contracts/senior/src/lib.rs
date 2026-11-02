@@ -8,8 +8,12 @@
 //!   until a member LP of the union takes those rupees at the office and pays the investor USDC
 //!   (`pay_income`). Rupees never leave India.
 //! - The vault (nUSD, later) assigns guarantee with USDC it holds itself (`mint_guaranteed`).
-//! - Unaudited: deposits stop at the trust's cap (0 until set), and no call moves USDC out except `redeem`
-//!   (to the investor, at par). There is no admin withdrawal.
+//! - Unaudited: deposits stop at the trust's cap (0 until set), the vault's guarantee at its own cap (0
+//!   until set), and no call moves USDC out except `redeem` (to the investor, at par). There is no admin
+//!   withdrawal; but a 48-hour upgrade (trust, `nila_common::upgrade`) can change anything, so every
+//!   `UpgradeProposed` here is watched.
+//! - Error codes start at 101, apart from fund_core's and fx_pool's, so an error from a contract it calls
+//!   never reads as one of its own.
 
 use nila_common::{bump_instance, upgrade, FundCoreClient, RolesClient, TTL_BUMP, TTL_THRESHOLD};
 use soroban_sdk::{
@@ -43,27 +47,31 @@ pub const RATE_ONE: i128 = 10_000_000;
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    NotAdmin = 1,
-    Paused = 2,
-    AmountZero = 3,
+    NotAdmin = 101,
+    Paused = 102,
+    AmountZero = 103,
     /// Not an investor the trust accepted.
-    NotAccepted = 4,
+    NotAccepted = 104,
     /// The deposit would take the senior USDC above the trust's cap.
-    AboveCap = 5,
+    AboveCap = 105,
     /// No fix, or it ran out.
-    StaleRate = 6,
+    StaleRate = 106,
     /// The LP pays less than the fix less its fee.
-    BelowFix = 7,
-    NotLeader = 8,
+    BelowFix = 107,
+    NotLeader = 108,
     /// Not an accepted LP of the union, or its identity is not checked (K1).
-    NotLp = 9,
-    VaultAlreadySet = 10,
-    NoVault = 11,
+    NotLp = 109,
+    VaultAlreadySet = 110,
+    NoVault = 111,
     /// An investor's residency is set once.
-    TagFixed = 12,
-    UpgradeNotReady = 13,
-    BadDelay = 14,
-    Overflow = 15,
+    TagFixed = 112,
+    UpgradeNotReady = 113,
+    BadDelay = 114,
+    Overflow = 115,
+    /// fund_core does not know the union: no USDC is taken for it.
+    UnknownUnion = 116,
+    /// The vault's guarantee would pass its cap.
+    AboveGuaranteeCap = 117,
 }
 
 /// Where a senior investor's USDC comes from (R24, decision 005): set by the trust at acceptance.
@@ -119,6 +127,13 @@ pub trait FxTrait {
     fn mint_senior_nin(union: Address, investor: Address, nin: i128);
 }
 
+/// The LP's Nila account (contracts/account): it pays from its free USDC, so an LP with an open lien
+/// (a Bring position) can still pay.
+#[contractclient(name = "LpAccountClient")]
+pub trait LpAccountTrait {
+    fn send_usdc(to: Address, amount: i128);
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -130,15 +145,22 @@ pub enum DataKey {
     Paused,
     /// The most senior USDC this contract takes in, in all (the trust; 0 until set).
     Cap,
-    /// Senior USDC held here: deposits less what `redeem` paid out.
+    /// Senior USDC held here for investors' principal: deposits less what `redeem` paid out or wrote off.
     Total,
     /// The vault (nUSD, later), set once.
     Vault,
+    /// The most guarantee the vault may assign, in USDC (the trust; 0 until set).
+    GuaranteeCap,
+    /// Guarantee the vault assigned so far, in USDC.
+    Guaranteed,
     Investor(Address),
     /// (union, investor).
     Principal(Address, Address),
-    /// USDC taken in for a union under one residency, less what was paid back (R24).
+    /// USDC taken in for a union under one residency, less what was paid back or written off (R24).
     UnionUsdc(Address, Tag),
+    /// USDC of a union's investors left here after a haircut (2 Nov): out of `Total`, kept for the loss
+    /// cover that comes with nUSD; no call moves it yet.
+    HaircutUsdc(Address),
 }
 
 #[contractevent]
@@ -153,6 +175,11 @@ pub struct PausedSet {
 
 #[contractevent]
 pub struct CapSet {
+    pub usdc: i128,
+}
+
+#[contractevent]
+pub struct GuaranteeCapSet {
     pub usdc: i128,
 }
 
@@ -191,6 +218,8 @@ pub struct Redeemed {
     pub usdc: i128,
     pub principal: i128,
     pub interest: i128,
+    /// USDC of this exit's principal left here after a haircut.
+    pub haircut: i128,
 }
 
 #[contractevent]
@@ -347,6 +376,18 @@ impl SeniorContract {
         Ok(())
     }
 
+    /// The most guarantee the vault may assign, in USDC (0 = none until the trust sets it, after nUSD's audit).
+    pub fn set_guarantee_cap(env: Env, usdc: i128) -> Result<(), Error> {
+        require_admin(&env)?;
+        if usdc < 0 {
+            return Err(Error::AmountZero);
+        }
+        env.storage().instance().set(&DataKey::GuaranteeCap, &usdc);
+        GuaranteeCapSet { usdc }.publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
     /// The trust accepts or drops a senior investor (KYC off-chain); the residency is set once.
     pub fn set_investor(
         env: Env,
@@ -411,6 +452,9 @@ impl SeniorContract {
         if total > i_get(&env, &DataKey::Cap) {
             return Err(Error::AboveCap);
         }
+        if !FundCoreClient::new(&env, &get(&env, &DataKey::FundCore)).union_exists(&union) {
+            return Err(Error::UnknownUnion);
+        }
         let f = fresh_fix(&env)?;
         let nin = to_nin(usdc, &f)?;
         TokenClient::new(&env, &get(&env, &DataKey::Usdc)).transfer(
@@ -456,12 +500,13 @@ impl SeniorContract {
             .claim_senior(&union, &investor, &max_shares);
         let pk = DataKey::Principal(union.clone(), investor.clone());
         let mut p = load_principal(&env, &pk);
-        let mut usdc = 0;
+        let (mut usdc, mut haircut) = (0, 0);
         if p.nin > 0 {
             let cost = core::cmp::min(cost, p.nin);
             let off = p.usdc * cost / p.nin;
-            // A haircut (principal below cost) pays less; the rest stays here.
+            // A haircut (principal below cost) pays less; the rest stays here, counted apart.
             usdc = core::cmp::min(p.usdc * core::cmp::min(principal, cost) / p.nin, off);
+            haircut = off - usdc;
             p.usdc -= off;
             p.nin -= cost;
             if p.nin == 0 {
@@ -471,12 +516,20 @@ impl SeniorContract {
                 bump(&env, &pk);
             }
         }
-        if usdc > 0 {
+        if haircut > 0 {
+            // Out of `Total` (it no longer counts against the cap) into the union's haircut figure: it stays in
+            // this contract, and no call moves it until the loss cover comes with nUSD.
+            let hk = DataKey::HaircutUsdc(union.clone());
+            p_set(&env, &hk, p_get(&env, &hk) + haircut);
+        }
+        if usdc + haircut > 0 {
             let tag = load_investor(&env, &investor).map_or(Tag::Offshore, |i| i.tag);
             let uk = DataKey::UnionUsdc(union.clone(), tag);
-            p_set(&env, &uk, p_get(&env, &uk) - usdc);
-            let total = i_get(&env, &DataKey::Total) - usdc;
+            p_set(&env, &uk, p_get(&env, &uk) - usdc - haircut);
+            let total = i_get(&env, &DataKey::Total) - usdc - haircut;
             env.storage().instance().set(&DataKey::Total, &total);
+        }
+        if usdc > 0 {
             TokenClient::new(&env, &get(&env, &DataKey::Usdc)).transfer(
                 &env.current_contract_address(),
                 &investor,
@@ -489,6 +542,7 @@ impl SeniorContract {
             usdc,
             principal,
             interest,
+            haircut,
         }
         .publish(&env);
         bump_instance(&env);
@@ -498,7 +552,8 @@ impl SeniorContract {
     /// An investor's owed interest (rupees, from their exit) paid in USDC by a member LP of the union: the LP
     /// takes `inr` rupees at the office and pays `usdc` straight to the investor, at least the fix less the
     /// LP fee. A leader of the union (who hands over the notes) and the LP sign. fund_core burns the nIN and
-    /// books the rupees off cash at hand. No USDC of this contract moves. Returns what cash at hand covered.
+    /// books the rupees off cash at hand. The LP's Nila account pays from its free USDC (`send_usdc`), so an
+    /// open lien does not stop it. No USDC of this contract moves. Returns what cash at hand covered.
     #[allow(clippy::too_many_arguments)]
     pub fn pay_income(
         env: Env,
@@ -529,7 +584,7 @@ impl SeniorContract {
         }
         let settled = FundCoreClient::new(&env, &get(&env, &DataKey::FundCore))
             .take_senior_income(&union, &investor, &inr);
-        TokenClient::new(&env, &get(&env, &DataKey::Usdc)).transfer(&lp, &investor, &usdc);
+        LpAccountClient::new(&env, &lp).send_usdc(&investor, &usdc);
         IncomePaid {
             union,
             investor,
@@ -557,8 +612,15 @@ impl SeniorContract {
         if usdc <= 0 {
             return Err(Error::AmountZero);
         }
+        let done = i_get(&env, &DataKey::Guaranteed)
+            .checked_add(usdc)
+            .ok_or(Error::Overflow)?;
+        if done > i_get(&env, &DataKey::GuaranteeCap) {
+            return Err(Error::AboveGuaranteeCap);
+        }
         let f = fresh_fix(&env)?;
         let nin = to_nin(usdc, &f)?;
+        env.storage().instance().set(&DataKey::Guaranteed, &done);
         fx(&env).mint_senior_nin(&union, &vault, &nin);
         Guaranteed {
             union,
@@ -583,6 +645,18 @@ impl SeniorContract {
 
     pub fn union_usdc(env: Env, union: Address, tag: Tag) -> i128 {
         p_get(&env, &DataKey::UnionUsdc(union, tag))
+    }
+
+    pub fn haircut_usdc(env: Env, union: Address) -> i128 {
+        p_get(&env, &DataKey::HaircutUsdc(union))
+    }
+
+    pub fn guarantee_cap(env: Env) -> i128 {
+        i_get(&env, &DataKey::GuaranteeCap)
+    }
+
+    pub fn guaranteed(env: Env) -> i128 {
+        i_get(&env, &DataKey::Guaranteed)
     }
 
     pub fn total(env: Env) -> i128 {
