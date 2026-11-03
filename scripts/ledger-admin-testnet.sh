@@ -6,7 +6,7 @@
 #
 # HD is the account index on the Ledger (m/44'/148'/HD'). Use one that is NOT the address the grant money arrives
 # on. The script derives the address, funds it from friendbot (testnet only), deploys a roles contract with that
-# address as admin, and makes one admin call signed on the Ledger. Nothing touches mainnet.
+# address as admin (deployed by a hot key), and makes one admin call signed on the Ledger. Nothing touches mainnet.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -24,8 +24,11 @@ read -r
 curl -sf "https://friendbot.stellar.org?addr=$ADMIN" >/dev/null && echo "funded on testnet" || echo "friendbot: already funded?"
 [ -f "$WASM" ] || make build
 
-echo "Deploy roles with the Ledger as admin (approve on the device)"
-ROLES=$(stellar contract deploy --wasm "$WASM" --source "$NAME" --sign-with-ledger --network "$NET" -- --admin "$ADMIN")
+# The deployer is a plain hot key (as on mainnet, checklist C): a wasm upload is too large for the Ledger to
+# show, and deploying needs no admin power. The constructor names the Ledger account as admin.
+stellar keys generate nila-ledger-deployer --fund --network "$NET" --overwrite >/dev/null
+echo "Deploy roles with the Ledger account as admin (hot deployer key, no device prompt)"
+ROLES=$(stellar contract deploy --wasm "$WASM" --source nila-ledger-deployer --network "$NET" -- --admin "$ADMIN")
 echo "roles: $ROLES"
 
 echo "Admin call: give a throwaway key the attester role (approve on the device)"
