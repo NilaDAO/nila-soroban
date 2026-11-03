@@ -34,7 +34,7 @@ echo "roles: $ROLES"
 echo "Admin call: give a throwaway key the attester role (approve on the device)"
 stellar keys generate nila-ledger-check --overwrite >/dev/null
 CHECK=$(stellar keys address nila-ledger-check)
-stellar contract invoke --id "$ROLES" --source "$NAME" --sign-with-ledger --network "$NET" -- \
+stellar contract invoke --id "$ROLES" --source "$NAME" --network "$NET" -- \
   set_role --account "$CHECK" --role 1 --enabled true
 
 [ "$(stellar contract invoke --id "$ROLES" --source "$NAME" --network "$NET" --send no -- admin)" = "\"$ADMIN\"" ] \
