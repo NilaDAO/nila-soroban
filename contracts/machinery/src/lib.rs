@@ -6,8 +6,9 @@
 //!   account (its leaders, 3 of 5); open and adjustable, like the prepay share (executive decision, 12 Oct).
 //!   Optionally a price per machine type **and crop family** (27 Oct: hauling sugarcane is not hauling paddy);
 //!   without one the type's price applies.
-//! - **Machines** (D15, R82, R83): a leader registers a member's machine (L13); the owner
-//!   confirms (N9) and can put it on hold with a reason.
+//! - **Machines** (D15, R82, R83): a leader registers a member's machine (L13); it is available from
+//!   its registration (executive decision 3 Nov: no owner confirmation, N9 removed); the owner can put
+//!   it on hold with a reason.
 //! - **Vouchers** (R51–R55): a loan's voucher part is machinery in **tractor acres** (executive
 //!   decision 27 Oct; was tractor hours, 23 Oct), held in hundredths (`units`): one tractor acre is the
 //!   price of machine type 1 (tractor + rotavator) for an acre; an acre of another machine (or crop) uses
@@ -77,7 +78,7 @@ pub enum Error {
     NoRate = 7,
     BadArg = 8,
     TooManyTypes = 9,
-    /// Not confirmed by the owner, or on hold.
+    /// On hold.
     Unavailable = 10,
     /// More than her authorisation, the voucher, the share's area or the machine's week allows.
     TooMuchWork = 11,
@@ -111,6 +112,7 @@ pub struct Machine {
     pub acres_per_week: u32,
     /// Hash of the 8 photos at 45° (L13); the photos stay off-chain.
     pub photos_hash: BytesN<32>,
+    /// Always true since 3 Nov (a machine is available from its registration); kept for the layout.
     pub confirmed: bool,
     pub on_hold: bool,
     /// 0 none, 1 in repair, 2 driver not available, 3 other (R83).
@@ -397,10 +399,14 @@ fn units_for(r: &RateParts, tractor: &RateParts, centi: u32) -> Result<u32, Erro
 }
 
 fn load_machine(env: &Env, id: u64) -> Result<Machine, Error> {
-    env.storage()
+    let mut m: Machine = env
+        .storage()
         .persistent()
         .get(&DataKey::Machine(id))
-        .ok_or(Error::NotFound)
+        .ok_or(Error::NotFound)?;
+    // Machines registered before 3 Nov may be stored unconfirmed; they are available too.
+    m.confirmed = true;
+    Ok(m)
 }
 
 fn save_machine(env: &Env, id: u64, m: &Machine) {
@@ -582,7 +588,7 @@ impl MachineryContract {
 
     // ---------- machines (D15, R82, R83) ----------
 
-    /// L13: a leader registers a member's machine; the owner confirms it on her phone.
+    /// L13: a leader registers a member's machine; it is available at once (no owner confirmation).
     pub fn register_machine(
         env: Env,
         leader: Address,
@@ -622,7 +628,7 @@ impl MachineryContract {
                 machine_type,
                 acres_per_week,
                 photos_hash,
-                confirmed: false,
+                confirmed: true,
                 on_hold: false,
                 hold_reason: 0,
             },
@@ -639,15 +645,13 @@ impl MachineryContract {
         Ok(id)
     }
 
-    /// N9: the owner confirms her machine.
+    /// Kept for old clients only: a no-op since 3 Nov (a machine is available from its
+    /// registration; N9 removed). Still checks the owner, writes nothing.
     pub fn confirm_machine(env: Env, owner: Address, machine_id: u64) -> Result<(), Error> {
         owner.require_auth();
-        let mut m = load_machine(&env, machine_id)?;
-        if m.owner != owner {
+        if load_machine(&env, machine_id)?.owner != owner {
             return Err(Error::NotOwner);
         }
-        m.confirmed = true;
-        save_machine(&env, machine_id, &m);
         Ok(())
     }
 
@@ -782,7 +786,7 @@ impl MachineryContract {
         if m.owner != owner {
             return Err(Error::NotOwner);
         }
-        if m.union != union || !m.confirmed || m.on_hold {
+        if m.union != union || m.on_hold {
             return Err(Error::Unavailable);
         }
         let mut v = load_voucher(&env, &union, &token_id)?;
@@ -900,9 +904,7 @@ impl MachineryContract {
     }
 
     pub fn machine(env: Env, machine_id: u64) -> Option<Machine> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Machine(machine_id))
+        load_machine(&env, machine_id).ok()
     }
 
     pub fn voucher(env: Env, union: Address, token_id: BytesN<32>) -> Option<Voucher> {
