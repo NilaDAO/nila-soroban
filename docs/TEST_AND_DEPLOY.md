@@ -22,7 +22,7 @@ What the suite covers:
 | Crate | Assertions |
 | --- | --- |
 | `nila-math` | Share round-trip, index growth, haircut, 12%/yr interest, U256 large book, kinked rate curve |
-| `nila-roles` | Roles and leaders round trip; admin-only `set_role`; `set_leader` needs the union, not the admin |
+| `nila-roles` | Roles and leaders round trip; admin-only `set_role`; `set_leader` needs the union, not the admin; union admission (admin-only `admit_union` / `revoke_union`, `NotAdmitted` before it, revoke hides leaders and settings, re-admission restores them) |
 | `nila-membership` | Both signatures, roles-based attester, one union per member, set_plots, reattest, set_record, leader-only revoke |
 | `nila-fund-viewer` | Union registry, swap-remove fund types, borrower index |
 | `nila-fx-pool` | Escrow resolve by Core, remaining decrements |

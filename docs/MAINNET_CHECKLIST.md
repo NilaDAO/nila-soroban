@@ -73,7 +73,8 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 10. Issuer: **lock** with master weight 0 (executive decision, 10 Oct). Without the lock, classic ops still
     mint, authorise and claw back. Check that any issuer transaction now fails.
 11. Trust: `roles.set_role` for the oracle and the attester.
-12. Each union account: `roles.set_leader`.
+12. Trust: `roles.admit_union(union, details_hash)` for each union (step 18, decision 008), then each union
+    account: `roles.set_leader`. Before admission `set_leader` is refused (`NotAdmitted`).
 13. Trust: `fund_viewer.create_union` for each union.
 14. Trust: `fund_core.set_union_config` for each union, at launch terms:
     - `max_loan` ₹10,000
@@ -101,11 +102,21 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     `nila_account.wasm` and check its hash. Deployer: `deployer(account_wasm = that hash, roles)`, **once for all
     unions**. It has no admin, no settings and no upgrade, so its account code and roles are fixed for good: a new
     account code later means a member upgrades her own account (`account.upgrade(hash)`, her signature); a new
-    deployer would give every key a new address. Each union account (3 of 5):
+    deployer would give every key a new address.
+    **Union admission (decision 008), before any of the union's own calls:** the union writes its details on its own
+    account (`manageData` `nila.name`, up to 64 bytes, and `nila.geo`, a 5–7 character geohash, signed by its 3 of 5);
+    the trust checks them and calls `roles.admit_union(union, sha256(name ‖ 0x00 ‖ geo))` (trust 3 of 5). Until then
+    the union's `set_leader`, `set_union_role` and `set_union_settings` are refused (`NotAdmitted`). Admitting again
+    replaces the hash (after the union changed its details). `roles.revoke_union(union)` (trust) keeps the entries but
+    makes `is_leader` false and `union_settings` None at once: no leader rights, sessions or recovery for its members'
+    accounts until it is admitted again. fund_core does **not** check admission yet (follow-up, size gate): a revoked
+    union's `set_union_config` must also be handled by the trust.
+    Each union account (3 of 5):
     `roles.set_union_settings(union, {wait, session_len, session_contracts: [fund_core, machinery], sms_key,
     fx_pool, usdc})` (wait 1 h – 30 days, session 60–900 s; out of range is refused). Until a union has set them,
     its members' accounts get no recovery and no leader session (`NoSettings`). An account is created with no union;
-    the member names it herself (`account.set_union(union)`, her signature).
+    the member names it herself (`account.set_union(union)`, her signature), which is refused (`NoSettings`) for a
+    union with no settings, so for one never admitted.
 
 ### C2. Upgrading a deployment from before 25 Oct (instead of C. for an existing set)
 
@@ -124,6 +135,8 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 - [ ] `upgrade_delay` = 172800 (48 h) on all six (with crop_calendar); `pending_upgrade` and `pending_delay` = null.
       The delay is stored at the constructor and survives upgrades, so check it on the
       deployed contract itself.
+- [ ] `roles.is_union(union)` = true and `roles.union_admission(union)` = sha256(name ‖ 0x00 ‖ geo) of the union
+      account's current `nila.name` / `nila.geo`, for each union.
 - [ ] `deployer.account_wasm()` = the reproducible `nila_account.wasm` hash and `deployer.roles()` = roles; each
       union's `roles.union_settings(union)` names this fx_pool, the USDC SAC and [fund_core, machinery].
 - [ ] `admin` (roles, land_title, fund_viewer, fx_pool) and `get_config().admin` (fund_core) =
