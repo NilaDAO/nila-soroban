@@ -20,10 +20,13 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Test
-        run: cargo test --workspace
+      # Wasm before the tests: the deployer and account tests deploy the built account wasm.
       - name: Wasm
         run: cargo build --release --target wasm32v1-none
+      - name: Test
+        run: cargo test --workspace
+        env:
+          NILA_REQUIRE_WASM: "1"
       - name: Wasm size gate (128 KiB)
         run: |
           set -e

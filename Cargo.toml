@@ -12,7 +12,7 @@ members = [
     "contracts/crop-calendar",
     "contracts/senior",
     "contracts/account",
-    "contracts/account-factory",
+    "contracts/deployer",
 ]
 
 [workspace.package]

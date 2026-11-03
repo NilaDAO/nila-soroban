@@ -24,7 +24,6 @@ nila-machinery = { path = "../machinery" }
 nila-crop-calendar = { path = "../crop-calendar" }
 nila-senior = { path = "../senior" }
 nila-account = { path = "../account" }
-nila-account-factory = { path = "../account-factory" }
 ed25519-dalek = { version = "2.2.0", default-features = false }
 
 [features]

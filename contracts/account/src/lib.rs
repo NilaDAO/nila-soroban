@@ -1,33 +1,41 @@
 #![no_std]
 //! A Nila account (executive decision 26 Oct): members, leaders, machine owners and LPs each
-//! hold one. Its signer is the member's Privy Stellar wallet on a smartphone (Ed25519; Privy
+//! hold one. **It belongs to the member (executive decision 3 Nov):** it is deployed by the
+//! immutable deployer with no union, the member names her union herself (`set_union`, her own
+//! signature) and only she can change its code (`upgrade`, her own signature). The union's
+//! settings (recovery wait, session length and contracts, SMS key, fx_pool and USDC) come from
+//! roles (`union_settings`) for the union she named; with no union named, or a union that has
+//! set no settings, there is no recovery and no leader session (`NoUnion` / `NoSettings`).
+//! Its signer is the member's Privy Stellar wallet on a smartphone (Ed25519; Privy
 //! keeps and restores it, so a new smartphone needs no recovery here) or a P-256 key on a
 //! keypad phone (WebCrypto device key: ECDSA over SHA-256 of the authorization payload,
-//! r | s with s in the lower half); no other copy of a key is kept. The signer signs each task itself (self mode), or (assist and keypad mode) starts a
-//! short session in which any leader of the account's union may sign for it: the member's
-//! phone shows one signed QR, the leader's app submits `start_session` and then the tasks,
-//! each signed by the leader's own account. A session reaches only the contracts the factory
-//! lists (fund_core, machinery), never this account itself or a token.
+//! r | s with s in the lower half); no other copy of a key is kept. The signer signs each task
+//! itself (self mode), or (assist and keypad mode) starts a short session in which any leader of
+//! the account's union may sign for it: the member's phone shows one signed QR, the leader's app
+//! submits `start_session` and then the tasks, each signed by the leader's own account. A session
+//! reaches only the contracts the union lists (fund_core, machinery), never this account itself
+//! (so never `set_union` or `upgrade`) or the USDC token.
 //! Recovery replaces the signer on the same address, so titles, shares, investments and
 //! balances stay: proposed by one leader of the union together with the node's SMS key, once
-//! the new phone has opened the one-time SMS link (a lost keypad phone; executive decision 2 Nov,
-//! reverses 29 Oct's "no SMS key": neither the leader nor the node can propose alone), by two
-//! leaders of the union, or by the union's multisig account;
-//! it takes effect after the factory's wait. A pending recovery freezes the account
-//! (executive decision 29 Oct, a stolen phone): the current signer signs nothing, no task and
-//! no session, and cannot cancel; only the union's multisig account cancels, so a member
-//! disputes a recovery through the union. Neither proposer can sign a task. (A smartphone gets its Privy key back at login, so it
-//! needs none of this unless the member's number is lost.) The node's SMS key alone can do nothing.
-//! Settings (roles, wait, session length and contracts, the account code) come from the
-//! factory that deployed the account, one per union.
-//! LP positions (executive decision 31 Oct): fx_pool (the one the factory names) locks USDC in
+//! the new phone has opened the one-time SMS link (a lost keypad phone; executive decision 2 Nov),
+//! by two leaders of the union, or by the union's multisig account; it takes effect after the
+//! union's wait. A pending recovery freezes the account (executive decision 29 Oct, a stolen
+//! phone): the current signer signs nothing, no task and no session, and cannot cancel or change
+//! union; only the union's multisig account cancels, so a member disputes a recovery through the
+//! union. Neither proposer can sign a task. The node's SMS key alone can do nothing.
+//! LP positions (executive decision 31 Oct): fx_pool (the one the union names) locks USDC in
 //! this account. A Collect locks the LP's own USDC at accept and takes it into fx_pool at the
 //! scan (`pay`); a Bring puts the union's USDC here and locks it, until a Collect of the same LP
 //! takes it back (`pay`) or a settle past the rate margin unlocks it. While a lien stands the
 //! signer cannot authorize a USDC transfer, burn or approve directly; free USDC goes out with
 //! `send_usdc`, which keeps the lien covered. Only fx_pool locks, unlocks or takes locked USDC.
+//! **The lien's fx_pool is fixed at the first lock (3 Nov):** the fx_pool and USDC the union
+//! names when the lien goes from 0 to above 0 are recorded; while the lien stands only that
+//! fx_pool may lock more, unlock or take, and the lien is counted in that USDC, even if the union
+//! names another fx_pool meanwhile. The record is dropped when the lien is back at 0. The member
+//! cannot change union or code while a lien stands.
 
-use nila_common::{bump_instance, RolesClient};
+use nila_common::bump_instance;
 use soroban_sdk::{
     auth::{Context, CustomAccountInterface},
     contract, contractclient, contracterror, contractevent, contractimpl, contractmeta,
@@ -41,7 +49,7 @@ use soroban_sdk::{
 contractmeta!(key = "binver", val = "0.1.0");
 contractmeta!(
     key = "desc",
-    val = "Nila account: one signer, leader sessions, recovery on the same address"
+    val = "Nila account: member-owned, one signer, leader sessions, recovery on the same address"
 );
 
 #[contracterror]
@@ -52,7 +60,7 @@ pub enum Error {
     NotLeaders = 1,
     /// No recovery pending, or its wait has not passed.
     NotReady = 2,
-    /// The account code is already the factory's.
+    /// The account already runs this code.
     Current = 3,
     /// No session, it has ended, or the signer is not a leader of the union.
     NoSession = 4,
@@ -64,16 +72,24 @@ pub enum Error {
     WrongKind = 7,
     /// A recovery is pending: the account signs nothing until it executes or the union cancels it.
     Frozen = 8,
-    /// The factory names no fx_pool or USDC (the pledge is not set up for this union).
+    /// The union names no fx_pool or USDC (LP positions are not set up for it), or the caller is
+    /// not the fx_pool that holds the lien.
     NotPool = 9,
-    /// Locked USDC: a lock above the free USDC, a send above it, or a direct USDC move while a lien stands.
+    /// Locked USDC: a lock above the free USDC, a send above it, a direct USDC move while a lien
+    /// stands, or a change of union or code while a lien stands.
     Locked = 10,
     /// fx_pool asked for more than the lien.
     NotClaimable = 11,
     /// A zero or negative amount.
     BadAmount = 12,
-    /// The factory names no SMS key (SMS recovery is off for this union).
+    /// The union names no SMS key (SMS recovery is off for this union).
     NoSmsKey = 13,
+    /// The member has named no union (no recovery, no session, no LP positions).
+    NoUnion = 14,
+    /// The named union has set no settings in roles.
+    NoSettings = 15,
+    /// A leader session is running: no change of union or code.
+    InSession = 16,
 }
 
 #[contracttype]
@@ -107,7 +123,8 @@ pub struct Pending {
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    Factory,
+    Roles,
+    /// The union the member named (`set_union`); absent until she names one.
     Union,
     Signer,
     Pending,
@@ -115,20 +132,29 @@ pub enum DataKey {
     Session,
     /// USDC locked by fx_pool for the union's cash she holds (the LP pledge, 30 Oct).
     Lien,
+    /// The fx_pool and USDC of the lien, recorded at the lock that opened it (3 Nov).
+    LienPool,
+    LienUsdc,
 }
 
-/// What an account reads from its factory.
-#[contractclient(name = "FactoryClient")]
-pub trait FactoryTrait {
-    fn union(env: Env) -> Address;
-    fn roles(env: Env) -> Address;
-    fn wait(env: Env) -> u64;
-    fn session_len(env: Env) -> u64;
-    fn session_contracts(env: Env) -> Vec<Address>;
-    fn account_wasm(env: Env) -> BytesN<32>;
-    fn fx_pool(env: Env) -> Option<Address>;
-    fn usdc(env: Env) -> Option<Address>;
-    fn sms_key(env: Env) -> Option<Address>;
+/// A union's settings as roles keeps them (`roles.union_settings`, 3 Nov); same layout as
+/// nila-roles' `UnionSettings`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnionSettings {
+    pub wait: u64,
+    pub session_len: u64,
+    pub session_contracts: Vec<Address>,
+    pub sms_key: Option<Address>,
+    pub fx_pool: Option<Address>,
+    pub usdc: Option<Address>,
+}
+
+/// What an account reads from roles.
+#[contractclient(name = "RolesClient")]
+pub trait RolesTrait {
+    fn is_leader(union: Address, account: Address) -> bool;
+    fn union_settings(union: Address) -> Option<UnionSettings>;
 }
 
 #[contractevent]
@@ -166,12 +192,32 @@ pub struct SessionUsed {
     pub leader: Address,
 }
 
+/// The member named her union (3 Nov).
+#[contractevent]
+pub struct UnionSet {
+    pub union: Address,
+}
+
 fn get<V: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>(env: &Env, k: DataKey) -> V {
     env.storage().instance().get(&k).unwrap()
 }
 
-fn factory(env: &Env) -> FactoryClient<'_> {
-    FactoryClient::new(env, &get(env, DataKey::Factory))
+fn roles(env: &Env) -> RolesClient<'_> {
+    RolesClient::new(env, &get(env, DataKey::Roles))
+}
+
+fn union_of(env: &Env) -> Result<Address, Error> {
+    env.storage()
+        .instance()
+        .get(&DataKey::Union)
+        .ok_or(Error::NoUnion)
+}
+
+/// The named union's settings; none named → `NoUnion`, none set → `NoSettings`.
+fn settings(env: &Env) -> Result<UnionSettings, Error> {
+    roles(env)
+        .union_settings(&union_of(env)?)
+        .ok_or(Error::NoSettings)
 }
 
 fn set_signer(env: &Env, signer: Signer) {
@@ -186,40 +232,55 @@ fn lien(env: &Env) -> i128 {
     env.storage().instance().get(&DataKey::Lien).unwrap_or(0)
 }
 
+/// Back at 0 the lien's fx_pool and USDC are forgotten.
 fn set_lien(env: &Env, v: i128) {
     let v = core::cmp::max(v, 0);
-    env.storage().instance().set(&DataKey::Lien, &v);
+    let s = env.storage().instance();
+    s.set(&DataKey::Lien, &v);
+    if v == 0 {
+        s.remove(&DataKey::LienPool);
+        s.remove(&DataKey::LienUsdc);
+    }
     LienSet { lien: v }.publish(env);
     bump_instance(env);
 }
 
-fn pool(env: &Env) -> Result<Address, Error> {
-    factory(env).fx_pool().ok_or(Error::NotPool)
-}
-
-fn usdc(env: &Env) -> Result<TokenClient<'_>, Error> {
-    Ok(TokenClient::new(
-        env,
-        &factory(env).usdc().ok_or(Error::NotPool)?,
-    ))
+/// The fx_pool and USDC that count: the lien's while one stands, else the union's.
+fn pool_usdc(env: &Env) -> Result<(Address, Address), Error> {
+    let s = env.storage().instance();
+    if let (Some(p), Some(u)) = (s.get(&DataKey::LienPool), s.get(&DataKey::LienUsdc)) {
+        return Ok((p, u));
+    }
+    let st = settings(env)?;
+    match (st.fx_pool, st.usdc) {
+        (Some(p), Some(u)) => Ok((p, u)),
+        _ => Err(Error::NotPool),
+    }
 }
 
 /// USDC above the lien.
-fn free_usdc(env: &Env) -> Result<i128, Error> {
-    Ok(usdc(env)?.balance(&env.current_contract_address()) - lien(env))
+fn free_usdc(env: &Env, usdc: &Address) -> i128 {
+    TokenClient::new(env, usdc).balance(&env.current_contract_address()) - lien(env)
 }
 
 /// The lien (30 Oct): no USDC approve ever (no flow needs one), and no direct USDC transfer or
 /// burn while a lien stands (`send_usdc` checks the balance; the USDC contract cannot be read
-/// here, as it is on the call stack when it asks for this account's authorization).
-fn guard_usdc(env: &Env, contexts: &Vec<Context>) -> Result<(), Error> {
-    let Some(token) = factory(env).usdc() else {
+/// here, as it is on the call stack when it asks for this account's authorization). The USDC is
+/// the lien's, else the union's; with neither there is no USDC to guard.
+fn usdc_guarded(env: &Env) -> Option<Address> {
+    let s = env.storage().instance();
+    s.get(&DataKey::LienUsdc)
+        .or_else(|| settings(env).ok().and_then(|st| st.usdc))
+}
+
+fn guard_usdc(env: &Env, token: &Option<Address>, contexts: &Vec<Context>) -> Result<(), Error> {
+    let Some(token) = token else {
         return Ok(());
     };
     let liened = lien(env) > 0;
     for c in contexts.iter() {
         if let Context::Contract(cc) = c {
-            if cc.contract != token {
+            if cc.contract != *token {
                 continue;
             }
             let f = cc.fn_name;
@@ -237,10 +298,29 @@ fn frozen(env: &Env) -> bool {
     env.storage().instance().has(&DataKey::Pending)
 }
 
+fn in_session(env: &Env) -> bool {
+    let until: Option<u64> = env.storage().instance().get(&DataKey::Session);
+    until.is_some_and(|u| u >= env.ledger().timestamp())
+}
+
+/// Before a change only the member makes (union, code): not frozen, no session, no lien.
+fn member_only(env: &Env) -> Result<(), Error> {
+    if frozen(env) {
+        return Err(Error::Frozen);
+    }
+    if in_session(env) {
+        return Err(Error::InSession);
+    }
+    if lien(env) > 0 {
+        return Err(Error::Locked);
+    }
+    Ok(())
+}
+
 /// A proposal freezes the account and ends any running session.
-fn propose(env: &Env, signer: Signer) {
+fn propose(env: &Env, signer: Signer) -> Result<(), Error> {
+    let at = env.ledger().timestamp() + settings(env)?.wait;
     env.storage().instance().remove(&DataKey::Session);
-    let at = env.ledger().timestamp() + factory(env).wait();
     env.storage().instance().set(
         &DataKey::Pending,
         &Pending {
@@ -250,11 +330,11 @@ fn propose(env: &Env, signer: Signer) {
     );
     RecoveryProposed { signer, at }.publish(env);
     bump_instance(env);
+    Ok(())
 }
 
-fn is_leader(env: &Env, who: &Address) -> bool {
-    let union: Address = get(env, DataKey::Union);
-    RolesClient::new(env, &factory(env).roles()).is_leader(&union, who)
+fn is_leader(env: &Env, union: &Address, who: &Address) -> bool {
+    roles(env).is_leader(union, who)
 }
 
 #[contract]
@@ -262,12 +342,23 @@ pub struct AccountContract;
 
 #[contractimpl]
 impl AccountContract {
-    pub fn __constructor(env: Env, factory: Address, union: Address, signer: Signer) {
+    /// Deployed by the deployer (or anyone) with no union: the member names it with `set_union`.
+    pub fn __constructor(env: Env, roles: Address, signer: Signer) {
         let s = env.storage().instance();
-        s.set(&DataKey::Factory, &factory);
-        s.set(&DataKey::Union, &union);
+        s.set(&DataKey::Roles, &roles);
         s.set(&DataKey::Signer, &signer);
         bump_instance(&env);
+    }
+
+    /// The member names (or changes) her union, with her own signature: never while a recovery
+    /// is pending, a leader session runs, or a lien stands.
+    pub fn set_union(env: Env, union: Address) -> Result<(), Error> {
+        member_only(&env)?;
+        env.current_contract_address().require_auth();
+        env.storage().instance().set(&DataKey::Union, &union);
+        UnionSet { union }.publish(&env);
+        bump_instance(&env);
+        Ok(())
     }
 
     /// The account's own signer moves to a new key (a new phone).
@@ -281,33 +372,34 @@ impl AccountContract {
 
     /// Assist and keypad mode: the member's phone signs this (its QR, valid until `not_after`,
     /// unix seconds by the phone's clock); from its submission any leader of the union may sign
-    /// for the account for the factory's session length.
+    /// for the account for the union's session length.
     pub fn start_session(env: Env, not_after: u64) -> Result<u64, Error> {
         if frozen(&env) {
             return Err(Error::Frozen);
         }
+        let len = settings(&env)?.session_len;
         env.current_contract_address().require_auth();
         let now = env.ledger().timestamp();
         if now > not_after {
             return Err(Error::Expired);
         }
-        let until = now + factory(&env).session_len();
+        let until = now + len;
         env.storage().instance().set(&DataKey::Session, &until);
         SessionStarted { until }.publish(&env);
         bump_instance(&env);
         Ok(until)
     }
 
-    /// The account's own signer, or a leader in the session, ends it early.
+    /// The account's own signer ends a session early (a session never reaches the account itself).
     pub fn end_session(env: Env) {
         env.current_contract_address().require_auth();
         env.storage().instance().remove(&DataKey::Session);
     }
 
     /// The union's multisig account proposes a new signer (e.g. a keypad member's new phone).
-    pub fn recover(env: Env, signer: Signer) {
-        factory(&env).union().require_auth();
-        propose(&env, signer);
+    pub fn recover(env: Env, signer: Signer) -> Result<(), Error> {
+        union_of(&env)?.require_auth();
+        propose(&env, signer)
     }
 
     /// Two leaders of the account's union together propose a new signer (a lost phone).
@@ -317,12 +409,13 @@ impl AccountContract {
         leader_a: Address,
         leader_b: Address,
     ) -> Result<(), Error> {
+        let union = union_of(&env)?;
         if leader_a == leader_b {
             return Err(Error::NotLeaders);
         }
         leader_a.require_auth();
         leader_b.require_auth();
-        if !is_leader(&env, &leader_a) || !is_leader(&env, &leader_b) {
+        if !is_leader(&env, &union, &leader_a) || !is_leader(&env, &union, &leader_b) {
             return Err(Error::NotLeaders);
         }
         // Two leaders cannot replace a pending proposal (restarting the wait would keep the account frozen, and
@@ -330,25 +423,24 @@ impl AccountContract {
         if frozen(&env) {
             return Err(Error::Frozen);
         }
-        propose(&env, signer);
-        Ok(())
+        propose(&env, signer)
     }
 
     /// One leader of the union and the node's SMS key together propose a new signer (2 Nov): the
     /// node co-signs only for the device key the new phone registered through the SMS link.
     pub fn recover_by_sms(env: Env, signer: Signer, leader: Address) -> Result<(), Error> {
+        let union = union_of(&env)?;
         leader.require_auth();
-        let sms = factory(&env).sms_key().ok_or(Error::NoSmsKey)?;
+        let sms = settings(&env)?.sms_key.ok_or(Error::NoSmsKey)?;
         sms.require_auth();
-        if !is_leader(&env, &leader) {
+        if !is_leader(&env, &union, &leader) {
             return Err(Error::NotLeaders);
         }
         // As with two leaders: a pending recovery is cancelled or overridden by the union only.
         if frozen(&env) {
             return Err(Error::Frozen);
         }
-        propose(&env, signer);
-        Ok(())
+        propose(&env, signer)
     }
 
     /// Anyone, once the wait has passed: the proposed signer takes over.
@@ -367,45 +459,54 @@ impl AccountContract {
 
     /// The union's multisig account cancels a proposed recovery (a member's dispute goes to the
     /// union); the account's own signer cannot, since a pending recovery freezes it.
-    pub fn cancel_recovery(env: Env) {
-        factory(&env).union().require_auth();
+    pub fn cancel_recovery(env: Env) -> Result<(), Error> {
+        union_of(&env)?.require_auth();
         env.storage().instance().remove(&DataKey::Pending);
         RecoveryCancelled {}.publish(&env);
         bump_instance(&env);
+        Ok(())
     }
 
-    /// Anyone: the account moves to the factory's current account code (the factory changes it
-    /// only after its timelock).
-    pub fn upgrade(env: Env) -> Result<(), Error> {
-        let wasm = factory(&env).account_wasm();
-        if env.current_contract_address().executable() == Some(Executable::Wasm(wasm.clone())) {
+    /// The member alone moves her account to new code (her own signature; a leader session never
+    /// reaches this account): never while a recovery is pending, a session runs, or a lien stands.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+        member_only(&env)?;
+        env.current_contract_address().require_auth();
+        if env.current_contract_address().executable()
+            == Some(Executable::Wasm(new_wasm_hash.clone()))
+        {
             return Err(Error::Current);
         }
-        env.deployer().update_current_contract_wasm(wasm);
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
 
     // ---------- LP positions (31 Oct) ----------
 
     /// fx_pool only (an LP accepts a Collect, or a Bring put the union's USDC here): locks `amount`
-    /// of the free USDC. Returns the lien.
+    /// of the free USDC. The lock that opens a lien records its fx_pool and USDC. Returns the lien.
     pub fn lock(env: Env, amount: i128) -> Result<i128, Error> {
-        pool(&env)?.require_auth();
+        let (pool, usdc) = pool_usdc(&env)?;
+        pool.require_auth();
         if amount <= 0 {
             return Err(Error::BadAmount);
         }
-        if amount > free_usdc(&env)? {
+        if amount > free_usdc(&env, &usdc) {
             return Err(Error::Locked);
         }
-        let l = lien(&env) + amount;
-        set_lien(&env, l);
-        Ok(l)
+        let l = lien(&env);
+        if l == 0 {
+            env.storage().instance().set(&DataKey::LienPool, &pool);
+            env.storage().instance().set(&DataKey::LienUsdc, &usdc);
+        }
+        set_lien(&env, l + amount);
+        Ok(l + amount)
     }
 
-    /// fx_pool only (a settle past the margin, or an accepted Collect that expired or was
-    /// cancelled). Allowed while frozen. Returns the lien.
+    /// The lien's fx_pool only (a settle past the margin, or an accepted Collect that expired or
+    /// was cancelled). Allowed while frozen. Returns the lien.
     pub fn unlock(env: Env, amount: i128) -> Result<i128, Error> {
-        pool(&env)?.require_auth();
+        pool_usdc(&env)?.0.require_auth();
         if amount <= 0 {
             return Err(Error::BadAmount);
         }
@@ -423,23 +524,24 @@ impl AccountContract {
         if amount <= 0 {
             return Err(Error::BadAmount);
         }
-        if amount > free_usdc(&env)? {
+        let (_, usdc) = pool_usdc(&env)?;
+        if amount > free_usdc(&env, &usdc) {
             return Err(Error::Locked);
         }
-        usdc(&env)?.transfer(&env.current_contract_address(), &to, &amount);
+        TokenClient::new(&env, &usdc).transfer(&env.current_contract_address(), &to, &amount);
         Ok(())
     }
 
-    /// fx_pool only, at a Collect's scan (allowed while frozen): `amount` of the lien goes to
-    /// fx_pool and the lien drops by it. Returns the lien.
+    /// The lien's fx_pool only, at a Collect's scan (allowed while frozen): `amount` of the lien
+    /// goes to that fx_pool and the lien drops by it. Returns the lien.
     pub fn pay(env: Env, amount: i128) -> Result<i128, Error> {
-        let pool = pool(&env)?;
+        let (pool, usdc) = pool_usdc(&env)?;
         pool.require_auth();
         let l = lien(&env);
         if amount <= 0 || amount > l {
             return Err(Error::NotClaimable);
         }
-        usdc(&env)?.transfer(&env.current_contract_address(), &pool, &amount);
+        TokenClient::new(&env, &usdc).transfer(&env.current_contract_address(), &pool, &amount);
         set_lien(&env, l - amount);
         PaidPool { usdc: amount }.publish(&env);
         Ok(l - amount)
@@ -447,6 +549,11 @@ impl AccountContract {
 
     pub fn lien(env: Env) -> i128 {
         lien(&env)
+    }
+
+    /// The fx_pool that holds the lien (none while the lien is 0).
+    pub fn lien_pool(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::LienPool)
     }
 
     pub fn signer(env: Env) -> Signer {
@@ -462,12 +569,13 @@ impl AccountContract {
         until.filter(|u| *u >= env.ledger().timestamp())
     }
 
-    pub fn union(env: Env) -> Address {
-        get(&env, DataKey::Union)
+    /// The union the member named, if any.
+    pub fn union(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Union)
     }
 
-    pub fn factory(env: Env) -> Address {
-        get(&env, DataKey::Factory)
+    pub fn roles(env: Env) -> Address {
+        get(&env, DataKey::Roles)
     }
 }
 
@@ -486,7 +594,8 @@ impl CustomAccountInterface for AccountContract {
         if frozen(&env) {
             return Err(Error::Frozen);
         }
-        guard_usdc(&env, &auth_contexts)?;
+        let usdc = usdc_guarded(&env);
+        guard_usdc(&env, &usdc, &auth_contexts)?;
         match signature {
             Signature::Ed25519(sig) => match get(&env, DataKey::Signer) {
                 Signer::Ed25519(pk) => {
@@ -503,14 +612,22 @@ impl CustomAccountInterface for AccountContract {
                 _ => return Err(Error::WrongKind),
             },
             Signature::Leader(leader) => {
-                let until: Option<u64> = env.storage().instance().get(&DataKey::Session);
-                if until.is_none_or(|u| env.ledger().timestamp() > u) || !is_leader(&env, &leader) {
+                let Ok(union) = union_of(&env) else {
+                    return Err(Error::NoSession);
+                };
+                if !in_session(&env) || !is_leader(&env, &union, &leader) {
                     return Err(Error::NoSession);
                 }
-                let allowed = factory(&env).session_contracts();
+                let allowed = settings(&env)?.session_contracts;
+                let me = env.current_contract_address();
                 for c in auth_contexts.iter() {
                     match c {
-                        Context::Contract(cc) if allowed.contains(&cc.contract) => {}
+                        // Never this account (its union, code, signer) or the USDC, whatever
+                        // the union lists.
+                        Context::Contract(cc)
+                            if allowed.contains(&cc.contract)
+                                && cc.contract != me
+                                && Some(&cc.contract) != usdc.as_ref() => {}
                         _ => return Err(Error::OutsideSession),
                     }
                 }

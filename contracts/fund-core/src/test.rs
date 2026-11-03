@@ -1791,41 +1791,39 @@ fn senior_route_usdc_in_nin_into_the_senior_pool() {
 // ---------- LP positions (executive decision 31 Oct; was the 30 Oct pledge) ----------
 
 use nila_account::{AccountContract, AccountContractClient, Signer as AcctSigner};
-use nila_account_factory::{AccountFactory, AccountFactoryClient};
 use nila_fx_pool::{OfferKind, OfferState};
 use soroban_sdk::String as SString;
 
 impl Fx {
-    /// The LP: a Nila account of the union's factory (which names this fx_pool and USDC), with a
+    /// The LP: a Nila account that named the union (whose settings in roles name this fx_pool and USDC), with a
     /// title, accepted by the anchor; ₹95 fix; the union has cash at hand and 50 USDC of its own.
     fn lp_ready(&self) -> (Address, Address) {
         let f = self.fx();
         let anchor = Address::generate(&self.env);
         f.set_anchor(&anchor);
         let roles = self.core().get_config().roles;
-        let factory = self.env.register(
-            AccountFactory,
-            (
-                self.union.clone(),
-                roles,
-                3_600u64,
-                300u64,
-                soroban_sdk::Vec::<Address>::new(&self.env),
-                BytesN::from_array(&self.env, &[0u8; 32]),
-            ),
+        nila_roles::RolesContractClient::new(&self.env, &roles).set_union_settings(
+            &self.union,
+            &nila_roles::UnionSettings {
+                wait: 3_600,
+                session_len: 300,
+                session_contracts: soroban_sdk::Vec::<Address>::new(&self.env),
+                sms_key: None,
+                fx_pool: Some(self.fx_id.clone()),
+                usdc: Some(self.usdc.clone()),
+            },
         );
-        AccountFactoryClient::new(&self.env, &factory).set_pledge(&self.fx_id, &self.usdc);
         let lp = self.env.register(
             AccountContract,
             (
-                factory,
-                self.union.clone(),
+                roles,
                 AcctSigner::Ed25519(BytesN::from_array(
                     &self.env,
                     &lp_key().verifying_key().to_bytes(),
                 )),
             ),
         );
+        AccountContractClient::new(&self.env, &lp).set_union(&self.union);
         self.give_title(&lp);
         f.set_id_checked(&lp, &true, &loan_id(&self.env, 0x4B));
         f.set_lp(&self.union, &lp, &true, &loan_id(&self.env, 0x4C));
