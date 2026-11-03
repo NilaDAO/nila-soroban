@@ -2295,7 +2295,7 @@ impl Vx {
     }
 }
 
-/// Machinery wired in, a ₹1,450/h tractor rate, a confirmed machine owned by the neighbour,
+/// Machinery wired in, a ₹1,450/h tractor rate, a machine owned by the neighbour (available from its registration),
 /// 10,000 nIN of senior money, and the borrower invested past the gate.
 fn vsetup() -> Vx {
     let fx = setup();
@@ -2312,7 +2312,8 @@ fn vsetup() -> Vx {
     mc.set_union_parts(&fx.union, &0);
     let owner = fx.neighbour.clone();
     let machine = mc.register_machine(&fx.leader, &fx.union, &owner, &1, &40, &loan_id(env, 0x50));
-    mc.confirm_machine(&owner, &machine);
+    // No owner confirmation (3 Nov): available at once.
+    assert!(mc.machine(&machine).unwrap().confirmed);
     // Senior money for the prepay (N4).
     let f = fx.fx();
     let investor = Address::generate(env);
@@ -2546,7 +2547,12 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
         Err(Ok(ME::TooMuchWork))
     );
     let small = mc.register_machine(&fx.leader, &fx.union, &v.owner, &1, &3, &id);
+    // confirm_machine is a no-op kept for old clients: the owner only, nothing changes.
     mc.confirm_machine(&v.owner, &small);
+    assert_eq!(
+        mc.try_confirm_machine(&fx.borrower, &small),
+        Err(Ok(ME::NotOwner))
+    );
     assert_eq!(
         mc.try_claim(&v.owner, &small, &fx.union, &id, &1000, &400),
         Err(Ok(ME::TooMuchWork))
@@ -2984,7 +2990,6 @@ fn owners_are_paid_the_rest_from_her_repayment_oldest_claim_first() {
         &40,
         &loan_id(&fx.env, 0x51),
     );
-    mc.confirm_machine(&second, &m2);
     let id = loan_id(&fx.env, 1);
     c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &600);
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &600);
@@ -3053,7 +3058,6 @@ fn a_default_pays_owners_in_full_and_owners_per_voucher_are_capped() {
             &40,
             &loan_id(&fx.env, 0x60 + i),
         );
-        mc.confirm_machine(&o, &m);
         owners.push((o, m));
     }
     for (o, m) in owners.iter().take(7) {
@@ -3103,7 +3107,6 @@ fn self_claim_rate_rise_and_handing_hours_back() {
         &40,
         &loan_id(&fx.env, 9),
     );
-    mc.confirm_machine(&fx.borrower, &mine);
     let id = loan_id(&fx.env, 1);
     c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &400);
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &400);
