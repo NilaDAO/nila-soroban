@@ -2859,6 +2859,18 @@ fn senior_exits_at_par_and_its_interest_comes_in_usdc_through_an_lp() {
             Err(Ok(AcctError::Locked))
         );
     }
+    // A fake LP account that pays nothing is refused on the investor's balance (re-review, 3 Nov).
+    let fake = fx.env.register(fake_lp::FakeLp, ());
+    fx.give_title(&fake);
+    fx.fx()
+        .set_id_checked(&fake, &true, &loan_id(&fx.env, 0x51));
+    fx.fx()
+        .set_lp(&fx.union, &fake, &true, &loan_id(&fx.env, 0x52));
+    assert_eq!(
+        s.try_pay_income(&fx.union, &v.investor, &fx.leader, &fake, &owed, &pay),
+        Err(Ok(SError::NotPaid))
+    );
+    assert_eq!(c.senior_position(&fx.union, &v.investor).owed, owed);
     s.pay_income(&fx.union, &v.investor, &fx.leader, &lp, &owed, &pay);
     assert_eq!(c.senior_position(&fx.union, &v.investor).owed, 0);
     assert_eq!(c.senior_owed_total(&fx.union), 0);
@@ -3994,4 +4006,17 @@ fn the_window_comes_from_the_crop_calendar_by_the_token_ids_crop_and_sowing() {
         .unwrap_err(),
         Ok(Error::BadDates)
     );
+}
+
+/// An LP account whose `send_usdc` pays nothing (re-review, 3 Nov).
+mod fake_lp {
+    use soroban_sdk::{contract, contractimpl, Address, Env};
+
+    #[contract]
+    pub struct FakeLp;
+
+    #[contractimpl]
+    impl FakeLp {
+        pub fn send_usdc(_env: Env, _to: Address, _amount: i128) {}
+    }
 }

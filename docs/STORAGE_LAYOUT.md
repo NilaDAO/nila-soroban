@@ -141,7 +141,7 @@ storage:
 | `Total` | instance | i128 senior USDC held for investors' principal: deposits less what `redeem` paid out or wrote off (a haircut) |
 | `Vault` | instance | Address of the nUSD vault (later), set once |
 | `GuaranteeCap` | instance | i128 the most guarantee the vault may assign, in USDC (0 until the trust sets it) |
-| `Guaranteed` | instance | i128 guarantee the vault assigned so far, in USDC |
+| `Guaranteed` | instance | i128 guarantee the vault assigned so far, in USDC; never lowered, so `GuaranteeCap` limits all ever assigned |
 | `Investor(investor)` | persistent | `Investor{accepted, kyc_ref, tag}`: accepted by the trust; `tag` (Offshore 0, Domestic 1) set once |
 | `Principal(union, investor)` | persistent | `Principal{usdc, nin}` paid in for the union's senior shares still held |
 | `UnionUsdc(union, Tag)` | persistent | i128 USDC taken in for the union under one residency, less what was paid back or written off (R24) |

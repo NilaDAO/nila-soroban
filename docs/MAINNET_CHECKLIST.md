@@ -110,7 +110,8 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
       Bring offers pay out in a day.
 - [ ] LP offers: `anchor` = the trust's anchor account (nila-anchor), `lp_fee` = 100 (1%).
 - [ ] Senior: `fx_pool.senior()` and `fund_core.get_config().senior` = the senior contract; `senior.cap()` as agreed;
-      `senior.total()` = the USDC balance of the senior contract (no other way in or out than deposit and redeem).
+      the USDC balance of the senior contract = `senior.total()` + Σ `senior.haircut_usdc(union)` (no other way in or
+      out than deposit and redeem; haircut USDC stays until the nUSD loss cover).
 - [ ] `fund_core` has the crop calendar linked, and `crop_calendar.window(family × 1000, <a sowing date>)` gives the
       catalogue's window for each family (one week before the sowing window up to its last day, UTC).
 - [ ] `swap_key` = the anchor's swap key (C9b; `set_swap_key`, admin). Without it every LP accept is

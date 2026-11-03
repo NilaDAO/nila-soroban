@@ -72,6 +72,8 @@ pub enum Error {
     UnknownUnion = 116,
     /// The vault's guarantee would pass its cap.
     AboveGuaranteeCap = 117,
+    /// The LP's account did not pay the investor the USDC it signed for (re-review, 3 Nov).
+    NotPaid = 118,
 }
 
 /// Where a senior investor's USDC comes from (R24, decision 005): set by the trust at acceptance.
@@ -584,7 +586,14 @@ impl SeniorContract {
         }
         let settled = FundCoreClient::new(&env, &get(&env, &DataKey::FundCore))
             .take_senior_income(&union, &investor, &inr);
+        // The payment goes through the LP's own account code, so it is checked on the investor's balance, not
+        // trusted (re-review, 3 Nov): a fake account that pays nothing is refused.
+        let token = TokenClient::new(&env, &get(&env, &DataKey::Usdc));
+        let before = token.balance(&investor);
         LpAccountClient::new(&env, &lp).send_usdc(&investor, &usdc);
+        if token.balance(&investor) - before < usdc {
+            return Err(Error::NotPaid);
+        }
         IncomePaid {
             union,
             investor,
