@@ -97,6 +97,16 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     **Do not call `senior.set_vault` until nUSD is audited;** the vault's guarantee is capped apart
     (`set_guarantee_cap`, 0 by default) and stays 0 until then.
 
+18. Member-owned accounts (executive decision 3 Nov; replaces the per-union account factory). Upload the reproducible
+    `nila_account.wasm` and check its hash. Deployer: `deployer(account_wasm = that hash, roles)`, **once for all
+    unions**. It has no admin, no settings and no upgrade, so its account code and roles are fixed for good: a new
+    account code later means a member upgrades her own account (`account.upgrade(hash)`, her signature); a new
+    deployer would give every key a new address. Each union account (3 of 5):
+    `roles.set_union_settings(union, {wait, session_len, session_contracts: [fund_core, machinery], sms_key,
+    fx_pool, usdc})` (wait 1 h – 30 days, session 60–900 s; out of range is refused). Until a union has set them,
+    its members' accounts get no recovery and no leader session (`NoSettings`). An account is created with no union;
+    the member names it herself (`account.set_union(union)`, her signature).
+
 ### C2. Upgrading a deployment from before 25 Oct (instead of C. for an existing set)
 
 1. Pause the node's attester beat (`attest_food_token` would be refused between the upgrade and step 3).
@@ -114,6 +124,8 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 - [ ] `upgrade_delay` = 172800 (48 h) on all six (with crop_calendar); `pending_upgrade` and `pending_delay` = null.
       The delay is stored at the constructor and survives upgrades, so check it on the
       deployed contract itself.
+- [ ] `deployer.account_wasm()` = the reproducible `nila_account.wasm` hash and `deployer.roles()` = roles; each
+      union's `roles.union_settings(union)` names this fx_pool, the USDC SAC and [fund_core, machinery].
 - [ ] `admin` (roles, land_title, fund_viewer, fx_pool) and `get_config().admin` (fund_core) =
       the trust account.
 - [ ] The nIN SAC `admin` = fx_pool. The issuer has master weight 0 and no other signers.

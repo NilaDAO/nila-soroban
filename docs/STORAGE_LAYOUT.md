@@ -43,6 +43,7 @@ storage:
 | `Role(account, Role)` | persistent | bool (oracle, attester, core) |
 | `Leader(union, account)` | persistent | bool |
 | `UnionRole(union, account, UnionRole)` | persistent | bool (treasurer, secretary) |
+| `UnionSettings(union)` | persistent | `UnionSettings{wait, session_len, session_contracts, sms_key: Option, fx_pool: Option, usdc: Option}` (3 Nov, member-owned accounts; set by the union account, read by its members' accounts, TTL extended on read) |
 
 ## land_title
 
@@ -203,33 +204,33 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
   on a fresh deploy only) and machinery gained `UnionParts(union)`. `pay_voucher` takes `to_union` too; machinery
   takes the union's parts out of the price before the owner's prepay and postpaid part.
 
-## account (26 Oct): every Nila account (members, leaders, machine owners, LPs)
+## account (26 Oct; member-owned since 3 Nov): every Nila account (members, leaders, machine owners, LPs)
 
 | Key | Tier | Value |
 |---|---|---|
-| `Factory` | instance | Address of the union's account factory (settings) |
-| `Union` | instance | Address of the account's union (its leaders may run sessions and recover) |
+| `Roles` | instance | Address of roles: who leads the union, and the union's settings (`union_settings`) |
+| `Union` | instance | Address of the union the member named (`set_union`, her own signature); absent until she names one |
 | `Signer` | instance | `Signer::Ed25519(BytesN<32>)` (the Privy Stellar wallet, smartphones) or `Signer::P256(BytesN<65>)` (the keypad's device key) |
 | `Pending` | instance | `Pending{signer, at}`: a proposed recovery and when it may take effect |
 | `Session` | instance | u64: until when a leader of the union may sign for the account |
+| `Lien` | instance | i128: USDC locked by fx_pool (LP positions) |
+| `LienPool` / `LienUsdc` | instance | the fx_pool and USDC the union named at the lock that opened the lien; only that fx_pool unlocks or takes it; removed when the lien is back at 0 |
 
-29 Oct (key backup, K1a): no stored type changed. A present `Pending` now **freezes** the account: `__check_auth`
-refuses every signature (`Frozen`, error 8), `start_session` and `set_signer` are refused, and a proposal removes
-`Session`. `cancel_recovery` takes the union's multisig account (the factory's `union`), no longer the account's
-signer. Running accounts get the code through the factory's timelocked `propose_account_wasm` / `apply_account_wasm`,
-then `upgrade` on each account. **No SMS key** (executive decision 29 Oct): `recover_by_sms`, the factory's
-`set_sms_key` / `sms_key` and its constructor's `sms_key` are gone; a lost phone (smartphone or keypad) is recovered by
-two leaders (`recover_by_leaders`) or the union's multisig (`recover`). A factory already deployed keeps a stale
-`SmsKey` entry that nothing reads.
+3 Nov (member-owned accounts, executive decision): the `Factory` key is gone. The constructor is `(roles, signer)`,
+with no union; the immutable `deployer` (one for all unions) deploys it at the address that follows from the key.
+Settings (wait, session length and contracts, SMS key, fx_pool, USDC) come from `roles.union_settings(union)` for the
+union the member named: no union → `NoUnion` (14), no settings → `NoSettings` (15) for recovery and sessions.
+`set_union` and `upgrade(new_wasm_hash)` take the account's own signature only and are refused while frozen
+(`Frozen`), in a leader session (`InSession`, 16) or with a lien (`Locked`); a leader session never reaches the
+account itself or the USDC, whatever the union lists. A pending `Pending` freezes the account (29 Oct, unchanged).
+Fresh deploy only: accounts made by a factory keep a `Factory` entry and the old constructor's layout.
 
-## account_factory (26 Oct): one per union, admin = the union's multisig account
+## deployer (3 Nov): one for all unions, immutable
 
 | Key | Tier | Value |
 |---|---|---|
-| `Union` | instance | Address: the union account (admin; may propose an account's recovery) |
-| `Roles` | instance | Address of roles (who leads the union) |
-| `Wait` | instance | u64 seconds, 1 h – 30 days: the recovery wait |
-| `SessionLen` | instance | u64 seconds, 1–15 min |
-| `SessionContracts` | instance | `Vec<Address>`: what a leader session may call (fund_core, machinery) |
-| `AccountWasm` / `PendingWasm` | instance | the account code, and a proposed one with its time |
-| upgrade keys | instance | `nila_common::upgrade` (48-hour timelock) |
+| `AccountWasm` | instance | the account code it deploys, fixed at its constructor |
+| `Roles` | instance | Address of roles, passed to every account it deploys |
+
+No admin, no settings, no upgrade. `create(signer)` deploys with salt = sha256(the key bytes) and constructor
+`(roles, signer)`; `address_of(signer)` gives the same address before the account exists.
