@@ -33,9 +33,14 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     derived on the executive's Ledger at its own index (`m/44'/148'/N'`, never the account the grant money arrives
     on). Rehearse first: `HD=N scripts/ledger-admin-testnet.sh` (LEDGER ADMIN CHECK PASS). Every contract is deployed
     with that account as admin; admin calls name the Ledger identity as `--source` (never `--sign-with-ledger`, which signs with account 0).
-  - Later the **same account** becomes the trust's multisig: add the other signers (Ledger keys, weight 1), set the
-    thresholds to 3 and the master weight to 0. The contracts keep the same admin address, so no upgrade or
-    `set_admin` is needed. Until then one Nila key holds the admin, which breaks C11 (I6); the roster (X3) closes it.
+  - Deploying needs no admin: a hot deployer key deploys, each constructor names the Ledger account. Setup calls
+    (links, roles, union config, crop calendar, caps at 0) are signed by the Ledger alone.
+  - **Before the first real money** the **same account** becomes the 3-of-5 (executive decision 3 Nov): add Anand,
+    Juliya, Carmen and Sietse as weight-1 signers (hardware keys), keep the master (Carst's Ledger) at weight 1, set
+    low/medium/high thresholds to 3. The contracts keep the same admin address: no upgrade or `set_admin`. From then
+    on every upgrade and admin call needs 3 of the 5. All five are Nila people: C11 is dropped for this account
+    (LOAN_RULES "Trust signer roster", revised 3 Nov).
+  - Rehearse the multisig on testnet first (a 3-of-5 admin call and a 2-signature call that must fail).
   - At least 3 signers on hardware keys (Ledger supports Stellar), weight 1 each.
   - Low, medium and high thresholds at the majority. Master weight 0.
   - **Nila people hold fewer signatures than the threshold** (C11, I6). ContractsCompliance K1
