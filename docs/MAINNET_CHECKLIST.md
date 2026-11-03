@@ -29,6 +29,13 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 ## B. Accounts and keys
 
 - [ ] **Trust admin account (D2, C11).** It is the admin of all five contracts.
+  - **Start on a Ledger, grow into the trust (executive decision 3 Nov).** The admin address is a Stellar account
+    derived on the executive's Ledger at its own index (`m/44'/148'/N'`, never the account the grant money arrives
+    on). Rehearse first: `HD=N scripts/ledger-admin-testnet.sh` (LEDGER ADMIN CHECK PASS). Every contract is deployed
+    with that account as admin; admin calls are signed on the device (`--sign-with-ledger`).
+  - Later the **same account** becomes the trust's multisig: add the other signers (Ledger keys, weight 1), set the
+    thresholds to 3 and the master weight to 0. The contracts keep the same admin address, so no upgrade or
+    `set_admin` is needed. Until then one Nila key holds the admin, which breaks C11 (I6); the roster (X3) closes it.
   - At least 3 signers on hardware keys (Ledger supports Stellar), weight 1 each.
   - Low, medium and high thresholds at the majority. Master weight 0.
   - **Nila people hold fewer signatures than the threshold** (C11, I6). ContractsCompliance K1
