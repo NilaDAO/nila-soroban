@@ -61,7 +61,7 @@ fn create_deploys_at_address_of_with_no_union() {
     let hash = env
         .deployer()
         .upload_contract_wasm(soroban_sdk::Bytes::from_slice(&env, &bytes));
-    let roles = Address::generate(&env);
+    let roles = env.register(nila_roles::RolesContract, (Address::generate(&env),));
     let id = env.register(Deployer, (hash.clone(), roles.clone()));
     let d = DeployerClient::new(&env, &id);
     let s = Signer::Ed25519(BytesN::from_array(&env, &[7; 32]));
@@ -75,8 +75,23 @@ fn create_deploys_at_address_of_with_no_union() {
         a.signer(),
         nila_account::Signer::Ed25519(BytesN::from_array(&env, &[7; 32]))
     );
-    // Naming a union changes nothing about the address.
-    a.set_union(&Address::generate(&env));
+    // Naming a union (admitted, with settings: decision 008) changes nothing about the address.
+    let union = Address::generate(&env);
+    let r = nila_roles::RolesContractClient::new(&env, &roles);
+    r.admit_union(&union, &BytesN::from_array(&env, &[2; 32]));
+    r.set_union_settings(
+        &union,
+        &nila_roles::UnionSettings {
+            wait: nila_roles::WAIT_MIN,
+            session_len: nila_roles::SESSION_MIN,
+            session_contracts: soroban_sdk::vec![&env],
+            sms_key: None,
+            fx_pool: None,
+            usdc: None,
+        },
+    );
+    a.set_union(&union);
+    assert_eq!(a.union(), Some(union));
     assert_eq!(d.address_of(&s), acct);
     // One key, one account.
     assert!(d.try_create(&s).is_err());

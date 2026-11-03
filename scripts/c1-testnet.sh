@@ -79,6 +79,10 @@ TX_ROLE_ATT=$(tx stellar contract invoke --id "$ROLES" --source ${P}-admin -- \
 TX_ROLE_ORA=$(tx stellar contract invoke --id "$ROLES" --source ${P}-admin -- \
   set_role --account ${P}-oracle --role 0 --enabled true)
 
+log "admit_union by the trust (decision 008): set_leader is refused before it"
+stellar contract invoke --id "$ROLES" --source ${P}-admin -- \
+  admit_union --union "$UNION" --details_hash "$(printf '00%.0s' {1..32})" >/dev/null
+
 log "set_leader by the admin key: must fail"
 if stellar contract invoke --id "$ROLES" --source ${P}-admin -- \
   set_leader --union "$UNION" --account ${P}-leader --enabled true >/dev/null 2>&1; then

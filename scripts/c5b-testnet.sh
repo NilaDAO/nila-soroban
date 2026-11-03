@@ -84,6 +84,8 @@ tx stellar contract invoke --id "$NIN_SAC" --source ${P}-nin-issuer -- set_admin
 tx stellar contract invoke --id "$FX" --source ${P}-admin -- activate >/dev/null
 tx stellar contract invoke --id "$ROLES" --source ${P}-admin -- \
   set_role --account ${P}-attester --role 1 --enabled true >/dev/null
+tx stellar contract invoke --id "$ROLES" --source ${P}-admin -- \
+  admit_union --union "$UNION" --details_hash "$(printf '00%.0s' {1..32})" >/dev/null
 tx stellar contract invoke --id "$ROLES" --source ${P}-union -- \
   set_leader --union "$UNION" --account ${P}-leader --enabled true >/dev/null
 tx stellar contract invoke --id "$CORE" --source ${P}-admin -- \

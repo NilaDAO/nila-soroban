@@ -189,6 +189,7 @@ fn setup() -> Fx {
     let roles = nila_roles::RolesContractClient::new(&env, &roles_id);
     roles.set_role(&oracle, &nila_roles::Role::Oracle, &true);
     roles.set_role(&attester, &nila_roles::Role::Attester, &true);
+    roles.admit_union(&union, &soroban_sdk::BytesN::from_array(&env, &[1; 32]));
     roles.set_leader(&union, &leader, &true);
 
     let titles_id = env.register(LandTitleContract, (admin.clone(), roles_id.clone()));
@@ -3364,6 +3365,10 @@ fn the_move_mints_her_polygon_nin_once_as_a_desk_cash_out() {
     // Another union's leader cannot pay it.
     let other_union = Address::generate(&f.env);
     let other_leader = Address::generate(&f.env);
+    nila_roles::RolesContractClient::new(&f.env, &f.roles_id).admit_union(
+        &other_union,
+        &soroban_sdk::BytesN::from_array(&f.env, &[2; 32]),
+    );
     nila_roles::RolesContractClient::new(&f.env, &f.roles_id).set_leader(
         &other_union,
         &other_leader,

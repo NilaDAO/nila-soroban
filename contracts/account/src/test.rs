@@ -39,6 +39,14 @@ impl T {
     fn set_settings(&self, s: &UnionSettings) {
         self.roles.set_union_settings(&self.union_ms, s);
     }
+    /// Another union, admitted by the trust, with the same settings as the first.
+    fn other_union(&self) -> Address {
+        let u = Address::generate(&self.env);
+        self.roles
+            .admit_union(&u, &BytesN::from_array(&self.env, &[2; 32]));
+        self.roles.set_union_settings(&u, &self.settings());
+        u
+    }
 }
 
 fn signer_of(env: &Env, k: &SigningKey) -> Signer {
@@ -68,6 +76,7 @@ fn bare() -> T {
     let fund_core = Address::generate(&env);
     let roles_id = env.register(RolesContract, (Address::generate(&env),));
     let roles = RolesContractClient::new(&env, &roles_id);
+    roles.admit_union(&union_ms, &BytesN::from_array(&env, &[1; 32]));
     roles.set_leader(&union_ms, &leaders[0], &true);
     roles.set_leader(&union_ms, &leaders[1], &true);
     roles.set_union_settings(
@@ -501,12 +510,33 @@ fn set_union_needs_her_own_signature() {
     );
 }
 
+/// Decision 008: she can name only a union with settings, so never one the trust has not
+/// admitted, nor an admitted one that has set no settings yet.
+#[test]
+fn set_union_refuses_a_union_without_settings() {
+    let t = bare();
+    let never = Address::generate(&t.env);
+    assert_eq!(t.c.try_set_union(&never), Err(Ok(Error::NoSettings)));
+    let admitted = Address::generate(&t.env);
+    t.roles
+        .admit_union(&admitted, &BytesN::from_array(&t.env, &[4; 32]));
+    assert_eq!(t.c.try_set_union(&admitted), Err(Ok(Error::NoSettings)));
+    assert_eq!(t.c.union(), None);
+    t.roles.set_union_settings(&admitted, &t.settings());
+    t.c.set_union(&admitted);
+    assert_eq!(t.c.union(), Some(admitted.clone()));
+    // Revoked: refused again, also as a change back.
+    t.c.set_union(&t.union_ms);
+    t.roles.revoke_union(&admitted);
+    assert_eq!(t.c.try_set_union(&admitted), Err(Ok(Error::NoSettings)));
+}
+
 /// No change of union while frozen, in a session, or with a lien.
 #[test]
 fn set_union_is_refused_when_frozen_in_a_session_or_with_a_lien() {
     let p = pledge();
     let t = &p.t;
-    let other = Address::generate(&t.env);
+    let other = t.other_union();
     t.c.start_session(&1_800_000_600);
     assert_eq!(t.c.try_set_union(&other), Err(Ok(Error::InSession)));
     t.c.end_session();
@@ -558,15 +588,18 @@ fn no_union_no_recovery_and_no_session() {
         ),
         Ok(())
     );
-    // A union that has set no settings: no recovery, no session (never a zero wait).
-    let bare_union = Address::generate(&t.env);
+    // A union the trust revoked after she named it: its settings read as None, so no
+    // recovery, no session (never a zero wait).
+    let bare_union = t.other_union();
     t.roles.set_leader(&bare_union, &t.leaders[0], &true);
     t.roles.set_leader(&bare_union, &t.leaders[1], &true);
     t.c.set_union(&bare_union);
+    t.roles.revoke_union(&bare_union);
     assert_eq!(t.c.try_recover(&new), Err(Ok(Error::NoSettings)));
+    // Its leaders are no leaders while it is revoked.
     assert_eq!(
         t.c.try_recover_by_leaders(&new, &t.leaders[0], &t.leaders[1]),
-        Err(Ok(Error::NoSettings))
+        Err(Ok(Error::NotLeaders))
     );
     assert_eq!(
         t.c.try_start_session(&1_800_000_600),
@@ -581,6 +614,8 @@ fn recovery_and_sessions_use_the_named_unions_settings() {
     let t = setup();
     let b = Address::generate(&t.env);
     let b_leaders = [Address::generate(&t.env), Address::generate(&t.env)];
+    t.roles
+        .admit_union(&b, &BytesN::from_array(&t.env, &[3; 32]));
     for l in &b_leaders {
         t.roles.set_leader(&b, l, &true);
     }

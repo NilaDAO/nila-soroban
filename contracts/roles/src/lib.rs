@@ -34,6 +34,9 @@ pub enum Error {
     BadDelay = 5,
     /// A union setting outside its bounds (wait 1 h – 30 d, session 60–900 s): refused, not clamped.
     BadSetting = 6,
+    /// The union is not admitted by the trust (`admit_union`, decision 008): it cannot name leaders,
+    /// officers or settings, and `revoke_union` of a union not admitted is refused too.
+    NotAdmitted = 7,
 }
 
 /// What a union sets for the Nila accounts that name it (executive decision 3 Nov: member-owned
@@ -70,6 +73,7 @@ pub enum DataKey {
     Leader(Address, Address),               // (union, account)
     UnionRole(Address, Address, UnionRole), // (union, account, role)
     UnionSettings(Address),                 // union -> UnionSettings (3 Nov)
+    Admitted(Address),                      // union -> details_hash (3 Nov, decision 008)
 }
 
 #[contractevent]
@@ -106,6 +110,22 @@ pub struct UnionSettingsSet {
     #[topic]
     pub union: Address,
     pub settings: UnionSettings,
+}
+
+/// The trust admitted a union, or admitted it again with new details (decision 008).
+/// `details_hash` = sha256(name ‖ 0x00 ‖ geo) of the union account's `nila.name` / `nila.geo` data.
+#[contractevent]
+pub struct UnionAdmitted {
+    #[topic]
+    pub union: Address,
+    pub details_hash: BytesN<32>,
+}
+
+/// The trust revoked a union's admission (decision 008).
+#[contractevent]
+pub struct UnionRevoked {
+    #[topic]
+    pub union: Address,
 }
 
 /// The trust's admin account changed (C19).
@@ -155,6 +175,24 @@ fn read_flag(env: &Env, key: &DataKey) -> bool {
     }
 }
 
+/// The union's admission hash, TTL extended on read like the flags; None if never admitted or revoked.
+fn admission(env: &Env, union: &Address) -> Option<BytesN<32>> {
+    let key = DataKey::Admitted(union.clone());
+    let store = env.storage().persistent();
+    let h: Option<BytesN<32>> = store.get(&key);
+    if h.is_some() {
+        store.extend_ttl(&key, nila_common::TTL_THRESHOLD, nila_common::TTL_BUMP);
+    }
+    h
+}
+
+fn require_admitted(env: &Env, union: &Address) -> Result<(), Error> {
+    if admission(env, union).is_none() {
+        return Err(Error::NotAdmitted);
+    }
+    Ok(())
+}
+
 #[contractimpl]
 impl RolesContract {
     pub fn __constructor(env: Env, admin: Address) {
@@ -185,6 +223,51 @@ impl RolesContract {
         Ok(())
     }
 
+    /// The trust admits a union (decision 008): admin only (the trust's 3 of 5), never the union
+    /// itself. Admitting again replaces the details hash. Until admitted, a union cannot name
+    /// leaders, officers or settings.
+    pub fn admit_union(env: Env, union: Address, details_hash: BytesN<32>) -> Result<(), Error> {
+        require_admin(&env)?;
+        let key = DataKey::Admitted(union.clone());
+        let store = env.storage().persistent();
+        store.set(&key, &details_hash);
+        store.extend_ttl(&key, nila_common::TTL_THRESHOLD, nila_common::TTL_BUMP);
+        UnionAdmitted {
+            union,
+            details_hash,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// The trust revokes a union's admission (admin only). The union's leaders, officers and
+    /// settings stay stored, but while it is not admitted `is_leader`, `has_union_role` and
+    /// `union_settings` answer as if they were absent (false / None): its leaders lose their
+    /// rights and its members' accounts lose sessions and recovery at once. Admitting it again
+    /// restores them as they were.
+    pub fn revoke_union(env: Env, union: Address) -> Result<(), Error> {
+        require_admin(&env)?;
+        let key = DataKey::Admitted(union.clone());
+        let store = env.storage().persistent();
+        if !store.has(&key) {
+            return Err(Error::NotAdmitted);
+        }
+        store.remove(&key);
+        UnionRevoked { union }.publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// The details hash the union was admitted with; None if never admitted or revoked.
+    pub fn union_admission(env: Env, union: Address) -> Option<BytesN<32>> {
+        admission(&env, &union)
+    }
+
+    pub fn is_union(env: Env, union: Address) -> bool {
+        admission(&env, &union).is_some()
+    }
+
     /// Leaders of a union, all equal. Signed by the union account itself, whose
     /// 5 signers / threshold 3 make `require_auth` the 3 of 5 (D12, R4, R5).
     pub fn set_leader(
@@ -194,6 +277,7 @@ impl RolesContract {
         enabled: bool,
     ) -> Result<(), Error> {
         union.require_auth();
+        require_admitted(&env, &union)?;
         store_flag(
             &env,
             &DataKey::Leader(union.clone(), account.clone()),
@@ -218,6 +302,7 @@ impl RolesContract {
         enabled: bool,
     ) -> Result<(), Error> {
         union.require_auth();
+        require_admitted(&env, &union)?;
         store_flag(
             &env,
             &DataKey::UnionRole(union.clone(), account.clone(), role),
@@ -242,6 +327,7 @@ impl RolesContract {
         settings: UnionSettings,
     ) -> Result<(), Error> {
         union.require_auth();
+        require_admitted(&env, &union)?;
         if !(WAIT_MIN..=WAIT_MAX).contains(&settings.wait)
             || !(SESSION_MIN..=SESSION_MAX).contains(&settings.session_len)
         {
@@ -256,8 +342,10 @@ impl RolesContract {
         Ok(())
     }
 
-    /// None until the union sets them: an account of that union then gets no recovery or session.
+    /// None until the union sets them, or while the union is not admitted (revoked): an account
+    /// of that union then gets no recovery or session.
     pub fn union_settings(env: Env, union: Address) -> Option<UnionSettings> {
+        admission(&env, &union)?;
         let key = DataKey::UnionSettings(union);
         let store = env.storage().persistent();
         let s: Option<UnionSettings> = store.get(&key);
@@ -271,8 +359,10 @@ impl RolesContract {
         read_flag(&env, &DataKey::Role(account, role))
     }
 
+    /// False while the union is not admitted (revoked), whatever is stored.
     pub fn has_union_role(env: Env, union: Address, account: Address, role: UnionRole) -> bool {
-        read_flag(&env, &DataKey::UnionRole(union, account, role))
+        admission(&env, &union).is_some()
+            && read_flag(&env, &DataKey::UnionRole(union, account, role))
     }
 
     /// Kept for fund_core's `RolesClient`; same as `has_role(account, Oracle)`.
@@ -280,8 +370,9 @@ impl RolesContract {
         read_flag(&env, &DataKey::Role(account, Role::Oracle))
     }
 
+    /// False while the union is not admitted (revoked), whatever is stored.
     pub fn is_leader(env: Env, union: Address, account: Address) -> bool {
-        read_flag(&env, &DataKey::Leader(union, account))
+        admission(&env, &union).is_some() && read_flag(&env, &DataKey::Leader(union, account))
     }
 
     pub fn admin(env: Env) -> Address {

@@ -85,6 +85,7 @@ inv "$NIN_SAC" ${P}-nin-issuer set_admin --new_admin "$FX"
 inv "$FX" ${P}-admin activate
 inv "$ROLES" ${P}-admin set_role --account ${P}-attester --role 1 --enabled true
 inv "$ROLES" ${P}-admin set_role --account ${P}-admin --role 0 --enabled true
+inv "$ROLES" ${P}-admin admit_union --union "$UNION" --details_hash "$(printf '00%.0s' {1..32})"
 inv "$ROLES" ${P}-union set_leader --union "$UNION" --account ${P}-leader --enabled true
 inv "$CORE" ${P}-admin set_union_config --union "$UNION" --uc "{
     \"max_loan\": \"$((10000 * NIN))\", \"gate\": \"$((600 * NIN))\", \"rate_bp\": 1250,
