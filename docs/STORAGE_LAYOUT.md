@@ -118,8 +118,6 @@ storage:
 | `NextEscrow` | instance | u64 |
 | `OpenEscrows(union)` | persistent | Vec of `OpenEscrow{id, member, purpose, amount, remaining, expires}`, oldest first (max 64; 24 Oct) |
 | `CashAtHand(union)` | persistent | i128 |
-| `CashOut(code_hash)` | persistent | `CashOut{member, union, amount, expires}`: only the move's cash-outs (`mint_moved` → `pay_out`) since `request_cash_out` / `reclaim_cash_out` were removed (4 Nov) |
-| `CodeUsed(code_hash)` | persistent | bool (a code is closed for good) |
 | `Rate` | instance | `RateFix{inr_per_usd, valid_until, set_by}` (R77) |
 | `AttesterFixAt` | instance | u64 when the attester last set the fix: at most one per 12 hours (2 Nov) |
 | `Senior` | instance | Address of the senior contract, the one caller of `mint_senior_nin` (2 Nov, set once) |
@@ -170,6 +168,13 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
 - **C8 (16 Oct, the move):** fx_pool gained two keys, `Moved(BytesN<32>)` (persistent, a Polygon burn
   already minted on Stellar) and `MoveBudget` (instance, i128: what the attester may still mint for the move). Appended only: existing keys and values encode as before, so a C7 fx_pool
   can be upgraded in place. The frozen-layout hash changed only because the sample list grew.
+- **The move and the code cash-out removed (4 Nov, executive decision):** `mint_moved`, `pay_out`,
+  `add_move_budget`, `move_budget`, `moved` and the `cash_out` view are gone, and with them the fx_pool keys
+  `CashOut(BytesN<32>)`, `CodeUsed(BytesN<32>)`, `Moved(BytesN<32>)`, `MoveBudget` and the `CashOut` value. The ~3
+  moved Polygon nIN wallets are settled by hand at the desk, outside the contract. Removed only: the remaining keys
+  encode as before (a variant encodes by its name), so an fx_pool can be upgraded in place; any entry left under a
+  removed key is never read again. The frozen-layout hash was re-pinned because the sample list shrank. Error
+  codes 15, 16, 29, 30 are gaps, not reused.
 - **Acre vouchers (27 Oct, executive decision):** machinery counts **acres**, not hours: `Machine.hours_per_week` →
   `acres_per_week`, `Voucher.hours` → `units` (centi tractor acres), `WeekUse` counts centi acres, `Rate` is per acre,
   and the new key `CropRate(union, type, family)`. Field names are part of the stored encoding, so a machinery holding

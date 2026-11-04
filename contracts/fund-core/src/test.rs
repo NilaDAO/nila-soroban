@@ -890,7 +890,7 @@ fn a_loan_needs_her_attested_food_token_from_its_date_up_to_its_amount_once() {
 use nila_fx_pool::{Error as FxError, Purpose};
 use soroban_sdk::{
     testutils::{AuthorizedFunction, MockAuth, MockAuthInvoke},
-    Bytes, IntoVal, Symbol,
+    IntoVal, Symbol,
 };
 
 fn hash(env: &Env, b: u8) -> BytesN<32> {
@@ -3169,122 +3169,6 @@ fn exactly_the_gate_passes_after_interest_raised_the_share_price() {
     assert!(loan(&c, &fx.union, &tok).is_some());
 }
 
-/// The move (M1): her burned Polygon nIN is minted once, by the attester, only while she holds an
-/// attested title, as a cash-out under her code (22 Oct: no nIN in a member's wallet). It never expires;
-/// a leader of her union pays it at the desk.
-#[test]
-fn the_move_mints_her_polygon_nin_once_as_a_desk_cash_out() {
-    let f = setup();
-    let burn = BytesN::from_array(&f.env, &[9; 32]);
-    let code = Bytes::from_array(&f.env, b"moved-code-1");
-    let ch: BytesN<32> = f.env.crypto().sha256(&code).into();
-    let stranger = Address::generate(&f.env);
-    // No budget set: nothing can be minted for the move.
-    assert_eq!(
-        f.fx()
-            .try_mint_moved(&f.attester, &f.union, &f.borrower, &(77 * NIN), &burn, &ch),
-        Err(Ok(nila_fx_pool::Error::MoveBudget))
-    );
-    f.fx().add_move_budget(&(150 * NIN));
-    f.fx().add_move_budget(&(-50 * NIN)); // taken back: 100 left
-    assert_eq!(
-        f.fx().try_add_move_budget(&(-101 * NIN)),
-        Err(Ok(nila_fx_pool::Error::AmountZero))
-    );
-    assert_eq!(
-        f.fx()
-            .try_mint_moved(&f.attester, &f.union, &stranger, &(77 * NIN), &burn, &ch),
-        Err(Ok(nila_fx_pool::Error::NotMember))
-    );
-    assert_eq!(
-        f.fx()
-            .try_mint_moved(&f.leader, &f.union, &f.borrower, &(77 * NIN), &burn, &ch),
-        Err(Ok(nila_fx_pool::Error::Unauthorized))
-    );
-    f.fx()
-        .mint_moved(&f.attester, &f.union, &f.borrower, &(77 * NIN), &burn, &ch);
-    // Nothing in her wallet: the nIN waits in fx_pool under her code.
-    assert_eq!(f.token().balance(&f.borrower), 0);
-    assert_eq!(f.token().balance(&f.fx_id), 77 * NIN);
-    assert!(f.fx().moved(&burn));
-    assert_eq!(
-        f.fx().try_mint_moved(
-            &f.attester,
-            &f.union,
-            &f.borrower,
-            &(77 * NIN),
-            &burn,
-            &hash(&f.env, 40)
-        ),
-        Err(Ok(nila_fx_pool::Error::AlreadyMoved))
-    );
-    // Her code is open: a second move cannot reuse it.
-    assert_eq!(
-        f.fx().try_mint_moved(
-            &f.attester,
-            &f.union,
-            &f.borrower,
-            &NIN,
-            &BytesN::from_array(&f.env, &[6; 32]),
-            &ch
-        ),
-        Err(Ok(nila_fx_pool::Error::CodeUsed))
-    );
-    assert_eq!(
-        f.fx().try_mint_moved(
-            &f.attester,
-            &f.union,
-            &f.borrower,
-            &(10_001 * NIN),
-            &BytesN::from_array(&f.env, &[8; 32]),
-            &hash(&f.env, 41)
-        ),
-        Err(Ok(nila_fx_pool::Error::CapExceeded))
-    );
-    // The budget is drawn down: 23 left of 100.
-    assert_eq!(f.fx().move_budget(), 23 * NIN);
-    assert_eq!(
-        f.fx().try_mint_moved(
-            &f.attester,
-            &f.union,
-            &f.borrower,
-            &(24 * NIN),
-            &BytesN::from_array(&f.env, &[7; 32]),
-            &hash(&f.env, 42)
-        ),
-        Err(Ok(nila_fx_pool::Error::MoveBudget))
-    );
-
-    // Years later it is still there: a moved cash-out never expires.
-    f.at(T0 + 10 * YEAR);
-    // Another union's leader cannot pay it.
-    let other_union = Address::generate(&f.env);
-    let other_leader = Address::generate(&f.env);
-    nila_roles::RolesContractClient::new(&f.env, &f.roles_id).set_leader(
-        &other_union,
-        &other_leader,
-        &true,
-    );
-    assert_eq!(
-        f.fx().try_pay_out(&other_leader, &code),
-        Err(Ok(nila_fx_pool::Error::NotLeader))
-    );
-    // A leader of her union pays it: burned, cash at hand down; her wallet stays at 0.
-    f.scan(Purpose::Treasury, &f.leader, 2_000 * NIN, 1, None)
-        .unwrap();
-    f.scan(Purpose::Invest, &f.neighbour, 1_000 * NIN, 2, None)
-        .unwrap();
-    let hand = f.fx().cash_at_hand(&f.union);
-    assert_eq!(f.fx().pay_out(&f.leader, &code), 77 * NIN);
-    assert_eq!(f.fx().cash_at_hand(&f.union), hand - 77 * NIN);
-    assert_eq!(f.token().balance(&f.borrower), 0);
-    assert_eq!(f.token().balance(&f.fx_id), 0);
-    assert_eq!(
-        f.fx().try_pay_out(&f.leader, &code),
-        Err(Ok(nila_fx_pool::Error::NotFound))
-    );
-}
-
 /// Her investment collected over the desk (22 Oct): she and a leader sign; the claim is burned and
 /// booked against cash at hand like a loan's cash part; nothing reaches her wallet.
 #[test]
@@ -3431,7 +3315,7 @@ fn claim_junior_cash_with_cash_at_hand_short() {
     assert_eq!(fx.token().balance(&fx.borrower), 0);
 }
 
-/// No member path leaves nIN in her wallet: draw, claim over the desk, the move.
+/// No member path leaves nIN in her wallet: draw, claim over the desk.
 #[test]
 fn a_member_holds_no_nin_after_any_member_path() {
     let fx = setup();
@@ -3445,16 +3329,6 @@ fn a_member_holds_no_nin_after_any_member_path() {
     c.request_unbond(&fx.union, &fx.neighbour, &(500 * NIN), &false);
     fx.at(T0 + 14 * 86_400);
     c.claim_junior_cash(&fx.union, &fx.neighbour, &fx.leader, &0);
-    assert_eq!(fx.token().balance(&fx.neighbour), 0);
-    fx.fx().add_move_budget(&(50 * NIN));
-    fx.fx().mint_moved(
-        &fx.attester,
-        &fx.union,
-        &fx.neighbour,
-        &(50 * NIN),
-        &BytesN::from_array(&fx.env, &[3; 32]),
-        &hash(&fx.env, 43),
-    );
     assert_eq!(fx.token().balance(&fx.neighbour), 0);
     assert_eq!(fx.token().balance(&fx.borrower), 0);
 }
