@@ -119,9 +119,10 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     unions**. It has no admin, no settings and no upgrade, so its account code and roles are fixed for good: a new
     account code later means a member upgrades her own account (`account.upgrade(hash)`, her signature); a new
     deployer would give every key a new address. Each union account (3 of 5):
-    `roles.set_union_settings(union, {wait, session_len, session_contracts: [fund_core, machinery, fx_pool],
-    sms_key, fx_pool, usdc})` (fx_pool is in the session list since 26 Oct: a leader pays out an ID-checked member's
-    money at the desk; the demo sets the same three) (wait 1 h – 30 days, session 60–900 s; out of range is refused). Until a union has set them,
+    `roles.set_union_settings(union, {wait, session_len, session_contracts: [fund_core], sms_key, fx_pool, usdc})`
+    (**only fund_core**, executive decision 4 Nov: every leader-session call is fund_core `draw_loan`, `request_unbond`,
+    `claim_junior_cash` or `return_voucher`; their machinery and fx_pool sub-calls are authorised by fund_core, not by
+    the member, so no other contract is in her account's auth contexts; desk cash-outs use her own signed QR) (wait 1 h – 30 days, session 60–900 s; out of range is refused). Until a union has set them,
     its members' accounts get no recovery and no leader session (`NoSettings`). An account is created with no union;
     the member names it herself (`account.set_union(union)`, her signature). **Recovery has one path (executive
     decision 4 Nov):** `account.recover_by_sms(signer, leader)`, signed by the union's `sms_key` and one leader of
@@ -152,7 +153,7 @@ mainnet predates 25 Oct. Kept for a testnet set that does.
       The delay is stored at the constructor and survives upgrades, so check it on the
       deployed contract itself.
 - [ ] `deployer.account_wasm()` = the reproducible `nila_account.wasm` hash and `deployer.roles()` = roles; each
-      union's `roles.union_settings(union)` names this fx_pool, the USDC SAC and [fund_core, machinery, fx_pool].
+      union's `roles.union_settings(union)` names this fx_pool, the USDC SAC and `session_contracts` = [fund_core] only.
 - [ ] `admin` (roles, land_title, fund_viewer, fx_pool, machinery, crop_calendar, senior) and `get_config().admin` (fund_core) =
       the trust account.
 - [ ] The nIN SAC `admin` = fx_pool. The issuer has master weight 0 and no other signers.
