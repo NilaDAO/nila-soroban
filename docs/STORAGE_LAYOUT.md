@@ -118,7 +118,7 @@ storage:
 | `NextEscrow` | instance | u64 |
 | `OpenEscrows(union)` | persistent | Vec of `OpenEscrow{id, member, purpose, amount, remaining, expires}`, oldest first (max 64; 24 Oct) |
 | `CashAtHand(union)` | persistent | i128 |
-| `CashOut(code_hash)` | persistent | `CashOut{member, union, amount, expires}` |
+| `CashOut(code_hash)` | persistent | `CashOut{member, union, amount, expires}`: only the move's cash-outs (`mint_moved` → `pay_out`) since `request_cash_out` / `reclaim_cash_out` were removed (4 Nov) |
 | `CodeUsed(code_hash)` | persistent | bool (a code is closed for good) |
 | `Rate` | instance | `RateFix{inr_per_usd, valid_until, set_by}` (R77) |
 | `AttesterFixAt` | instance | u64 when the attester last set the fix: at most one per 12 hours (2 Nov) |

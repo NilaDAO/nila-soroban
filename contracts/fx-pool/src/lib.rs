@@ -6,8 +6,9 @@
 //!   R17). Member cash opens a 7-day escrow, the union's cash at hand (R15).
 //! - Cash at hand never exceeds the union's treasury; a draw's cash part settles it (D9); an
 //!   escrow left unsettled after 7 days is covered by burning treasury nIN.
-//! - Cash-out (D13, R16): she escrows nIN under a one-time code; the leader's scan pays out
-//!   and burns it; she reclaims it after expiry.
+//! - Cash-out (24 Oct): `cash_out_signed`, her signed QR (NILA:N) scanned by the leader; her nIN
+//!   is clawed back. The code cash-out (`request_cash_out`, `reclaim_cash_out`) was removed on
+//!   4 Nov; `pay_out` stays only for the move's cash-outs (`mint_moved`).
 //! - nIN SAC admin (R8): member trustlines stay deauthorised and are authorised only inside
 //!   the call that moves her nIN (R10), and only for a title holder or leader of the union.
 //!
@@ -47,14 +48,12 @@ contractmeta!(
 
 #[cfg(not(feature = "testnet-short-windows"))]
 pub const DAY: u64 = 86_400;
-/// Ten seconds, not one: a cash-out must outlive a few ledgers between request and pay-out.
+/// Ten seconds, not one: an escrow or offer must outlive a few ledgers.
 #[cfg(feature = "testnet-short-windows")]
 pub const DAY: u64 = 10;
 
 /// Cash at hand is lent out or settled within 7 days (R15).
 pub const ESCROW_TERM: u64 = 7 * DAY;
-/// A cash-out code lives at most 7 days.
-pub const MAX_CASH_OUT_TERM: u64 = 7 * DAY;
 /// ₹10,000 per scan and per cash-out at launch (R76), 7 decimals.
 pub const DEFAULT_MAX_SCAN: i128 = 10_000 * 10_000_000;
 /// Open escrows per union: the leader settles before scanning more.
@@ -181,7 +180,7 @@ pub enum DataKey {
     /// A union's open escrows, oldest first, in one entry (24 Oct).
     OpenEscrows(Address),
     CashOut(BytesN<32>),
-    /// A code paid out or reclaimed: never accepted again (its preimage is public).
+    /// A code paid out: never accepted again (its preimage is public).
     CodeUsed(BytesN<32>),
     Rate,
     /// The trust's anchor account: it accepts LPs after SEP-12 (R20).
@@ -237,7 +236,7 @@ pub struct OpenEscrow {
     pub expires: u64,
 }
 
-/// Her nIN held under a one-time code until the leader pays out or she reclaims (D13).
+/// Her moved nIN held under a one-time code until the leader pays out (`mint_moved`, no expiry).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CashOut {
@@ -312,17 +311,6 @@ pub struct EscrowExpired {
 }
 
 #[contractevent]
-pub struct CashOutRequested {
-    #[topic]
-    pub union: Address,
-    #[topic]
-    pub member: Address,
-    pub code_hash: BytesN<32>,
-    pub amount: i128,
-    pub expires: u64,
-}
-
-#[contractevent]
 pub struct CashOutPaid {
     #[topic]
     pub union: Address,
@@ -341,16 +329,6 @@ pub struct CashOutSigned {
     #[topic]
     pub member: Address,
     pub leader: Address,
-    pub amount: i128,
-}
-
-#[contractevent]
-pub struct CashOutReclaimed {
-    #[topic]
-    pub union: Address,
-    #[topic]
-    pub member: Address,
-    pub code_hash: BytesN<32>,
     pub amount: i128,
 }
 
@@ -1321,65 +1299,7 @@ impl FxPoolContract {
             .has(&DataKey::Moved(polygon_burn))
     }
 
-    // ---------- member cash-out (D13, R16) ----------
-
-    /// A7: her nIN moves into fx_pool under `code_hash` = sha256 of the one-time code she
-    /// shows the leader. Expires at most 7 days out.
-    pub fn request_cash_out(
-        env: Env,
-        member: Address,
-        union: Address,
-        amount: i128,
-        code_hash: BytesN<32>,
-        expires: u64,
-    ) -> Result<(), Error> {
-        require_not_paused(&env)?;
-        member.require_auth();
-        check_positive(amount)?;
-        let now = env.ledger().timestamp();
-        if expires <= now || expires > now + MAX_CASH_OUT_TERM {
-            return Err(Error::BadExpiry);
-        }
-        if !is_member_or_leader(&env, &union, &member) {
-            return Err(Error::NotMember);
-        }
-        let k = DataKey::CashOut(code_hash.clone());
-        if env.storage().persistent().has(&k)
-            || env
-                .storage()
-                .persistent()
-                .has(&DataKey::CodeUsed(code_hash.clone()))
-        {
-            return Err(Error::CodeUsed);
-        }
-        sandwich_transfer(
-            &env,
-            &member,
-            &env.current_contract_address(),
-            &member,
-            amount,
-        );
-        env.storage().persistent().set(
-            &k,
-            &CashOut {
-                member: member.clone(),
-                union: union.clone(),
-                amount,
-                expires,
-            },
-        );
-        bump(&env, &k);
-        CashOutRequested {
-            union,
-            member,
-            code_hash,
-            amount,
-            expires,
-        }
-        .publish(&env);
-        bump_instance(&env);
-        Ok(())
-    }
+    // ---------- cash-out: the move's code (pay_out) and the signed QR ----------
 
     /// A1b / C6: the leader scanned her code and counted the rupees out. The nIN burns and
     /// the cash leaves the union's cash at hand.
@@ -1437,34 +1357,6 @@ impl FxPoolContract {
         .publish(&env);
         bump_instance(&env);
         Ok(amount)
-    }
-
-    /// Anyone, after expiry: an uncollected cash-out goes back to her wallet.
-    pub fn reclaim_cash_out(env: Env, code_hash: BytesN<32>) -> Result<i128, Error> {
-        let k = DataKey::CashOut(code_hash.clone());
-        let co: CashOut = env.storage().persistent().get(&k).ok_or(Error::NotFound)?;
-        if env.ledger().timestamp() < co.expires {
-            return Err(Error::NotExpired);
-        }
-        env.storage().persistent().remove(&k);
-        close_code(&env, &code_hash);
-        // Her own nIN back (C12): the one authorisation without a fresh membership check.
-        sandwich_transfer(
-            &env,
-            &env.current_contract_address(),
-            &co.member,
-            &co.member,
-            co.amount,
-        );
-        CashOutReclaimed {
-            union: co.union,
-            member: co.member,
-            code_hash,
-            amount: co.amount,
-        }
-        .publish(&env);
-        bump_instance(&env);
-        Ok(co.amount)
     }
 
     // ---------- upgrade (admin, timelock, nila_common::upgrade) ----------

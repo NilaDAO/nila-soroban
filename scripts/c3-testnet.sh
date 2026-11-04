@@ -199,42 +199,6 @@ expect "member2 trustline authorised" "$(view "$NIN_SAC" authorized --id ${P}-me
 must_fail "member2 sending nIN to member herself (R10, C2)" stellar contract invoke --id "$NIN_SAC" \
   --source ${P}-member2 -- transfer --from ${P}-member2 --to ${P}-member --amount $NIN
 
-log "cash-out (D13): member2 escrows 250 under a one-time code; the leader scans and pays out"
-CODE=$(openssl rand -hex 16)
-CODE_HASH=$(printf '%s' "$CODE" | xxd -r -p | shasum -a 256 | awk '{print $1}')
-NOW=$(ledger_now)
-must_fail "a cash-out above ₹10,000" stellar contract invoke --id "$FX" --source ${P}-member2 -- \
-  request_cash_out --member ${P}-member2 --union "$UNION" --amount $((10001 * NIN)) \
-  --code_hash "$CODE_HASH" --expires $((NOW + 60))
-must_fail "a cash-out longer than 7 days" stellar contract invoke --id "$FX" --source ${P}-member2 -- \
-  request_cash_out --member ${P}-member2 --union "$UNION" --amount $NIN \
-  --code_hash "$CODE_HASH" --expires $((NOW + 200))
-TX_CASH_OUT=$(tx stellar contract invoke --id "$FX" --source ${P}-member2 -- \
-  request_cash_out --member ${P}-member2 --union "$UNION" --amount $((250 * NIN)) \
-  --code_hash "$CODE_HASH" --expires $((NOW + 60)))
-expect "member2 trustline after the cash-out" "$(view "$NIN_SAC" authorized --id ${P}-member2)" "false"
-must_fail "pay-out by a non-leader" stellar contract invoke --id "$FX" --source ${P}-member -- \
-  pay_out --leader ${P}-member --code "$CODE"
-TX_PAY_OUT=$(tx stellar contract invoke --id "$FX" --source ${P}-leader -- \
-  pay_out --leader ${P}-leader --code "$CODE")
-must_fail "the same code paid twice" stellar contract invoke --id "$FX" --source ${P}-leader -- \
-  pay_out --leader ${P}-leader --code "$CODE"
-expect "fx_pool holds no nIN" "$(view "$NIN_SAC" balance --id "$FX")" '"0"'
-
-log "cash-out never collected: reclaimed by anyone after expiry, back to her wallet"
-CODE2=$(openssl rand -hex 16)
-CODE2_HASH=$(printf '%s' "$CODE2" | xxd -r -p | shasum -a 256 | awk '{print $1}')
-NOW=$(ledger_now)
-tx stellar contract invoke --id "$FX" --source ${P}-member2 -- \
-  request_cash_out --member ${P}-member2 --union "$UNION" --amount $((100 * NIN)) \
-  --code_hash "$CODE2_HASH" --expires $((NOW + 20)) >/dev/null
-must_fail "reclaim before expiry" stellar contract invoke --id "$FX" --source ${P}-anyone -- \
-  reclaim_cash_out --code_hash "$CODE2_HASH"
-wait_until $((NOW + 21))
-TX_RECLAIM=$(tx stellar contract invoke --id "$FX" --source ${P}-anyone -- \
-  reclaim_cash_out --code_hash "$CODE2_HASH")
-expect "member2 wallet after reclaim" "$(view "$NIN_SAC" balance --id ${P}-member2)" "\"$((W2 - 250 * NIN))\""
-
 log "escrow 2 (member2's invest) left unsettled: after 7 short days anyone burns it from the treasury"
 TREASURY_BEFORE=$(view "$CORE" union_treasury --union "$UNION" | tr -d '"')
 E2_EXPIRES=$(view "$FX" get_escrow --escrow_id 2 | python3 -c 'import json,sys; print(json.load(sys.stdin)["expires"])')
@@ -276,9 +240,6 @@ TX_DRAW=$TX_DRAW
 TX_SCAN_REPAY=$TX_SCAN_REPAY
 TX_UNBOND=$TX_UNBOND
 TX_CLAIM=$TX_CLAIM
-TX_CASH_OUT=$TX_CASH_OUT
-TX_PAY_OUT=$TX_PAY_OUT
-TX_RECLAIM=$TX_RECLAIM
 TX_EXPIRE=$TX_EXPIRE
 EOF
 log "wrote $OUT (explorer: https://stellar.expert/explorer/testnet/tx/<hash>)"

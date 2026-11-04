@@ -81,10 +81,6 @@ fn pause_stops_the_desk() {
         Err(Ok(Error::Paused))
     );
     assert_eq!(
-        f.try_request_cash_out(&who, &who, &NIN, &h, &1_700_000_100),
-        Err(Ok(Error::Paused))
-    );
-    assert_eq!(
         f.try_pay_out(&who, &Bytes::from_array(&env, &[1])),
         Err(Ok(Error::Paused))
     );
@@ -118,7 +114,6 @@ fn unknown_escrow_and_code() {
     let u = Address::generate(&env);
     assert_eq!(f.try_burn_expired_escrow(&u, &1), Err(Ok(Error::NotFound)));
     let h = BytesN::from_array(&env, &[3; 32]);
-    assert_eq!(f.try_reclaim_cash_out(&h), Err(Ok(Error::NotFound)));
     assert_eq!(f.cash_out(&h), None);
     assert_eq!(f.cash_at_hand(&Address::generate(&env)), 0);
 }

@@ -153,7 +153,7 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
       `upgrade_delay` = 172800 (48 h) on every contract: demo builds have a 60-second timelock.
 - [ ] One small end-to-end run per union, with real people:
   - treasury scan, invest scan, draw, repay scan;
-  - a cash-out and a pay-out (a leader's; members hold no nIN, 22 Oct);
+  - a signed cash-out (`cash_out_signed`, NILA:N QR scanned by the leader; the code cash-out was removed 4 Nov);
   - a member's investment collected over the desk (`claim_junior_cash`) and a moved member's cash-out
     (`mint_moved` → `pay_out`); her nIN balance stays 0 throughout;
   - a leader's treasury withdraw and her deposit of her own nIN back (C10, sponsored by the node, O15).
@@ -175,7 +175,6 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
   - **fund_core** stops every money path, and expiry burns stop with it. The public
     `mark_default` stops too (D-d), so a long pause delays defaults.
   - **fx_pool** stops scans, cash-outs, pay-outs and expiry burns, the attester's fix and LP settles (2 Nov).
-    Reclaim of her own nIN stays open.
   - **senior** (`set_paused`) stops deposits, exits, income payouts and the vault's guarantee (2 Nov).
   - **land_title** stops title writes (`set_title`, `set_record`, `burn_title`).
   - **roles and fund_viewer have no pause**; they move no money.

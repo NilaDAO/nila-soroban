@@ -1305,98 +1305,7 @@ fn cash_out_signed_burns_her_nin_at_the_desk() {
 }
 
 #[test]
-fn cash_out_pay_out_and_reclaim() {
-    let fx = setup();
-    let c = fx.core();
-    let f = fx.fx();
-    fx.scan(Purpose::Treasury, &fx.leader, 2_000 * NIN, 1, None)
-        .unwrap();
-    fx.scan(Purpose::Invest, &fx.neighbour, 1_000 * NIN, 2, None)
-        .unwrap();
-    fx.make_leader(&fx.neighbour);
-    c.request_unbond(&fx.union, &fx.neighbour, &(600 * NIN), &false);
-    fx.at(T0 + 14 * 86_400);
-    c.claim(&fx.union, &fx.neighbour, &0, &false);
-    let now = T0 + 14 * 86_400;
-
-    // A7: her nIN into fx_pool under the code's hash; only she signs.
-    let code = Bytes::from_array(&fx.env, b"meena-code-1");
-    let code_hash: BytesN<32> = fx.env.crypto().sha256(&code).into();
-    let expires = now + 86_400;
-    fx.env.mock_auths(&[MockAuth {
-        address: &fx.neighbour,
-        invoke: &MockAuthInvoke {
-            contract: &fx.fx_id,
-            fn_name: "request_cash_out",
-            args: (
-                fx.neighbour.clone(),
-                fx.union.clone(),
-                250 * NIN,
-                code_hash.clone(),
-                expires,
-            )
-                .into_val(&fx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &fx.nin,
-                fn_name: "transfer",
-                args: (fx.neighbour.clone(), fx.fx_id.clone(), 250 * NIN).into_val(&fx.env),
-                sub_invokes: &[],
-            }],
-        },
-    }]);
-    f.request_cash_out(&fx.neighbour, &fx.union, &(250 * NIN), &code_hash, &expires);
-    fx.env.mock_all_auths();
-    assert!(!fx.authorized(&fx.neighbour));
-    assert_eq!(fx.token().balance(&fx.fx_id), 250 * NIN);
-    assert_eq!(fx.token().balance(&fx.neighbour), 350 * NIN);
-
-    // The leader scans the code and counts out the rupees: burned, cash at hand down.
-    let hand = f.cash_at_hand(&fx.union);
-    assert_eq!(
-        f.try_pay_out(&fx.borrower, &code),
-        Err(Ok(FxError::NotLeader))
-    );
-    assert_eq!(f.pay_out(&fx.leader, &code), 250 * NIN);
-    assert_eq!(f.cash_at_hand(&fx.union), hand - 250 * NIN);
-    assert_eq!(f.try_pay_out(&fx.leader, &code), Err(Ok(FxError::NotFound)));
-    fx.assert_fx_empty();
-
-    // Caps: at most 7 days, a code is used once while open (no ₹10,000 cap since 30 Oct).
-    let h2 = hash(&fx.env, 9);
-    assert_eq!(
-        f.try_request_cash_out(&fx.neighbour, &fx.union, &NIN, &h2, &(now + 8 * 86_400)),
-        Err(Ok(FxError::BadExpiry))
-    );
-    let stranger = Address::generate(&fx.env);
-    assert_eq!(
-        f.try_request_cash_out(&stranger, &fx.union, &NIN, &h2, &expires),
-        Err(Ok(FxError::NotMember))
-    );
-
-    // Never collected: after expiry anyone returns it to her wallet, deauthorised again.
-    f.request_cash_out(&fx.neighbour, &fx.union, &(100 * NIN), &h2, &expires);
-    assert_eq!(
-        f.try_request_cash_out(&fx.neighbour, &fx.union, &NIN, &h2, &expires),
-        Err(Ok(FxError::CodeUsed))
-    );
-    assert_eq!(f.try_reclaim_cash_out(&h2), Err(Ok(FxError::NotExpired)));
-    fx.at(expires);
-    let code2 = Bytes::from_array(&fx.env, &[9; 32]);
-    assert_eq!(
-        f.try_pay_out(&fx.leader, &code2),
-        Err(Ok(FxError::NotFound))
-    );
-    fx.env.set_auths(&[]);
-    assert_eq!(f.reclaim_cash_out(&h2), 100 * NIN);
-    fx.env.mock_all_auths();
-    assert_eq!(fx.token().balance(&fx.neighbour), 350 * NIN);
-    assert!(!fx.authorized(&fx.neighbour));
-    fx.assert_fx_empty();
-    fx.assert_conserved();
-}
-
-#[test]
-fn fx_pool_slot_set_once_and_codes_used_once() {
+fn fx_pool_slot_set_once() {
     let fx = setup();
     let c = fx.core();
     assert_eq!(
@@ -1412,16 +1321,6 @@ fn fx_pool_slot_set_once_and_codes_used_once() {
     c.request_unbond(&fx.union, &fx.neighbour, &(400 * NIN), &false);
     fx.at(T0 + 14 * 86_400);
     c.claim(&fx.union, &fx.neighbour, &0, &false);
-    let code = Bytes::from_array(&fx.env, b"one-time");
-    let h: BytesN<32> = fx.env.crypto().sha256(&code).into();
-    let exp = T0 + 15 * 86_400;
-    f.request_cash_out(&fx.neighbour, &fx.union, &(100 * NIN), &h, &exp);
-    f.pay_out(&fx.leader, &code);
-    // R16: the code is closed; its preimage is public now, so it is never accepted again.
-    assert_eq!(
-        f.try_request_cash_out(&fx.neighbour, &fx.union, &(100 * NIN), &h, &exp),
-        Err(Ok(FxError::CodeUsed))
-    );
     // While fund_core is paused no expiry burns the treasury.
     let e = fx
         .scan(Purpose::Invest, &fx.borrower, 100 * NIN, 3, None)
@@ -3356,14 +3255,8 @@ fn the_move_mints_her_polygon_nin_once_as_a_desk_cash_out() {
         Err(Ok(nila_fx_pool::Error::MoveBudget))
     );
 
-    // Years later it is still there: a moved cash-out never expires and can never be reclaimed.
+    // Years later it is still there: a moved cash-out never expires.
     f.at(T0 + 10 * YEAR);
-    f.env.set_auths(&[]);
-    assert_eq!(
-        f.fx().try_reclaim_cash_out(&ch),
-        Err(Ok(nila_fx_pool::Error::NotExpired))
-    );
-    f.env.mock_all_auths();
     // Another union's leader cannot pay it.
     let other_union = Address::generate(&f.env);
     let other_leader = Address::generate(&f.env);
