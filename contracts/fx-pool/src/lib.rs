@@ -619,7 +619,8 @@ fn close_code(env: &Env, code_hash: &BytesN<32>) {
     bump(env, &k);
 }
 
-/// A leader's own swap: not paused, a leader of the union, her identity checked, a fresh rate.
+/// Her own swap: not paused, a leader or title holder of the union (self mode, executive decision 4 Nov), her
+/// identity checked, a fresh rate.
 fn leader_swap_checks(
     env: &Env,
     union: &Address,
@@ -627,7 +628,10 @@ fn leader_swap_checks(
     amount: i128,
 ) -> Result<RateFix, Error> {
     require_not_paused(env)?;
-    require_leader(env, union, leader)?;
+    leader.require_auth();
+    if !is_member_or_leader(env, union, leader) {
+        return Err(Error::NotMember);
+    }
     if !env
         .storage()
         .persistent()
@@ -1083,7 +1087,7 @@ impl FxPoolContract {
     }
 
     /// A leader's own swap, USDC → nIN in her wallet (executive decision 22 Oct): a leader of the union whose identity
-    /// the anchor checked. Her USDC stays in fx_pool, in the union's leader-swap bucket, as the backing of that nIN.
+    /// the anchor checked; since 4 Nov also a title holder of the union in self mode, `leader` = her account. Her USDC stays in fx_pool, in the union's leader-swap bucket, as the backing of that nIN.
     pub fn swap_usdc_to_nin(
         env: Env,
         leader: Address,

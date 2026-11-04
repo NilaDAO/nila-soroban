@@ -3802,11 +3802,11 @@ fn leader_swaps_usdc_to_nin_and_back_from_her_bucket_only() {
     );
     f.set_anchor(&Address::generate(&fx.env));
     f.set_id_checked(&fx.leader, &true, &loan_id(&fx.env, 0x51));
-    // Not a leader of the union: refused.
+    // Not a leader or member of the union: refused.
     let outsider = Address::generate(&fx.env);
     assert_eq!(
         f.try_swap_usdc_to_nin(&outsider, &fx.union, &(10 * NIN)),
-        Err(Ok(FxError::NotLeader))
+        Err(Ok(FxError::NotMember))
     );
     // Treasury USDC sits in its own bucket and is never paid out by a swap back.
     fx.treasury_usdc(950 * NIN).unwrap();
@@ -3845,6 +3845,58 @@ fn leader_swaps_usdc_to_nin_and_back_from_her_bucket_only() {
         f.try_swap_nin_to_usdc(&fx.leader, &fx.union, &NIN),
         Err(Ok(FxError::StaleOracle))
     );
+}
+
+/// Self mode (executive decision 4 Nov): an ID-checked title holder of the union swaps both ways like a leader;
+/// without the ID check, or holding her title in another union, she is refused.
+#[test]
+fn id_checked_member_swaps_in_self_mode() {
+    let fx = setup();
+    let f = fx.fx();
+    fx.env.mock_all_auths();
+    f.override_rate(&(95 * NIN), &(T0 + 86_400));
+    f.set_anchor(&Address::generate(&fx.env));
+    let her = Address::generate(&fx.env);
+    fx.give_title(&her);
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&her, &(10 * NIN));
+    // Member, identity not checked: refused.
+    assert_eq!(
+        f.try_swap_usdc_to_nin(&her, &fx.union, &(10 * NIN)),
+        Err(Ok(FxError::NotIdChecked))
+    );
+    // ID-checked, but her title is in another union: refused.
+    let other_union = Address::generate(&fx.env);
+    let away = Address::generate(&fx.env);
+    LandTitleContractClient::new(&fx.env, &fx.titles_id).set_title(
+        &901,
+        &fx.attester,
+        &away,
+        &other_union,
+        &BytesN::from_array(&fx.env, &[0xAB; 20]),
+        &BytesN::from_array(&fx.env, &[1; 32]),
+        &BytesN::from_array(&fx.env, &[2; 32]),
+    );
+    f.set_id_checked(&away, &true, &loan_id(&fx.env, 0x52));
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&away, &(10 * NIN));
+    assert_eq!(
+        f.try_swap_usdc_to_nin(&away, &fx.union, &(10 * NIN)),
+        Err(Ok(FxError::NotMember))
+    );
+    assert_eq!(
+        f.try_swap_nin_to_usdc(&away, &fx.union, &NIN),
+        Err(Ok(FxError::NotMember))
+    );
+    // ID-checked member of the union: both ways, through the union's swap bucket.
+    f.set_id_checked(&her, &true, &loan_id(&fx.env, 0x53));
+    assert_eq!(f.swap_usdc_to_nin(&her, &fx.union, &(10 * NIN)), 950 * NIN);
+    assert_eq!(fx.token().balance(&her), 950 * NIN);
+    assert_eq!(f.leader_swap_usdc(&fx.union), 10 * NIN);
+    assert_eq!(f.swap_nin_to_usdc(&her, &fx.union, &(475 * NIN)), 5 * NIN);
+    assert_eq!(fx.token().balance(&her), 475 * NIN);
+    assert_eq!(f.leader_swap_usdc(&fx.union), 5 * NIN);
+    // Her own signature is required.
+    fx.env.set_auths(&[]);
+    assert!(f.try_swap_nin_to_usdc(&her, &fx.union, &NIN).is_err());
 }
 
 /// The last draw date and the public lapse (executive decision 25 Oct): no floor, drawn up to and on its last
