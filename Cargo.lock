@@ -1114,15 +1114,8 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "nila-common",
+ "nila-roles",
  "p256",
- "soroban-sdk",
-]
-
-[[package]]
-name = "nila-account-factory"
-version = "0.1.0"
-dependencies = [
- "nila-common",
  "soroban-sdk",
 ]
 
@@ -1142,12 +1135,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nila-deployer"
+version = "0.1.0"
+dependencies = [
+ "nila-account",
+ "nila-common",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "nila-fund-core"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "nila-account",
- "nila-account-factory",
  "nila-common",
  "nila-crop-calendar",
  "nila-fx-pool",
@@ -1155,6 +1156,7 @@ dependencies = [
  "nila-machinery",
  "nila-math",
  "nila-roles",
+ "nila-senior",
  "soroban-sdk",
 ]
 
@@ -1202,6 +1204,14 @@ dependencies = [
 
 [[package]]
 name = "nila-roles"
+version = "0.1.0"
+dependencies = [
+ "nila-common",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "nila-senior"
 version = "0.1.0"
 dependencies = [
  "nila-common",

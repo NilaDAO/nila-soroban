@@ -3,6 +3,10 @@
 // generate client and spec items outside the impl, so the allow is crate-wide.
 #![allow(clippy::too_many_arguments)]
 
+//! TEMP (executive decision 3 Nov): a stand-in until membership on Stellar is settled. The land
+//! title stays on Polygon (`NilaLandTitle`); this contract is not the title and is to be removed.
+//! Proposal to replace it: `decisions/006-signed-title-attestation.md`.
+//!
 //! Stellar mirror of the Polygon land titles (`NilaLandTitle`).
 //!
 //! There is no member list. As on Polygon (`GenericFundCore` checks
@@ -27,7 +31,7 @@ soroban_sdk::contractmeta!(
 );
 contractmeta!(
     key = "desc",
-    val = "Nila land titles mirrored from Polygon; holding one is membership"
+    val = "TEMP: stand-in for the Polygon land title (NilaLandTitle), to be removed"
 );
 
 #[contracterror]

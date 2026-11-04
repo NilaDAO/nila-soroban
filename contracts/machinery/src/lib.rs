@@ -6,8 +6,9 @@
 //!   account (its leaders, 3 of 5); open and adjustable, like the prepay share (executive decision, 12 Oct).
 //!   Optionally a price per machine type **and crop family** (27 Oct: hauling sugarcane is not hauling paddy);
 //!   without one the type's price applies.
-//! - **Machines** (D15, R82, R83): a leader registers a member's machine (L13); the owner
-//!   confirms (N9) and can put it on hold with a reason.
+//! - **Machines** (D15, R82, R83): a leader registers a member's machine (L13); it is available from
+//!   its registration (executive decision 3 Nov: no owner confirmation, N9 removed); the owner can put
+//!   it on hold with a reason.
 //! - **Vouchers** (R51–R55): a loan's voucher part is machinery in **tractor acres** (executive
 //!   decision 27 Oct; was tractor hours, 23 Oct), held in hundredths (`units`): one tractor acre is the
 //!   price of machine type 1 (tractor + rotavator) for an acre; an acre of another machine (or crop) uses
@@ -16,7 +17,8 @@
 //!   ledger, ~48 h); the owner scans it and claims the acres worked (D19), never more than the crop
 //!   share's own area (its token id's area), within the machine's acres a week (R84).
 //! - **Pay** (D18, R85): at the claim fund_core pays the owner the prepay (diesel plus a share of
-//!   the driver part, X32) from senior money; the rest is pending until she repays.
+//!   the driver part, X32) from senior money; the rest is postpaid, paid as she repays and by senior
+//!   if she defaults (owner split, 1 Nov), so the owner carries no default risk.
 //!
 //! Money never sits here: fund_core moves it. This contract keeps the facts.
 
@@ -76,7 +78,7 @@ pub enum Error {
     NoRate = 7,
     BadArg = 8,
     TooManyTypes = 9,
-    /// Not confirmed by the owner, or on hold.
+    /// On hold.
     Unavailable = 10,
     /// More than her authorisation, the voucher, the share's area or the machine's week allows.
     TooMuchWork = 11,
@@ -110,6 +112,7 @@ pub struct Machine {
     pub acres_per_week: u32,
     /// Hash of the 8 photos at 45° (L13); the photos stay off-chain.
     pub photos_hash: BytesN<32>,
+    /// Always true since 3 Nov (a machine is available from its registration); kept for the layout.
     pub confirmed: bool,
     pub on_hold: bool,
     /// 0 none, 1 in repair, 2 driver not available, 3 other (R83).
@@ -144,6 +147,9 @@ pub enum DataKey {
     CropRate(Address, u32, u32),
     Types(Address),
     PrepayDriverBp(Address),
+    /// Which parts of the price go to the union treasury, not the owner (executive decision 2 Nov): a mask
+    /// of `PART_*` bits; unset = depreciation and margin.
+    UnionParts(Address),
     NextMachine,
     Machine(u64),
     Voucher(Address, BytesN<32>),
@@ -223,6 +229,15 @@ pub struct VoucherClaimed {
     pub units: u32,
     pub prepay: i128,
     pub pending: i128,
+    /// The union's part of the price (2 Nov), held until she repays.
+    pub to_union: i128,
+}
+
+#[contractevent]
+pub struct UnionPartsSet {
+    #[topic]
+    pub union: Address,
+    pub mask: u32,
 }
 
 #[contractevent]
@@ -292,6 +307,31 @@ fn bump(env: &Env, key: &DataKey) {
         .extend_ttl(key, nila_common::TTL_THRESHOLD, nila_common::TTL_BUMP);
 }
 
+// The union's share of the price (executive decision 2 Nov): not every part of a voucher is the owner's.
+// The union picks which of maintenance, insurance, depreciation and margin go to its treasury; driver
+// and diesel are always the owner's (they are the prepay).
+pub const PART_MAINTENANCE: u32 = 1 << 2;
+pub const PART_INSURANCE: u32 = 1 << 3;
+pub const PART_DEPRECIATION: u32 = 1 << 4;
+pub const PART_MARGIN: u32 = 1 << 5;
+const UNION_PART_BITS: u32 = PART_MAINTENANCE | PART_INSURANCE | PART_DEPRECIATION | PART_MARGIN;
+const DEFAULT_UNION_PARTS: u32 = PART_DEPRECIATION | PART_MARGIN;
+
+fn union_parts(env: &Env, union: &Address) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::UnionParts(union.clone()))
+        .unwrap_or(DEFAULT_UNION_PARTS)
+}
+
+fn union_per_acre(r: &RateParts, mask: u32) -> i128 {
+    let pick = |bit: u32, v: i128| if mask & bit != 0 { v } else { 0 };
+    pick(PART_MAINTENANCE, r.maintenance)
+        + pick(PART_INSURANCE, r.insurance)
+        + pick(PART_DEPRECIATION, r.depreciation)
+        + pick(PART_MARGIN, r.margin)
+}
+
 fn prepay_driver_bp(env: &Env, union: &Address) -> u32 {
     env.storage()
         .persistent()
@@ -359,10 +399,14 @@ fn units_for(r: &RateParts, tractor: &RateParts, centi: u32) -> Result<u32, Erro
 }
 
 fn load_machine(env: &Env, id: u64) -> Result<Machine, Error> {
-    env.storage()
+    let mut m: Machine = env
+        .storage()
         .persistent()
         .get(&DataKey::Machine(id))
-        .ok_or(Error::NotFound)
+        .ok_or(Error::NotFound)?;
+    // Machines registered before 3 Nov may be stored unconfirmed; they are available too.
+    m.confirmed = true;
+    Ok(m)
 }
 
 fn save_machine(env: &Env, id: u64, m: &Machine) {
@@ -527,9 +571,24 @@ impl MachineryContract {
         Ok(())
     }
 
+    /// Which parts of the price go to the union treasury (executive decision 2 Nov): `PART_*` bits of
+    /// maintenance, insurance, depreciation and margin; driver and diesel stay the owner's.
+    pub fn set_union_parts(env: Env, union: Address, mask: u32) -> Result<(), Error> {
+        union.require_auth();
+        if mask & !UNION_PART_BITS != 0 {
+            return Err(Error::BadArg);
+        }
+        let k = DataKey::UnionParts(union.clone());
+        env.storage().persistent().set(&k, &mask);
+        bump(&env, &k);
+        UnionPartsSet { union, mask }.publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
     // ---------- machines (D15, R82, R83) ----------
 
-    /// L13: a leader registers a member's machine; the owner confirms it on her phone.
+    /// L13: a leader registers a member's machine; it is available at once (no owner confirmation).
     pub fn register_machine(
         env: Env,
         leader: Address,
@@ -569,7 +628,7 @@ impl MachineryContract {
                 machine_type,
                 acres_per_week,
                 photos_hash,
-                confirmed: false,
+                confirmed: true,
                 on_hold: false,
                 hold_reason: 0,
             },
@@ -586,15 +645,13 @@ impl MachineryContract {
         Ok(id)
     }
 
-    /// N9: the owner confirms her machine.
+    /// Kept for old clients only: a no-op since 3 Nov (a machine is available from its
+    /// registration; N9 removed). Still checks the owner, writes nothing.
     pub fn confirm_machine(env: Env, owner: Address, machine_id: u64) -> Result<(), Error> {
         owner.require_auth();
-        let mut m = load_machine(&env, machine_id)?;
-        if m.owner != owner {
+        if load_machine(&env, machine_id)?.owner != owner {
             return Err(Error::NotOwner);
         }
-        m.confirmed = true;
-        save_machine(&env, machine_id, &m);
         Ok(())
     }
 
@@ -710,7 +767,9 @@ impl MachineryContract {
     /// acre (27 Oct; were hours), never more than the crop share's own area, using ≤ `max_units` centi tractor
     /// acres, the units she signed for: her authorisation of (union, token_id, max_units) is used once, its
     /// expiry ledger ~48 h out. The price is the machine type's on the share's crop (its own crop price if the
-    /// union set one). fund_core pays the owner in full from the voucher's reserve (26 Oct).
+    /// union set one). Owner split (1 Nov): fund_core pays the prepay (diesel plus the union's share of the
+    /// driver part, X32) at once from the voucher's reserve; the rest is postpaid, paid when she repays and by
+    /// senior if she defaults.
     #[allow(clippy::too_many_arguments)]
     pub fn claim(
         env: Env,
@@ -727,7 +786,7 @@ impl MachineryContract {
         if m.owner != owner {
             return Err(Error::NotOwner);
         }
-        if m.union != union || !m.confirmed || m.on_hold {
+        if m.union != union || m.on_hold {
             return Err(Error::Unavailable);
         }
         let mut v = load_voucher(&env, &union, &token_id)?;
@@ -765,15 +824,23 @@ impl MachineryContract {
         env.storage()
             .temporary()
             .extend_ttl(&wk, WEEK_USE_LEDGERS, WEEK_USE_LEDGERS);
-        // The owner is paid in full at the claim (26 Oct): the price an acre × the acres worked,
-        // from the voucher's reserve; her debt is separate.
-        let prepay = total_per_acre(&r) * i128::from(acres) / 100;
-        let pending = 0;
+        // Owner split (1 Nov): the price an acre × the acres worked, the prepay part now, the rest
+        // postpaid from her repayment (D18, X32). Her debt is separate. The union's parts (2 Nov) are
+        // taken out first and go to its treasury as she repays.
+        let total = total_per_acre(&r) * i128::from(acres) / 100;
+        let to_union = union_per_acre(&r, union_parts(&env, &union)) * i128::from(acres) / 100;
+        let owner_total = total - to_union;
+        let prepay = core::cmp::min(
+            prepay_per_acre(&r, prepay_driver_bp(&env, &union)) * i128::from(acres) / 100,
+            owner_total,
+        );
+        let pending = owner_total - prepay;
         // One claim per signature; the rest of her voucher stays with her (R55).
         v.used += units;
         save_voucher(&env, &union, &token_id, &v);
-        FundCoreClient::new(&env, &core_addr(&env)?)
-            .pay_voucher(&union, &token_id, &owner, &units, &prepay);
+        FundCoreClient::new(&env, &core_addr(&env)?).pay_voucher(
+            &union, &token_id, &owner, &units, &prepay, &pending, &to_union,
+        );
         VoucherClaimed {
             union,
             token_id,
@@ -783,6 +850,7 @@ impl MachineryContract {
             units,
             prepay,
             pending,
+            to_union,
         }
         .publish(&env);
         bump_instance(&env);
@@ -826,14 +894,17 @@ impl MachineryContract {
         share_of(&token_id)
     }
 
+    /// The union's parts of the price (`PART_*` bits; default depreciation and margin).
+    pub fn union_parts(env: Env, union: Address) -> u32 {
+        union_parts(&env, &union)
+    }
+
     pub fn prepay_share(env: Env, union: Address) -> u32 {
         prepay_driver_bp(&env, &union)
     }
 
     pub fn machine(env: Env, machine_id: u64) -> Option<Machine> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Machine(machine_id))
+        load_machine(&env, machine_id).ok()
     }
 
     pub fn voucher(env: Env, union: Address, token_id: BytesN<32>) -> Option<Voucher> {

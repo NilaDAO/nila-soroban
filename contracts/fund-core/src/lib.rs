@@ -18,8 +18,8 @@ use soroban_sdk::{
 use types::{LoanState, Market, UnionBook, FLAG_CLOSED, FLAG_DEFAULTED, FLAG_DRAWN, FLAG_OVERDUE};
 
 pub use types::{
-    Config, Error, FoodToken, FoodTokenFinal, FoodTokenView, Investor, Position, UnionConfig,
-    VoucherBook,
+    Config, Dues, Error, FoodToken, FoodTokenFinal, FoodTokenView, Investor, OwnerDue, Position,
+    SeniorPosition, UnionConfig, VoucherBook,
 };
 
 contractmeta!(key = "binver", val = "0.2.0");
@@ -67,6 +67,8 @@ pub const UNBONDING: u64 = 14 * DAY;
 pub const REPAY_WINDOW: u64 = 21 * DAY;
 // Open loans per member, for `loans_of` and the lock (R27, R43).
 pub const MAX_LOANS_PER_MEMBER: u32 = 32;
+// Owners with a postpaid part open on one voucher (owner split, 1 Nov).
+pub const MAX_OWNERS: u32 = 8;
 
 #[contracttype]
 #[derive(Clone)]
@@ -96,6 +98,16 @@ pub enum DataKey {
     OwnerBalance(Address, Address),
     // The crop calendar contract (25 Oct), apart from `Config` so its stored layout stays.
     CropCalendar,
+    // What a voucher's owners are still owed, and her repayment not yet paid on to them (union, token id;
+    // owner split, 1 Nov).
+    Dues(Address, BytesN<32>),
+    // Senior interest taken out of the pool at an exit, owed to the investor until an LP pays it in USDC
+    // (union, investor; executive decision 2 Nov). Held in fund_core, outside senior cash.
+    SeniorOwed(Address, Address),
+    // Voucher interest senior earned in a union and has not yet taken out (2 Nov; nUSD's harvest reads it).
+    SeniorIncome(Address),
+    // All `SeniorOwed` of a union: nIN held in fund_core outside every pool (2 Nov).
+    SeniorOwedTotal(Address),
 }
 
 #[contract]
@@ -393,6 +405,11 @@ fn require_admin(env: &Env) -> Result<Config, Error> {
 }
 
 // All money into fund_core comes through fx_pool's cash scan (executive decision, 9 Oct).
+fn require_senior(env: &Env) -> Result<(), Error> {
+    cfg(env).senior.ok_or(Error::NotSenior)?.require_auth();
+    Ok(())
+}
+
 fn require_fx_pool(env: &Env) -> Result<Address, Error> {
     let fx = cfg(env).fx_pool.ok_or(Error::NotFxPool)?;
     fx.require_auth();
@@ -616,7 +633,7 @@ fn claim(
     who: &Address,
     max_shares: i128,
     to_wallet: bool,
-) -> Result<i128, Error> {
+) -> Result<(i128, i128), Error> {
     if max_shares < 0 {
         return Err(Error::NegativeAmount);
     }
@@ -661,16 +678,27 @@ fn claim(
     m.claimable_principal -= release;
     save_inv(env, junior, union, who, &inv);
     save_market(env, junior, union, &m);
-    // Over the desk (`to_wallet` false) the caller burns it and settles it against cash at hand.
+    // Over the desk (`to_wallet` false) the caller burns it and settles it against cash at hand; a senior
+    // exit (never to a wallet) is burned and booked by `claim_senior`.
     if to_wallet {
-        if junior {
-            pay_member(env, union, who, amount)?;
-        } else {
-            // Senior payouts go out through fx_pool's USDC redeem (R47, X15): T2.
-            nin(env).transfer(&env.current_contract_address(), who, &amount);
-        }
+        pay_member(env, union, who, amount)?;
     }
-    Ok(amount)
+    Ok((amount, cost_out))
+}
+
+fn p_i128(env: &Env, k: &DataKey) -> i128 {
+    env.storage().persistent().get(k).unwrap_or(0)
+}
+
+fn p_add(env: &Env, k: &DataKey, by: i128) -> Result<i128, Error> {
+    let v = p_i128(env, k).checked_add(by).ok_or(Error::Overflow)?;
+    if v == 0 {
+        env.storage().persistent().remove(k);
+    } else {
+        env.storage().persistent().set(k, &v);
+        bump_key(env, k);
+    }
+    Ok(v)
 }
 
 // R10: fx_pool (the nIN SAC admin) authorises her trustline for this payout only.
@@ -745,6 +773,7 @@ fn senior_interest(env: &Env, union: &Address, interest: i128) -> Result<(), Err
     sm.cash += interest;
     if sm.total_shares > 0 {
         sm.index = index_bump(env, sm.index, sm.total_shares, interest).ok_or(Error::Overflow)?;
+        p_add(env, &DataKey::SeniorIncome(union.clone()), interest)?;
     } else {
         // No senior shareholders to earn it: it stays with the union.
         sm.cash -= interest;
@@ -771,6 +800,117 @@ fn void_vouchers(
     }
     if let Some(m) = cfg(env).machinery {
         MachineryClient::new(env, &m).void(union, token_id);
+    }
+    Ok(back)
+}
+
+fn dues_key(union: &Address, token_id: &BytesN<32>) -> DataKey {
+    DataKey::Dues(union.clone(), token_id.clone())
+}
+
+fn load_dues(env: &Env, union: &Address, token_id: &BytesN<32>) -> Dues {
+    env.storage()
+        .persistent()
+        .get(&dues_key(union, token_id))
+        .unwrap_or(Dues {
+            owners: vec![env],
+            credit: 0,
+            union_due: 0,
+        })
+}
+
+fn save_dues(env: &Env, union: &Address, token_id: &BytesN<32>, d: &Dues) {
+    let k = dues_key(union, token_id);
+    if d.owners.is_empty() && d.credit == 0 && d.union_due == 0 {
+        env.storage().persistent().remove(&k);
+    } else {
+        env.storage().persistent().set(&k, d);
+        bump_key(env, &k);
+    }
+}
+
+fn owner_balance(env: &Env, union: &Address, owner: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::OwnerBalance(union.clone(), owner.clone()))
+        .unwrap_or(0)
+}
+
+// Owner split (1 Nov): settles what the voucher's owners are still owed, oldest claim first, out of
+// her repayment not yet paid on (`credit`), or all of it (`all`: the loan closed, or it defaulted and
+// senior pays as guarantor). A settled part moves to the owner's balance, which she collects with
+// `collect`: no transfers here, so a repay or a default costs the same however many owners there are.
+// The money stays under the earmark until collected. Returns the union's part sent back to senior cash at a
+// default (2 Nov), which `mark_default` takes off the voucher value she owed, like unclaimed hours.
+fn settle_dues(
+    env: &Env,
+    union: &Address,
+    token_id: &BytesN<32>,
+    d: &mut Dues,
+    all: bool,
+    default: bool,
+) -> Result<i128, Error> {
+    let mut left = vec![env];
+    for mut o in d.owners.iter() {
+        let pay = if all {
+            o.amount
+        } else {
+            core::cmp::min(o.amount, d.credit)
+        };
+        if pay > 0 {
+            if !all {
+                d.credit -= pay;
+            }
+            o.amount -= pay;
+            let k = DataKey::OwnerBalance(union.clone(), o.owner.clone());
+            let bal = owner_balance(env, union, &o.owner)
+                .checked_add(pay)
+                .ok_or(Error::Overflow)?;
+            env.storage().persistent().set(&k, &bal);
+            bump_key(env, &k);
+            OwnerDueSettled {
+                union: union.clone(),
+                token_id: token_id.clone(),
+                owner: o.owner.clone(),
+                amount: pay,
+                default,
+            }
+            .publish(env);
+        }
+        if o.amount > 0 {
+            left.push_back(o);
+        }
+    }
+    d.owners = left;
+    // The union's parts come after the owners (2 Nov): into its treasury from what is left of her
+    // repayment, all of it at the close; at a default senior keeps them (the union's own loss).
+    let pay = if all {
+        d.union_due
+    } else {
+        core::cmp::min(d.union_due, d.credit)
+    };
+    let mut back = 0;
+    if pay > 0 {
+        if !all {
+            d.credit -= pay;
+        }
+        d.union_due -= pay;
+        i_add(env, &Counter::Earmark(union.clone()), -pay)?;
+        if default {
+            let mut sm = load_market(env, false, union);
+            sm.cash += pay;
+            save_market(env, false, union, &sm);
+            back = pay;
+        } else {
+            i_add(env, &Counter::Treasury(union.clone()), pay)?;
+        }
+        UnionDueSettled {
+            union: union.clone(),
+            token_id: token_id.clone(),
+            amount: pay,
+            lost: default,
+        }
+        .publish(env);
     }
     Ok(back)
 }
@@ -853,6 +993,7 @@ impl FundCore {
                 nin: nin_token,
                 fx_pool: None,
                 machinery: None,
+                senior: None,
             },
         );
         env.storage().instance().set(&DataKey::Paused, &false);
@@ -899,6 +1040,18 @@ impl FundCore {
         c.machinery = Some(machinery.clone());
         save_cfg(&env, &c);
         MachinerySet { machinery }.publish(&env);
+        Ok(())
+    }
+
+    // The senior contract (executive decision 2 Nov): holds all senior USDC. Set once, like machinery.
+    pub fn set_senior(env: Env, senior: Address) -> Result<(), Error> {
+        let mut c = require_admin(&env)?;
+        if c.senior.is_some() {
+            return Err(Error::SeniorAlreadySet);
+        }
+        c.senior = Some(senior.clone());
+        save_cfg(&env, &c);
+        SeniorSet { senior }.publish(&env);
         Ok(())
     }
 
@@ -1120,12 +1273,13 @@ impl FundCore {
         senior: bool,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
+        // A senior exit goes through the senior contract's `redeem`, which pays the USDC (executive decision
+        // 2 Nov): here only a leader's junior claim to the wallet.
         if senior {
-            investor.require_auth();
-        } else {
-            require_leader(&env, &union, &investor)?;
+            return Err(Error::UseSeniorContract);
         }
-        let amount = claim(&env, !senior, &union, &investor, max_shares, true)?;
+        require_leader(&env, &union, &investor)?;
+        let (amount, _) = claim(&env, true, &union, &investor, max_shares, true)?;
         Claimed {
             investor,
             union,
@@ -1154,7 +1308,7 @@ impl FundCore {
         require_not_paused(&env)?;
         member.require_auth_for_args((union.clone(), max_shares).into_val(&env));
         require_leader(&env, &union, &leader)?;
-        let amount = claim(&env, true, &union, &member, max_shares, false)?;
+        let (amount, _) = claim(&env, true, &union, &member, max_shares, false)?;
         nin(&env).burn(&env.current_contract_address(), &amount);
         let fx = cfg(&env).fx_pool.ok_or(Error::NotFxPool)?;
         let settled = FxPoolClient::new(&env, &fx).settle_cash(&union, &amount);
@@ -1171,9 +1325,83 @@ impl FundCore {
         Ok(())
     }
 
-    // ---------- senior (T2: LPs who are not members) ----------
+    // ---------- senior (investors who are not members; their USDC is in the senior contract, 2 Nov) ----------
 
-    // fx_pool only (mint_senior): a senior investor holds no land title in any union (executive decision,
+    // The senior contract only (`redeem`): a senior exit (executive decision 2 Nov: principal back at par in
+    // USDC, interest at the fix). After the 14 days, the claimed shares are burned; their principal (what was
+    // paid in for them, less any haircut) is burned too, and the senior contract pays that USDC; the interest
+    // stays here as owed to the investor (`SeniorOwed`) until an LP turns the rupees into USDC
+    // (`take_senior_income`). The investor signs the senior call. Returns (principal, interest, cost) in nIN.
+    pub fn claim_senior(
+        env: Env,
+        union: Address,
+        investor: Address,
+        max_shares: i128,
+    ) -> Result<(i128, i128, i128), Error> {
+        require_not_paused(&env)?;
+        require_senior(&env)?;
+        let before = load_inv(&env, false, &union, &investor).shares;
+        let (amount, cost) = claim(&env, false, &union, &investor, max_shares, false)?;
+        let shares = before - load_inv(&env, false, &union, &investor).shares;
+        let principal = core::cmp::min(cost, amount);
+        let interest = amount - principal;
+        nin(&env).burn(&env.current_contract_address(), &principal);
+        if interest > 0 {
+            p_add(
+                &env,
+                &DataKey::SeniorOwed(union.clone(), investor.clone()),
+                interest,
+            )?;
+            p_add(&env, &DataKey::SeniorOwedTotal(union.clone()), interest)?;
+            let k = DataKey::SeniorIncome(union.clone());
+            let take = core::cmp::min(interest, p_i128(&env, &k));
+            p_add(&env, &k, -take)?;
+        }
+        SeniorRedeemed {
+            union,
+            investor,
+            shares,
+            principal,
+            interest,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok((principal, interest, cost))
+    }
+
+    // The senior contract only (`pay_income`, 2 Nov): an LP took `amount` rupees of the investor's owed
+    // interest at the union office and paid the USDC; the nIN is burned here and the rupees are booked off
+    // cash at hand (`fx_pool.settle_cash`), as `claim_junior_cash` does. Returns what cash at hand covered.
+    pub fn take_senior_income(
+        env: Env,
+        union: Address,
+        investor: Address,
+        amount: i128,
+    ) -> Result<i128, Error> {
+        require_not_paused(&env)?;
+        require_senior(&env)?;
+        require_positive(amount)?;
+        let k = DataKey::SeniorOwed(union.clone(), investor.clone());
+        if amount > p_i128(&env, &k) {
+            return Err(Error::AboveOwed);
+        }
+        p_add(&env, &k, -amount)?;
+        p_add(&env, &DataKey::SeniorOwedTotal(union.clone()), -amount)?;
+        nin(&env).burn(&env.current_contract_address(), &amount);
+        let fx = cfg(&env).fx_pool.ok_or(Error::NotFxPool)?;
+        let settled = FxPoolClient::new(&env, &fx).settle_cash(&union, &amount);
+        SeniorIncomeTaken {
+            union,
+            investor,
+            amount,
+            cash_settled: settled,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(settled)
+    }
+
+    // fx_pool only (mint_senior_nin, for the senior contract): a senior investor holds no land title in any union (executive decision,
     // 12 Oct: junior vs senior is simply holding a title or not; R46).
     pub fn deposit_senior(
         env: Env,
@@ -1548,6 +1776,18 @@ impl FundCore {
                 i_add(&env, &Counter::Treasury(union.clone()), pay_f)?;
             }
             save_book(&env, &union, &token_id, b);
+            // Owner split (1 Nov): her repayment of the voucher's value settles the owners' postpaid
+            // parts first, into their balances; at the close all of them. Work done after the close is
+            // paid in full at the claim, so no credit is kept then.
+            if pay_v > 0 || closed {
+                let mut d = load_dues(&env, &union, &token_id);
+                d.credit += pay_v;
+                settle_dues(&env, &union, &token_id, &mut d, closed, false)?;
+                if closed {
+                    d.credit = 0;
+                }
+                save_dues(&env, &union, &token_id, &d);
+            }
         }
         if closed {
             ln.closed = true;
@@ -1621,45 +1861,124 @@ impl FundCore {
         Ok(value - fee)
     }
 
-    // machinery only: an owner claimed hours on a voucher (D19). The owner is paid `amount` in
-    // full from the voucher's reserve at once, also after the loan is repaid (executive decision
-    // 26 Oct: the hours are hers, the debt is separate).
+    // machinery only: an owner claimed work on a voucher (D19). Owner split (1 Nov): `prepay` is paid at
+    // once from the voucher's reserve; `postpaid` leaves the reserve too but is held for her in `Dues`
+    // and settled into her balance (`collect`) as the member repays the voucher's value, in full when
+    // the loan closes, and by senior at a default. What she already repaid and the work after the close
+    // are paid at once. Never more than this voucher set aside (a rate may have risen since the draw):
+    // the prepay comes first, then the owner's postpaid part, then `to_union`, the union's parts of the
+    // price (executive decision 2 Nov), which go to its treasury after the owners as she repays.
+    #[allow(clippy::too_many_arguments)]
     pub fn pay_voucher(
         env: Env,
         union: Address,
         token_id: BytesN<32>,
         owner: Address,
         units: u32,
-        amount: i128,
+        prepay: i128,
+        postpaid: i128,
+        to_union: i128,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
         cfg(&env)
             .machinery
             .ok_or(Error::NotMachinery)?
             .require_auth();
-        if amount < 0 {
+        if prepay < 0 || postpaid < 0 || to_union < 0 {
             return Err(Error::NegativeAmount);
         }
         let mut b = load_book(&env, &union, &token_id).ok_or(Error::NotExists)?;
-        // Never more than this voucher set aside (a rate may have risen since the draw).
-        let pay = core::cmp::min(amount, b.reserve);
-        b.reserve -= pay;
-        i_add(&env, &Counter::Earmark(union.clone()), -pay)?;
+        let take = core::cmp::min(
+            prepay
+                .checked_add(postpaid)
+                .and_then(|x| x.checked_add(to_union))
+                .ok_or(Error::Overflow)?,
+            b.reserve,
+        );
+        let pre = core::cmp::min(prepay, take);
+        let post = core::cmp::min(postpaid, take - pre);
+        let uni = take - pre - post;
+        b.reserve -= take;
         save_book(&env, &union, &token_id, &b);
-        if pay > 0 {
-            pay_member(&env, &union, &owner, pay)?;
+        // What she has repaid and not yet paid on covers the postpaid part at once; after the close
+        // (her hours stay hers) all of it is paid at once.
+        let mut d = load_dues(&env, &union, &token_id);
+        let closed = load_loan(&env, &union, &token_id)?.closed;
+        let now_post = if closed {
+            post
+        } else {
+            core::cmp::min(post, d.credit)
+        };
+        d.credit -= core::cmp::min(d.credit, now_post);
+        let held = post - now_post;
+        if held > 0 {
+            let mut owners = d.owners.clone();
+            match owners.iter().position(|o| o.owner == owner) {
+                Some(i) => {
+                    let i = i as u32;
+                    let mut o = owners.get(i).ok_or(Error::BadState)?;
+                    o.amount += held;
+                    owners.set(i, o);
+                }
+                None => {
+                    if owners.len() >= MAX_OWNERS {
+                        return Err(Error::TooManyOwners);
+                    }
+                    owners.push_back(OwnerDue {
+                        owner: owner.clone(),
+                        amount: held,
+                    });
+                }
+            }
+            d.owners = owners;
+        }
+        // The union's parts (2 Nov): held like the owner's, into the treasury at once from what she
+        // already repaid (or after the close).
+        if uni > 0 {
+            d.union_due += uni;
+            settle_dues(&env, &union, &token_id, &mut d, closed, false)?;
+        }
+        save_dues(&env, &union, &token_id, &d);
+        let now = pre + now_post;
+        if now > 0 {
+            i_add(&env, &Counter::Earmark(union.clone()), -now)?;
+            pay_member(&env, &union, &owner, now)?;
         }
         VoucherPaid {
             union,
             token_id,
             owner,
             hours: units,
-            prepay: pay,
-            pending: 0,
+            prepay: now,
+            pending: held,
         }
         .publish(&env);
         bump_instance(&env);
         Ok(())
+    }
+
+    // An owner collects her settled postpaid parts (owner split, 1 Nov): her balance to her wallet, at
+    // once. Returns the amount.
+    pub fn collect(env: Env, union: Address, owner: Address) -> Result<i128, Error> {
+        require_not_paused(&env)?;
+        owner.require_auth();
+        let amount = owner_balance(&env, &union, &owner);
+        if amount <= 0 {
+            return Err(Error::NothingToClaim);
+        }
+        env.storage()
+            .persistent()
+            .remove(&DataKey::OwnerBalance(union.clone(), owner.clone()));
+        i_add(&env, &Counter::Earmark(union.clone()), -amount)?;
+        pay_member(&env, &union, &owner, amount)?;
+        OwnerCollected {
+            union,
+            owner,
+            amount,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(amount)
     }
 
     // The detected end of season (LOAN_RULES: `maturityTs` = actual EOS). Oracle only;
@@ -1747,7 +2066,15 @@ impl FundCore {
         if let Some(b) = book.as_mut() {
             accrue_voucher(&env, b, ln.rate_bp, now)?;
             save_market(&env, true, &union, &jm);
-            let back = void_vouchers(&env, &union, &token_id, b)?;
+            // The guarantee (owner split, 1 Nov): owners are paid what they are still owed, from senior
+            // money already set aside, so they carry no default risk.
+            let mut d = load_dues(&env, &union, &token_id);
+            // The union's parts go back to senior cash (the union's loss) and, like unclaimed hours, come
+            // off the voucher value she owed senior, so senior is not haircut for them as well (2 Nov).
+            let union_back = settle_dues(&env, &union, &token_id, &mut d, true, true)?;
+            d.credit = 0;
+            save_dues(&env, &union, &token_id, &d);
+            let back = void_vouchers(&env, &union, &token_id, b)? + union_back;
             sm = load_market(&env, false, &union);
             let v_out = b.value - b.repaid;
             let cover = core::cmp::min(back, v_out);
@@ -1817,6 +2144,7 @@ impl FundCore {
         sm.total_borrows -= core::cmp::min(sm.total_borrows, v_rest);
         if m_vi > 0 && sm.total_shares > 0 {
             sm.index = index_bump(&env, sm.index, sm.total_shares, m_vi).ok_or(Error::Overflow)?;
+            p_add(&env, &DataKey::SeniorIncome(union.clone()), m_vi)?;
         }
 
         // 2. Unpaid principal: junior pool, then senior (index haircuts). Unpaid interest
@@ -2066,6 +2394,36 @@ impl FundCore {
         load_union(&env, &union)
     }
 
+    // A senior investor's shares, their value, any exit under way and the interest owed (2 Nov).
+    pub fn senior_position(env: Env, union: Address, investor: Address) -> SeniorPosition {
+        let inv = load_inv(&env, false, &union, &investor);
+        let m = load_market(&env, false, &union);
+        SeniorPosition {
+            shares: inv.shares,
+            value: to_underlying(&env, inv.shares, m.index).unwrap_or(0),
+            pending_shares: inv.pending,
+            claimable_shares: inv.claimable,
+            request_ts: inv.request_ts,
+            cost: inv.cost,
+            owed: p_i128(&env, &DataKey::SeniorOwed(union, investor)),
+        }
+    }
+
+    // Voucher interest senior earned in the union and has not yet taken out (2 Nov).
+    pub fn senior_income(env: Env, union: Address) -> i128 {
+        p_i128(&env, &DataKey::SeniorIncome(union))
+    }
+
+    // All senior interest owed in the union, held in fund_core outside the pools (2 Nov).
+    pub fn senior_owed_total(env: Env, union: Address) -> i128 {
+        p_i128(&env, &DataKey::SeniorOwedTotal(union))
+    }
+
+    // Whether fund_core knows the union (2 Nov): the senior contract takes no USDC for any other.
+    pub fn union_exists(env: Env, union: Address) -> bool {
+        env.storage().persistent().has(&DataKey::UnionCfg(union))
+    }
+
     pub fn union_treasury(env: Env, union: Address) -> i128 {
         i_get(&env, &Counter::Treasury(union))
     }
@@ -2091,6 +2449,16 @@ impl FundCore {
     // Her loan's voucher part: hours, earmark, senior prepay out, owners' pending parts.
     pub fn voucher_book(env: Env, union: Address, token_id: BytesN<32>) -> Option<VoucherBook> {
         load_book(&env, &union, &token_id)
+    }
+
+    // What a voucher's owners are still owed, and her repayment not yet paid on (owner split, 1 Nov).
+    pub fn owner_dues(env: Env, union: Address, token_id: BytesN<32>) -> Dues {
+        load_dues(&env, &union, &token_id)
+    }
+
+    // An owner's settled postpaid parts, ready to `collect`.
+    pub fn owner_balance(env: Env, union: Address, owner: Address) -> i128 {
+        owner_balance(&env, &union, &owner)
     }
 
     // Senior cash held back for unclaimed voucher hours (fx_pool reads it, so it stays a call of its own).

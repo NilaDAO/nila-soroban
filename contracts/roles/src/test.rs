@@ -265,3 +265,55 @@ fn a_filed_lowering_never_stays_armed_and_the_delay_is_bounded() {
     assert_eq!(p.wasm_hash, BytesN::from_array(&env, &[2; 32]));
     assert_eq!(p.eta, now + 30 * 24 * 3600);
 }
+
+/// A union's account settings (3 Nov): set by the union account only, refused out of bounds
+/// (not clamped), None until set.
+#[test]
+fn union_settings_bounds_and_auth() {
+    let (env, _admin, client) = setup();
+    let union = Address::generate(&env);
+    assert_eq!(client.union_settings(&union), None);
+    let ok = UnionSettings {
+        wait: WAIT_MIN,
+        session_len: SESSION_MAX,
+        session_contracts: soroban_sdk::vec![&env, Address::generate(&env)],
+        sms_key: Some(Address::generate(&env)),
+        fx_pool: None,
+        usdc: None,
+    };
+    for (w, s) in [
+        (WAIT_MIN - 1, 300),
+        (WAIT_MAX + 1, 300),
+        (WAIT_MIN, SESSION_MIN - 1),
+        (WAIT_MIN, SESSION_MAX + 1),
+    ] {
+        let mut bad = ok.clone();
+        bad.wait = w;
+        bad.session_len = s;
+        assert_eq!(
+            client.try_set_union_settings(&union, &bad),
+            Err(Ok(Error::BadSetting))
+        );
+    }
+    client.set_union_settings(&union, &ok);
+    assert_eq!(
+        env.auths(),
+        std::vec![(
+            union.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    client.address.clone(),
+                    Symbol::new(&env, "set_union_settings"),
+                    (union.clone(), ok.clone()).into_val(&env),
+                )),
+                sub_invocations: std::vec![],
+            }
+        )]
+    );
+    assert_eq!(client.union_settings(&union), Some(ok.clone()));
+    // Without the union's signature: refused.
+    env.set_auths(&[]);
+    assert!(client.try_set_union_settings(&union, &ok).is_err());
+    // Another union's settings stay unset.
+    assert_eq!(client.union_settings(&Address::generate(&env)), None);
+}

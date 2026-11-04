@@ -7,90 +7,18 @@ use soroban_sdk::{
     BytesN, Env, IntoVal,
 };
 
-/// Stand-ins: a factory with fixed settings, and roles where `leaders` lead `union`.
+/// fx_pool as the account sees it: only its address matters (it locks, unlocks and takes).
 mod mocks {
-    use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Vec};
-    #[contracttype]
-    pub enum K {
-        Roles,
-        Recovery,
-        Allowed,
-        Union,
-        Leaders,
-        Pool,
-        Usdc,
-        Sms,
-    }
-    #[contract]
-    pub struct Factory;
-    #[contractimpl]
-    impl Factory {
-        pub fn __constructor(env: Env, roles: Address, recovery: Address, allowed: Vec<Address>) {
-            env.storage().instance().set(&K::Roles, &roles);
-            env.storage().instance().set(&K::Recovery, &recovery);
-            env.storage().instance().set(&K::Allowed, &allowed);
-        }
-        pub fn union(env: Env) -> Address {
-            env.storage().instance().get(&K::Recovery).unwrap()
-        }
-        pub fn roles(env: Env) -> Address {
-            env.storage().instance().get(&K::Roles).unwrap()
-        }
-        pub fn wait(_env: Env) -> u64 {
-            172_800
-        }
-        pub fn session_len(_env: Env) -> u64 {
-            300
-        }
-        pub fn session_contracts(env: Env) -> Vec<Address> {
-            env.storage().instance().get(&K::Allowed).unwrap()
-        }
-        pub fn account_wasm(env: Env) -> BytesN<32> {
-            BytesN::from_array(&env, &[0; 32])
-        }
-        pub fn set_pledge(env: Env, pool: Address, usdc: Address) {
-            env.storage().instance().set(&K::Pool, &pool);
-            env.storage().instance().set(&K::Usdc, &usdc);
-        }
-        pub fn fx_pool(env: Env) -> Option<Address> {
-            env.storage().instance().get(&K::Pool)
-        }
-        pub fn usdc(env: Env) -> Option<Address> {
-            env.storage().instance().get(&K::Usdc)
-        }
-        pub fn set_sms_key(env: Env, key: Address) {
-            env.storage().instance().set(&K::Sms, &key);
-        }
-        pub fn sms_key(env: Env) -> Option<Address> {
-            env.storage().instance().get(&K::Sms)
-        }
-    }
-    /// fx_pool as the account sees it: only its address matters (it locks, unlocks and takes).
+    use soroban_sdk::{contract, contractimpl, Env};
     #[contract]
     pub struct Pool;
     #[contractimpl]
     impl Pool {
         pub fn ping(_env: Env) {}
     }
-    #[contract]
-    pub struct Roles;
-    #[contractimpl]
-    impl Roles {
-        pub fn __constructor(env: Env, union: Address, leaders: Vec<Address>) {
-            env.storage().instance().set(&K::Union, &union);
-            env.storage().instance().set(&K::Leaders, &leaders);
-        }
-        pub fn is_leader(env: Env, union: Address, account: Address) -> bool {
-            env.storage().instance().get::<_, Address>(&K::Union) == Some(union)
-                && env
-                    .storage()
-                    .instance()
-                    .get::<_, Vec<Address>>(&K::Leaders)
-                    .unwrap()
-                    .contains(&account)
-        }
-    }
 }
+
+use nila_roles::{RolesContract, RolesContractClient, UnionSettings};
 
 struct T {
     env: Env,
@@ -99,8 +27,18 @@ struct T {
     key: SigningKey,
     leaders: [Address; 2],
     fund_core: Address,
-    /// The union's multisig account as the factory names it (the mock's union).
+    /// The union account (its 3-of-5 multisig): names the leaders, sets the settings, recovers.
     union_ms: Address,
+    roles: RolesContractClient<'static>,
+}
+
+impl T {
+    fn settings(&self) -> UnionSettings {
+        self.roles.union_settings(&self.union_ms).unwrap()
+    }
+    fn set_settings(&self, s: &UnionSettings) {
+        self.roles.set_union_settings(&self.union_ms, s);
+    }
 }
 
 fn signer_of(env: &Env, k: &SigningKey) -> Signer {
@@ -119,27 +57,32 @@ fn sign(env: &Env, k: &SigningKey, payload: &[u8; 32]) -> Signature {
     Signature::P256(BytesN::from_array(env, &sig.to_bytes().into()))
 }
 
-fn setup() -> T {
+/// An account with no union yet, and a union (real roles) with two leaders and its settings:
+/// 48 h wait, 5-minute sessions reaching fund_core.
+fn bare() -> T {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set_timestamp(1_800_000_000);
-    let union = Address::generate(&env);
+    let union_ms = Address::generate(&env);
     let leaders = [Address::generate(&env), Address::generate(&env)];
     let fund_core = Address::generate(&env);
-    let union_ms = Address::generate(&env);
-    let roles = env.register(
-        mocks::Roles,
-        (
-            union.clone(),
-            vec![&env, leaders[0].clone(), leaders[1].clone()],
-        ),
-    );
-    let factory = env.register(
-        mocks::Factory,
-        (roles, union_ms.clone(), vec![&env, fund_core.clone()]),
+    let roles_id = env.register(RolesContract, (Address::generate(&env),));
+    let roles = RolesContractClient::new(&env, &roles_id);
+    roles.set_leader(&union_ms, &leaders[0], &true);
+    roles.set_leader(&union_ms, &leaders[1], &true);
+    roles.set_union_settings(
+        &union_ms,
+        &UnionSettings {
+            wait: 172_800,
+            session_len: 300,
+            session_contracts: vec![&env, fund_core.clone()],
+            sms_key: None,
+            fx_pool: None,
+            usdc: None,
+        },
     );
     let key = SigningKey::from_slice(&[7u8; 32]).unwrap();
-    let acct = env.register(AccountContract, (factory, union, signer_of(&env, &key)));
+    let acct = env.register(AccountContract, (roles_id, signer_of(&env, &key)));
     let c = AccountContractClient::new(&env, &acct);
     T {
         env,
@@ -149,7 +92,15 @@ fn setup() -> T {
         leaders,
         fund_core,
         union_ms,
+        roles,
     }
+}
+
+/// The member has named the union.
+fn setup() -> T {
+    let t = bare();
+    t.c.set_union(&t.union_ms);
+    t
 }
 
 fn call_on(env: &Env, contract: &Address) -> Vec<Context> {
@@ -389,7 +340,7 @@ struct P {
     usdc: Address,
 }
 
-/// The factory names fx_pool (the mock) and a USDC asset; the account holds 50 USDC.
+/// The union names fx_pool (the mock) and a USDC asset; the account holds 50 USDC.
 fn pledge() -> P {
     let t = setup();
     let pool = t.env.register(mocks::Pool, ());
@@ -397,8 +348,10 @@ fn pledge() -> P {
         .env
         .register_stellar_asset_contract_v2(Address::generate(&t.env))
         .address();
-    let factory = t.c.factory();
-    mocks::FactoryClient::new(&t.env, &factory).set_pledge(&pool, &usdc);
+    let mut st = t.settings();
+    st.fx_pool = Some(pool.clone());
+    st.usdc = Some(usdc.clone());
+    t.set_settings(&st);
     soroban_sdk::token::StellarAssetClient::new(&t.env, &usdc).mint(&t.acct, &50);
     P { t, pool, usdc }
 }
@@ -498,7 +451,9 @@ fn one_leader_and_the_sms_key_recover_a_keypad_phone() {
         Err(Ok(Error::NoSmsKey))
     );
     let sms = Address::generate(&t.env);
-    mocks::FactoryClient::new(&t.env, &t.c.factory()).set_sms_key(&sms);
+    let mut st = t.settings();
+    st.sms_key = Some(sms.clone());
+    t.set_settings(&st);
     assert_eq!(
         t.c.try_recover_by_sms(&new, &Address::generate(&t.env)),
         Err(Ok(Error::NotLeaders))
@@ -517,4 +472,266 @@ fn one_leader_and_the_sms_key_recover_a_keypad_phone() {
     t.env.ledger().set_timestamp(1_800_000_000 + 172_800);
     t.c.execute_recovery();
     assert_eq!(t.c.signer(), new);
+}
+
+// ---------- member-owned accounts (executive decision 3 Nov) ----------
+
+/// The member names her union with her own signature; nobody else can.
+#[test]
+fn set_union_needs_her_own_signature() {
+    let t = bare();
+    assert_eq!(t.c.union(), None);
+    t.env.set_auths(&[]);
+    assert!(t.c.try_set_union(&t.union_ms).is_err());
+    t.env.mock_all_auths();
+    t.c.set_union(&t.union_ms);
+    let auths = t.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, t.acct);
+    assert_eq!(t.c.union(), Some(t.union_ms.clone()));
+    // Her own P-256 signature passes __check_auth for a call on the account itself.
+    let ctx = call_named(
+        &t.env,
+        &t.acct,
+        soroban_sdk::Symbol::new(&t.env, "set_union"),
+    );
+    assert_eq!(
+        check(&t, [6; 32], sign(&t.env, &t.key, &[6; 32]), &ctx),
+        Ok(())
+    );
+}
+
+/// No change of union while frozen, in a session, or with a lien.
+#[test]
+fn set_union_is_refused_when_frozen_in_a_session_or_with_a_lien() {
+    let p = pledge();
+    let t = &p.t;
+    let other = Address::generate(&t.env);
+    t.c.start_session(&1_800_000_600);
+    assert_eq!(t.c.try_set_union(&other), Err(Ok(Error::InSession)));
+    t.c.end_session();
+    t.c.lock(&10);
+    assert_eq!(t.c.try_set_union(&other), Err(Ok(Error::Locked)));
+    t.c.unlock(&10);
+    t.c.recover_by_leaders(&signer_of(&t.env, &t.key), &t.leaders[0], &t.leaders[1]);
+    assert_eq!(t.c.try_set_union(&other), Err(Ok(Error::Frozen)));
+    t.c.cancel_recovery();
+    t.c.set_union(&other);
+    assert_eq!(t.c.union(), Some(other));
+}
+
+/// With no union named, nobody recovers and no session starts.
+#[test]
+fn no_union_no_recovery_and_no_session() {
+    let t = bare();
+    let new = signer_of(&t.env, &SigningKey::from_slice(&[11u8; 32]).unwrap());
+    assert_eq!(t.c.try_recover(&new), Err(Ok(Error::NoUnion)));
+    assert_eq!(
+        t.c.try_recover_by_leaders(&new, &t.leaders[0], &t.leaders[1]),
+        Err(Ok(Error::NoUnion))
+    );
+    assert_eq!(
+        t.c.try_recover_by_sms(&new, &t.leaders[0]),
+        Err(Ok(Error::NoUnion))
+    );
+    assert_eq!(t.c.try_cancel_recovery(), Err(Ok(Error::NoUnion)));
+    assert_eq!(
+        t.c.try_start_session(&1_800_000_600),
+        Err(Ok(Error::NoUnion))
+    );
+    assert_eq!(
+        check(
+            &t,
+            [1; 32],
+            Signature::Leader(t.leaders[0].clone()),
+            &call_on(&t.env, &t.fund_core)
+        ),
+        Err(Ok(Error::NoSession))
+    );
+    // Her own signature still works: the account is hers with or without a union.
+    assert_eq!(
+        check(
+            &t,
+            [1; 32],
+            sign(&t.env, &t.key, &[1; 32]),
+            &call_on(&t.env, &t.fund_core)
+        ),
+        Ok(())
+    );
+    // A union that has set no settings: no recovery, no session (never a zero wait).
+    let bare_union = Address::generate(&t.env);
+    t.roles.set_leader(&bare_union, &t.leaders[0], &true);
+    t.roles.set_leader(&bare_union, &t.leaders[1], &true);
+    t.c.set_union(&bare_union);
+    assert_eq!(t.c.try_recover(&new), Err(Ok(Error::NoSettings)));
+    assert_eq!(
+        t.c.try_recover_by_leaders(&new, &t.leaders[0], &t.leaders[1]),
+        Err(Ok(Error::NoSettings))
+    );
+    assert_eq!(
+        t.c.try_start_session(&1_800_000_600),
+        Err(Ok(Error::NoSettings))
+    );
+    assert_eq!(t.c.pending(), None);
+}
+
+/// Recovery and sessions follow the settings and leaders of the union she named.
+#[test]
+fn recovery_and_sessions_use_the_named_unions_settings() {
+    let t = setup();
+    let b = Address::generate(&t.env);
+    let b_leaders = [Address::generate(&t.env), Address::generate(&t.env)];
+    for l in &b_leaders {
+        t.roles.set_leader(&b, l, &true);
+    }
+    t.roles.set_union_settings(
+        &b,
+        &UnionSettings {
+            wait: 3_600,
+            session_len: 60,
+            session_contracts: vec![&t.env, t.fund_core.clone()],
+            sms_key: None,
+            fx_pool: None,
+            usdc: None,
+        },
+    );
+    t.c.set_union(&b);
+    assert_eq!(t.c.start_session(&1_800_000_600), 1_800_000_060);
+    let ctx = call_on(&t.env, &t.fund_core);
+    // Union A's leaders no longer sign for her; union B's do.
+    assert_eq!(
+        check(&t, [1; 32], Signature::Leader(t.leaders[0].clone()), &ctx),
+        Err(Ok(Error::NoSession))
+    );
+    assert_eq!(
+        check(&t, [1; 32], Signature::Leader(b_leaders[0].clone()), &ctx),
+        Ok(())
+    );
+    t.c.end_session();
+    // A's leaders cannot recover; B's can, with B's one-hour wait; A's multisig cannot cancel.
+    let new_key = SigningKey::from_slice(&[11u8; 32]).unwrap();
+    let new = signer_of(&t.env, &new_key);
+    assert_eq!(
+        t.c.try_recover_by_leaders(&new, &t.leaders[0], &t.leaders[1]),
+        Err(Ok(Error::NotLeaders))
+    );
+    t.c.recover_by_leaders(&new, &b_leaders[0], &b_leaders[1]);
+    assert_eq!(t.c.pending().unwrap().at, 1_800_000_000 + 3_600);
+    t.c.cancel_recovery();
+    assert_eq!(t.env.auths()[0].0, b);
+    t.c.recover(&new);
+    assert_eq!(t.env.auths()[0].0, b);
+    t.env.ledger().set_timestamp(1_800_003_600);
+    t.c.execute_recovery();
+    assert_eq!(t.c.signer(), new);
+}
+
+/// Only she moves her account to new code: no stranger, no leader session (even if the union
+/// lists the account among its session contracts), not while frozen, in a session or liened.
+#[test]
+fn upgrade_needs_her_own_signature() {
+    let p = pledge();
+    let t = &p.t;
+    let h = BytesN::from_array(&t.env, &[9; 32]);
+    // A stranger: no auth.
+    t.env.set_auths(&[]);
+    assert!(t.c.try_upgrade(&h).is_err());
+    t.env.mock_all_auths();
+    // A leader session never reaches the account itself.
+    let mut st = t.settings();
+    st.session_contracts.push_back(t.acct.clone());
+    t.set_settings(&st);
+    t.c.start_session(&1_800_000_600);
+    let up = call_named(&t.env, &t.acct, soroban_sdk::Symbol::new(&t.env, "upgrade"));
+    assert_eq!(
+        check(t, [1; 32], Signature::Leader(t.leaders[0].clone()), &up),
+        Err(Ok(Error::OutsideSession))
+    );
+    let su = call_named(
+        &t.env,
+        &t.acct,
+        soroban_sdk::Symbol::new(&t.env, "set_union"),
+    );
+    assert_eq!(
+        check(t, [1; 32], Signature::Leader(t.leaders[0].clone()), &su),
+        Err(Ok(Error::OutsideSession))
+    );
+    // Nor the USDC, even if listed.
+    st.session_contracts.push_back(p.usdc.clone());
+    t.set_settings(&st);
+    assert_eq!(
+        check(
+            t,
+            [1; 32],
+            Signature::Leader(t.leaders[0].clone()),
+            &usdc_call(&t.env, &p.usdc, "transfer")
+        ),
+        Err(Ok(Error::OutsideSession))
+    );
+    assert_eq!(t.c.try_upgrade(&h), Err(Ok(Error::InSession)));
+    t.c.end_session();
+    t.c.lock(&5);
+    assert_eq!(t.c.try_upgrade(&h), Err(Ok(Error::Locked)));
+    t.c.unlock(&5);
+    t.c.recover_by_leaders(&signer_of(&t.env, &t.key), &t.leaders[0], &t.leaders[1]);
+    assert_eq!(t.c.try_upgrade(&h), Err(Ok(Error::Frozen)));
+    t.c.cancel_recovery();
+    // Her own signature passes __check_auth for it.
+    assert_eq!(
+        check(t, [2; 32], sign(&t.env, &t.key, &[2; 32]), &up),
+        Ok(())
+    );
+}
+
+/// With the built account wasm: her signed upgrade moves the account to it, on the same address.
+#[test]
+fn her_upgrade_moves_the_account_to_new_code() {
+    extern crate std;
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/wasm32v1-none/release/nila_account.wasm"
+    );
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(_) if std::env::var("NILA_REQUIRE_WASM").is_ok() => panic!("{path} missing"),
+        Err(_) => return,
+    };
+    let t = setup();
+    let h = t
+        .env
+        .deployer()
+        .upload_contract_wasm(soroban_sdk::Bytes::from_slice(&t.env, &bytes));
+    t.c.upgrade(&h);
+    let auths = t.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, t.acct);
+    assert_eq!(t.c.try_upgrade(&h), Err(Ok(Error::Current)));
+    assert_eq!(t.c.union(), Some(t.union_ms.clone()));
+}
+
+/// The lien's fx_pool is fixed at the lock that opened it: a union that names another fx_pool
+/// meanwhile does not move who unlocks or takes it; at 0 the record goes.
+#[test]
+fn the_liens_fx_pool_is_fixed_at_the_first_lock() {
+    let p = pledge();
+    let t = &p.t;
+    t.c.lock(&30);
+    assert_eq!(t.c.lien_pool(), Some(p.pool.clone()));
+    let pool2 = t.env.register(mocks::Pool, ());
+    let mut st = t.settings();
+    st.fx_pool = Some(pool2.clone());
+    t.set_settings(&st);
+    t.c.lock(&5);
+    assert_eq!(t.env.auths()[0].0, p.pool);
+    t.c.unlock(&10);
+    assert_eq!(t.env.auths()[0].0, p.pool);
+    assert_eq!(t.c.pay(&20), 5);
+    assert_eq!(t.env.auths()[0].0, p.pool);
+    let tok = soroban_sdk::token::TokenClient::new(&t.env, &p.usdc);
+    assert_eq!(tok.balance(&p.pool), 20);
+    t.c.unlock(&5);
+    assert_eq!(t.c.lien_pool(), None);
+    t.c.lock(&1);
+    assert_eq!(t.env.auths()[0].0, pool2);
+    assert_eq!(t.c.lien_pool(), Some(pool2));
 }

@@ -29,6 +29,18 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 ## B. Accounts and keys
 
 - [ ] **Trust admin account (D2, C11).** It is the admin of all five contracts.
+  - **Start on a Ledger, grow into the trust (executive decision 3 Nov).** The admin address is a Stellar account
+    derived on the executive's Ledger at its own index (`m/44'/148'/N'`, never the account the grant money arrives
+    on). Rehearse first: `HD=N scripts/ledger-admin-testnet.sh` (LEDGER ADMIN CHECK PASS). Every contract is deployed
+    with that account as admin; admin calls name the Ledger identity as `--source` (never `--sign-with-ledger`, which signs with account 0).
+  - Deploying needs no admin: a hot deployer key deploys, each constructor names the Ledger account. Setup calls
+    (links, roles, union config, crop calendar, caps at 0) are signed by the Ledger alone.
+  - **Before the first real money** the **same account** becomes the 3-of-5 (executive decision 3 Nov): add Anand,
+    Juliya, Carmen and Sietse as weight-1 signers (hardware keys), keep the master (Carst's Ledger) at weight 1, set
+    low/medium/high thresholds to 3. The contracts keep the same admin address: no upgrade or `set_admin`. From then
+    on every upgrade and admin call needs 3 of the 5. All five are Nila people: C11 is dropped for this account
+    (LOAN_RULES "Trust signer roster", revised 3 Nov).
+  - Rehearse the multisig on testnet first (a 3-of-5 admin call and a 2-signature call that must fail).
   - At least 3 signers on hardware keys (Ledger supports Stellar), weight 1 each.
   - Low, medium and high thresholds at the majority. Master weight 0.
   - **Nila people hold fewer signatures than the threshold** (C11, I6). ContractsCompliance K1
@@ -78,6 +90,22 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     the calendar is linked and the families' windows are set, every attestation is refused (`BadDates`).
     Trust: `crop_calendar.set_roles(roles)` (26 Oct), so a union's leaders can set its local crop prices
     (`set_price`); until then every `set_price` is refused (`NotLeader`).
+17. Deployer: `senior(admin = trust, usdc_sac, fund_core, fx_pool, roles)` (executive decision 2 Nov). Trust:
+    `fx_pool.set_senior(senior)` and `fund_core.set_senior(senior)`, **both set once**. Trust: `senior.set_cap(usdc)`
+    at the agreed total: the contract is **unaudited**, and with cap 0 (the default) no deposit is taken. Then
+    `senior.set_investor(investor, true, kyc_ref, tag)` per accepted senior investor (residency set once).
+    **Do not call `senior.set_vault` until nUSD is audited;** the vault's guarantee is capped apart
+    (`set_guarantee_cap`, 0 by default) and stays 0 until then.
+
+18. Member-owned accounts (executive decision 3 Nov; replaces the per-union account factory). Upload the reproducible
+    `nila_account.wasm` and check its hash. Deployer: `deployer(account_wasm = that hash, roles)`, **once for all
+    unions**. It has no admin, no settings and no upgrade, so its account code and roles are fixed for good: a new
+    account code later means a member upgrades her own account (`account.upgrade(hash)`, her signature); a new
+    deployer would give every key a new address. Each union account (3 of 5):
+    `roles.set_union_settings(union, {wait, session_len, session_contracts: [fund_core, machinery], sms_key,
+    fx_pool, usdc})` (wait 1 h – 30 days, session 60–900 s; out of range is refused). Until a union has set them,
+    its members' accounts get no recovery and no leader session (`NoSettings`). An account is created with no union;
+    the member names it herself (`account.set_union(union)`, her signature).
 
 ### C2. Upgrading a deployment from before 25 Oct (instead of C. for an existing set)
 
@@ -96,14 +124,18 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 - [ ] `upgrade_delay` = 172800 (48 h) on all six (with crop_calendar); `pending_upgrade` and `pending_delay` = null.
       The delay is stored at the constructor and survives upgrades, so check it on the
       deployed contract itself.
+- [ ] `deployer.account_wasm()` = the reproducible `nila_account.wasm` hash and `deployer.roles()` = roles; each
+      union's `roles.union_settings(union)` names this fx_pool, the USDC SAC and [fund_core, machinery].
 - [ ] `admin` (roles, land_title, fund_viewer, fx_pool) and `get_config().admin` (fund_core) =
       the trust account.
 - [ ] The nIN SAC `admin` = fx_pool. The issuer has master weight 0 and no other signers.
 - [ ] fx_pool `fund_core` and fund_core `fx_pool` point at each other.
 - [ ] `is_paused` = false. `max_scan` = 10,000 nIN (leader swaps, USDC into the treasury and the move mint only; cash scans, desk payouts and LP offers are uncapped since 30 Oct). `daily_cap` = 2,500 USDC: it caps the USDC
       Bring offers pay out in a day.
-- [ ] LP offers: `anchor` = the trust's anchor account (nila-anchor), `lp_fee` = 100 (1%),
-      `voucher_floor` per union as decided.
+- [ ] LP offers: `anchor` = the trust's anchor account (nila-anchor), `lp_fee` = 100 (1%).
+- [ ] Senior: `fx_pool.senior()` and `fund_core.get_config().senior` = the senior contract; `senior.cap()` as agreed;
+      the USDC balance of the senior contract = `senior.total()` + Σ `senior.haircut_usdc(union)` (no other way in or
+      out than deposit and redeem; haircut USDC stays until the nUSD loss cover).
 - [ ] `fund_core` has the crop calendar linked, and `crop_calendar.window(family × 1000, <a sowing date>)` gives the
       catalogue's window for each family (one week before the sowing window up to its last day, UTC).
 - [ ] `swap_key` = the anchor's swap key (C9b; `set_swap_key`, admin). Without it every LP accept is
@@ -137,15 +169,17 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 - **Pause.** The trust signs `pause`.
   - **fund_core** stops every money path, and expiry burns stop with it. The public
     `mark_default` stops too (D-d), so a long pause delays defaults.
-  - **fx_pool** stops scans, cash-outs, pay-outs and expiry burns. Reclaim of her own nIN
-    stays open.
+  - **fx_pool** stops scans, cash-outs, pay-outs and expiry burns, the attester's fix and LP settles (2 Nov).
+    Reclaim of her own nIN stays open.
+  - **senior** (`set_paused`) stops deposits, exits, income payouts and the vault's guarantee (2 Nov).
   - **land_title** stops title writes (`set_title`, `set_record`, `burn_title`).
   - **roles and fund_viewer have no pause**; they move no money.
 - **Upgrade.**
   1. Upload the wasm and check the layout guard in that commit.
   2. Trust: `upgrade(hash)`. Filing again replaces the earlier filing; nothing ever applies
      in the same call.
-  3. Announce it, and let the indexer alert on `UpgradeProposed`.
+  3. Announce it, and let the indexer alert on `UpgradeProposed`, on every contract, **the senior contract
+     included** (it holds all senior USDC).
   4. After 48 h, trust: `execute_upgrade`. `cancel_upgrade` stops it at any point.
   5. Lowering the delay waits out the current delay, and must then be applied within 7 days.
      Any raise or `cancel_upgrade` voids a filed lowering. The delay is never above 30 days.
@@ -182,7 +216,8 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 - Q36: the indexer. Q34: which button calls which function. X22: what a pay-out releases.
 - In this release (Nov 7): USDC through the senior route and the LP offers (C5b, C9); the anchor
   (SEP-1/10/12/24/38) is the trust's own, in nila-anchor.
-- T2 work is not in this release: senior payouts (X15, R46–R47) and Reflector (R77).
+- Senior payouts (2 Nov): the senior contract pays principal back at par in USDC (`redeem`); interest is paid
+  in USDC by a member LP of the union (`pay_income`). Reflector (R77) is still T2.
 
 ## G. Storage layout
 

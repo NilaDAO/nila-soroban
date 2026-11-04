@@ -1,4 +1,4 @@
-use soroban_sdk::{contracterror, contracttype, Address, BytesN};
+use soroban_sdk::{contracterror, contracttype, Address, BytesN, Vec};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -76,6 +76,26 @@ pub enum Error {
     TooLate = 60,
     // The food token's last draw date has not passed yet (25 Oct).
     NotLapsedYet = 61,
+    // A senior exit goes through the senior contract's `redeem`, which pays the USDC (executive decision 2 Nov).
+    UseSeniorContract = 62,
+    // More than the senior income owed (2 Nov).
+    AboveOwed = 63,
+    SeniorAlreadySet = 64,
+    NotSenior = 65,
+}
+
+// A senior investor's place in a union's senior pool (executive decision 2 Nov): `owed` is interest
+// already taken out of the pool at an exit and not yet paid in USDC by an LP (the senior contract's `pay_income`).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SeniorPosition {
+    pub shares: i128,
+    pub value: i128,
+    pub pending_shares: i128,
+    pub claimable_shares: i128,
+    pub request_ts: u64,
+    pub cost: i128,
+    pub owed: i128,
 }
 
 #[contracttype]
@@ -89,6 +109,8 @@ pub struct Config {
     pub fx_pool: Option<Address>,
     // machinery: machine registry, vouchers and owner claims (C5).
     pub machinery: Option<Address>,
+    // senior: holds all senior USDC; the one caller of `claim_senior` and `take_senior_income` (2 Nov).
+    pub senior: Option<Address>,
 }
 
 // Per-union lending terms, set by the admin (R26, R34, R37, R42, R76).
@@ -252,9 +274,10 @@ pub struct Investor {
 
 // A loan's voucher part (executive decision 26 Oct, revises D6): its value is lent by senior at
 // the draw and is debt from then on, with interest that senior earns (senior keeps USDC on-chain
-// to back it). The hours are hers to use whenever she likes: owners are paid in full from the
-// reserve, also after the loan is repaid. Handing hours back takes their whole value off her
-// debt and adds 5% of it owed to the union treasury.
+// to back it). The hours are hers to use whenever she likes, also after the loan is repaid. At a
+// claim the owner's prepay leaves the reserve at once and the postpaid part is held for her in
+// `Dues` (owner split, 1 Nov). Handing hours back takes their whole value off her debt and adds 5%
+// of it owed to the union treasury.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VoucherBook {
@@ -268,7 +291,8 @@ pub struct VoucherBook {
     pub interest_accrued: i128,
     pub interest_paid: i128,
     pub last_accrual_ts: u64,
-    // Senior money set aside for her unclaimed hours (pays owners; outside senior cash).
+    // Senior money set aside for her unclaimed hours (pays owners; outside senior cash). Claimed
+    // work leaves it: the prepay to the owner, the postpaid part into `Dues`.
     pub reserve: i128,
     // 5% of handed-back hours' value, owed to the union treasury.
     pub fee_due: i128,
@@ -286,4 +310,26 @@ pub struct UnionBook {
     pub earmark: i128,
     // Loans past their payback date and not repaid or defaulted (R34).
     pub on_hold: u32,
+}
+
+// One owner's postpaid part of the work she did on a voucher (owner split, 1 Nov).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnerDue {
+    pub owner: Address,
+    pub amount: i128,
+}
+
+// What a voucher's owners are still owed, oldest claim first, and the member's repayment of the
+// voucher's value not yet paid on to them (`credit`). Owners are paid from that repayment as it
+// comes in, in full when the loan closes, and by senior at a default: the guarantee. The money is
+// senior's, held under the earmark until paid. Its own key, so `VoucherBook` keeps its layout.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Dues {
+    pub owners: Vec<OwnerDue>,
+    pub credit: i128,
+    /// The union's parts of the price (executive decision 2 Nov), settled into its treasury after the
+    /// owners; lost to senior at a default.
+    pub union_due: i128,
 }

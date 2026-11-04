@@ -189,13 +189,6 @@ pub struct LpFeeSet {
     pub fee_bp: u32,
 }
 
-#[contractevent]
-pub struct VoucherFloorSet {
-    #[topic]
-    pub union: Address,
-    pub usdc: i128,
-}
-
 /// Rupees added to an open offer no LP has accepted yet (25 Oct): one offer grows instead of a new one each time.
 #[contractevent]
 pub struct OfferMerged {
@@ -267,9 +260,6 @@ fn p_get(env: &Env, k: &DataKey) -> i128 {
 fn p_set(env: &Env, k: &DataKey, v: i128) {
     env.storage().persistent().set(k, &v);
     bump(env, k);
-}
-fn voucher_floor(env: &Env, union: &Address) -> i128 {
-    p_get(env, &DataKey::VoucherFloor(union.clone()))
 }
 fn load_offer(env: &Env, id: u64) -> Result<Offer, Error> {
     env.storage()
@@ -602,18 +592,6 @@ impl FxPoolContract {
         Ok(())
     }
 
-    /// Senior USDC kept back for a union's vouchers; a Bring never takes it below this.
-    pub fn set_voucher_floor(env: Env, union: Address, usdc: i128) -> Result<(), Error> {
-        require_admin(&env)?;
-        if usdc < 0 {
-            return Err(Error::AmountZero);
-        }
-        p_set(&env, &DataKey::VoucherFloor(union.clone()), usdc);
-        VoucherFloorSet { union, usdc }.publish(&env);
-        bump_instance(&env);
-        Ok(())
-    }
-
     // ---------- offers ----------
 
     /// L11 #short / A7 (Bring) or C4 (Collect): a leader posts rupees, open until accepted or cancelled.
@@ -842,6 +820,7 @@ impl FxPoolContract {
     /// before): a Collect position's USDC becomes the union's, a Bring position's unlocks for the
     /// LP. Each side keeps its cash; no fee. Not while the LP has an accepted offer.
     pub fn settle_position(env: Env, union: Address, lp: Address) -> Result<i128, Error> {
+        require_not_paused(&env)?;
         let p = load_position(&env, &union, &lp).ok_or(Error::NoPosition)?;
         if env
             .storage()
@@ -892,10 +871,6 @@ impl FxPoolContract {
 
     pub fn lp_member(env: Env, union: Address, lp: Address) -> Option<LpMember> {
         env.storage().persistent().get(&DataKey::LpOf(union, lp))
-    }
-
-    pub fn voucher_floor(env: Env, union: Address) -> i128 {
-        voucher_floor(&env, &union)
     }
 
     /// C9: what an offer's rupees are worth at today's fix and the close fee on them (SEP-38 reads

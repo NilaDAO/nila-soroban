@@ -5,7 +5,7 @@ pub use nila_common::{Role, UnionRole};
 use nila_common::{bump_instance, upgrade};
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contractmeta, contracttype, Address,
-    BytesN, Env,
+    BytesN, Env, Vec,
 };
 
 contractmeta!(key = "binver", val = "0.1.0");
@@ -32,7 +32,35 @@ pub enum Error {
     UpgradeNotReady = 4,
     /// Above the 30-day maximum.
     BadDelay = 5,
+    /// A union setting outside its bounds (wait 1 h – 30 d, session 60–900 s): refused, not clamped.
+    BadSetting = 6,
 }
+
+/// What a union sets for the Nila accounts that name it (executive decision 3 Nov: member-owned
+/// accounts; was the per-union account factory). Signed by the union account (3 of 5).
+/// nila-account decodes the same type (kept apart from nila-common so the other contracts do not
+/// carry its spec).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnionSettings {
+    /// Recovery wait, seconds (1 hour – 30 days).
+    pub wait: u64,
+    /// Leader session length, seconds (60–900).
+    pub session_len: u64,
+    /// The contracts a leader session may call for an account (fund_core, machinery).
+    pub session_contracts: Vec<Address>,
+    /// The node's SMS key: with one leader it proposes a keypad recovery (none: SMS recovery off).
+    pub sms_key: Option<Address>,
+    /// The fx_pool that may lock an account's USDC for LP positions, and the USDC (none: no LPs).
+    pub fx_pool: Option<Address>,
+    pub usdc: Option<Address>,
+}
+
+/// Bounds of a union's account settings (as the account factory had them).
+pub const WAIT_MIN: u64 = 3_600;
+pub const WAIT_MAX: u64 = 30 * 86_400;
+pub const SESSION_MIN: u64 = 60;
+pub const SESSION_MAX: u64 = 900;
 
 #[contracttype]
 #[derive(Clone)]
@@ -41,6 +69,7 @@ pub enum DataKey {
     Role(Address, Role),                    // (account, role) — trust-wide
     Leader(Address, Address),               // (union, account)
     UnionRole(Address, Address, UnionRole), // (union, account, role)
+    UnionSettings(Address),                 // union -> UnionSettings (3 Nov)
 }
 
 #[contractevent]
@@ -69,6 +98,14 @@ pub struct LeaderUpdated {
     #[topic]
     pub account: Address,
     pub enabled: bool,
+}
+
+/// A union set its account settings (3 Nov: member-owned accounts).
+#[contractevent]
+pub struct UnionSettingsSet {
+    #[topic]
+    pub union: Address,
+    pub settings: UnionSettings,
 }
 
 /// The trust's admin account changed (C19).
@@ -195,6 +232,39 @@ impl RolesContract {
         .publish(&env);
         bump_instance(&env);
         Ok(())
+    }
+
+    /// The settings the union's accounts read (recovery wait, session, SMS key, fx_pool and USDC).
+    /// Signed by the union account (3 of 5). Out-of-range values are refused (`BadSetting`).
+    pub fn set_union_settings(
+        env: Env,
+        union: Address,
+        settings: UnionSettings,
+    ) -> Result<(), Error> {
+        union.require_auth();
+        if !(WAIT_MIN..=WAIT_MAX).contains(&settings.wait)
+            || !(SESSION_MIN..=SESSION_MAX).contains(&settings.session_len)
+        {
+            return Err(Error::BadSetting);
+        }
+        let key = DataKey::UnionSettings(union.clone());
+        let store = env.storage().persistent();
+        store.set(&key, &settings);
+        store.extend_ttl(&key, nila_common::TTL_THRESHOLD, nila_common::TTL_BUMP);
+        UnionSettingsSet { union, settings }.publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// None until the union sets them: an account of that union then gets no recovery or session.
+    pub fn union_settings(env: Env, union: Address) -> Option<UnionSettings> {
+        let key = DataKey::UnionSettings(union);
+        let store = env.storage().persistent();
+        let s: Option<UnionSettings> = store.get(&key);
+        if s.is_some() {
+            store.extend_ttl(&key, nila_common::TTL_THRESHOLD, nila_common::TTL_BUMP);
+        }
+        s
     }
 
     pub fn has_role(env: Env, account: Address, role: Role) -> bool {

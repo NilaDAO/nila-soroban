@@ -11,11 +11,9 @@
 //! - nIN SAC admin (R8): member trustlines stay deauthorised and are authorised only inside
 //!   the call that moves her nIN (R10), and only for a title holder or leader of the union.
 //!
-//! - Senior route (Nov 7): a senior investor the trust accepted deposits USDC, which stays
-//!   on-chain as the guarantee behind vouchers; nIN is minted at the
-//!   attester's INR/USD fix into fund_core's senior pool; every deposit is tagged offshore or
-//!   domestic (R24, R46, R77). Senior payouts (unbond, claim) are T2 (X15); senior USDC above the
-//!   voucher floor can pay a Bring.
+//! - Senior route (executive decision 2 Nov): the `senior` contract holds all senior USDC and
+//!   calls `mint_senior_nin` to put the nIN at the attester's fix into fund_core's senior pool.
+//!   fx_pool holds no senior USDC.
 //!
 //! - LP offers (C5b, Nov 7, `lp.rs`): Bring and Collect through member LPs the anchor accepted
 //!   (R18–R23); `quote` gives the SEP-38 price (C9). Reflector is later (R77).
@@ -63,6 +61,8 @@ pub const DEFAULT_MAX_SCAN: i128 = 10_000 * 10_000_000;
 pub const MAX_OPEN_ESCROWS: u32 = 64;
 /// One unit of the INR/USD fix: 7 decimals, like nIN and USDC.
 pub const RATE_ONE: i128 = 10_000_000;
+/// The attester's fixes are at least 12 hours apart (executive decision 2 Nov).
+pub const RATE_MIN_GAP: u64 = 12 * 3_600;
 /// One nIN (7 decimals): the cash scan's Collect offer is in whole rupees.
 const NIN_UNIT: i128 = 10_000_000;
 /// The attester's fix is valid at most 2 days (R77).
@@ -109,8 +109,6 @@ pub enum Error {
     BadDelay = 21,
     /// The INR/USD fix is zero, negative or valid too long.
     BadRate = 22,
-    /// Senior USDC may not fall below the union's voucher floor.
-    BelowVoucherFloor = 23,
     NotAnchor = 24,
     NotLp = 25,
     /// The offer is not in the state this call needs.
@@ -132,25 +130,10 @@ pub enum Error {
     NoPosition = 34,
     /// The fix is within the 5% margin of the position's opening rate: no settle (31 Oct).
     InMargin = 35,
-}
-
-/// Where a senior investor's USDC comes from (R24, D1): kept per deposit so the pools can be split later.
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum Tag {
-    Offshore = 0,
-    Domestic = 1,
-}
-
-/// The trust's acceptance of a senior investor: global or domestic, never a member. `kyc_ref`
-/// points at the KYC record kept off-chain; no personal data on-chain (C17). Not an LP: an LP
-/// is a member who swaps cash for USDC for a fee and never lends (executive decision, 12 Oct; LP offers in `lp.rs`).
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SeniorInvestor {
-    pub accepted: bool,
-    pub kyc_ref: BytesN<32>,
+    /// The attester's last fix is less than 12 hours old (executive decision 2 Nov).
+    RateTooSoon = 36,
+    /// The senior contract is set once (2 Nov).
+    SeniorAlreadySet = 37,
 }
 
 /// INR per USD, 7 decimals (nIN per USDC), set by the attester from the FBIL fix (R77).
@@ -194,29 +177,17 @@ pub enum DataKey {
     MaxScan,
     Paused,
     NextEscrow,
-    Escrow(u64),
-    /// Open escrow ids of a union, oldest first. Before 24 Oct; moved into `OpenEscrows`.
-    EscrowsOf(Address),
     CashAtHand(Address),
     /// A union's open escrows, oldest first, in one entry (24 Oct).
     OpenEscrows(Address),
-    /// Unused since 24 Oct (scan receipts are no longer stored); kept so the layout stays.
-    Scan(BytesN<32>),
     CashOut(BytesN<32>),
     /// A code paid out or reclaimed: never accepted again (its preimage is public).
     CodeUsed(BytesN<32>),
-    SeniorInvestor(Address),
     Rate,
-    /// USDC taken in per union and tag (R24).
-    SeniorUsdc(Address, Tag),
-    /// Senior USDC kept back per union as the voucher guarantee (executive decision, 12 Oct).
-    VoucherFloor(Address),
     /// The trust's anchor account: it accepts LPs after SEP-12 (R20).
     Anchor,
     /// A member LP of a union (R20).
     LpOf(Address, Address),
-    /// USDC LPs brought into the union through Collect offers (domestic).
-    LpUsdc(Address),
     LpFeeBp,
     NextOffer,
     Offer(u64),
@@ -245,18 +216,11 @@ pub enum DataKey {
     LpLocked(Address),
     /// An LP's accepted offer not scanned yet (union, LP): one at a time (31 Oct).
     Busy(Address, Address),
-}
-
-/// Rupees a leader took in, not yet lent out or settled (R15).
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Escrow {
-    pub union: Address,
-    pub member: Address,
-    pub purpose: Purpose,
-    pub amount: i128,
-    pub remaining: i128,
-    pub expires: u64,
+    /// The senior contract (executive decision 2 Nov): it holds all senior USDC and is the one caller of
+    /// `mint_senior_nin`. Instance, set once.
+    Senior,
+    /// When the attester last set the fix (2 Nov): at most one fix per 12 hours. Instance.
+    AttesterFixAt,
 }
 
 /// One open batch of counted rupees at the union office, kept in the union's one list
@@ -400,12 +364,20 @@ pub struct Activated {
     pub fund_core: Address,
 }
 
+/// The senior contract set (2 Nov).
 #[contractevent]
-pub struct SeniorInvestorSet {
+pub struct SeniorSet {
+    pub senior: Address,
+}
+
+/// Senior nIN minted for the senior contract (2 Nov): into the union's senior pool in `investor`'s name.
+#[contractevent]
+pub struct SeniorNinMinted {
+    #[topic]
+    pub union: Address,
     #[topic]
     pub investor: Address,
-    pub accepted: bool,
-    pub kyc_ref: BytesN<32>,
+    pub nin: i128,
 }
 
 #[contractevent]
@@ -439,18 +411,6 @@ pub struct TreasuryUsdcIn {
     pub union: Address,
     #[topic]
     pub leader: Address,
-    pub usdc: i128,
-    pub nin: i128,
-    pub inr_per_usd: i128,
-}
-
-#[contractevent]
-pub struct SeniorMinted {
-    #[topic]
-    pub union: Address,
-    #[topic]
-    pub investor: Address,
-    pub tag: Tag,
     pub usdc: i128,
     pub nin: i128,
     pub inr_per_usd: i128,
@@ -610,47 +570,15 @@ fn check_room(env: &Env, union: &Address, amount: i128) -> Result<(), Error> {
     Ok(())
 }
 
-/// A union's open escrows, oldest first. Escrows from before 24 Oct (one record each, their ids
-/// in `EscrowsOf`) are read into the list here; the caller's save moves them for good.
+/// A union's open escrows, oldest first (one list since 24 Oct).
 fn open_escrows(env: &Env, union: &Address) -> Vec<OpenEscrow> {
-    let k = DataKey::OpenEscrows(union.clone());
-    if let Some(rows) = env.storage().persistent().get(&k) {
-        return rows;
-    }
-    let mut rows = vec![env];
-    let old: Vec<u64> = env
-        .storage()
+    env.storage()
         .persistent()
-        .get(&DataKey::EscrowsOf(union.clone()))
-        .unwrap_or(vec![env]);
-    for id in old.iter() {
-        if let Some(e) = env
-            .storage()
-            .persistent()
-            .get::<_, Escrow>(&DataKey::Escrow(id))
-        {
-            rows.push_back(OpenEscrow {
-                id,
-                member: e.member,
-                purpose: e.purpose,
-                amount: e.amount,
-                remaining: e.remaining,
-                expires: e.expires,
-            });
-        }
-    }
-    rows
+        .get(&DataKey::OpenEscrows(union.clone()))
+        .unwrap_or(vec![env])
 }
 
 fn save_open_escrows(env: &Env, union: &Address, rows: &Vec<OpenEscrow>) {
-    // The old layout goes once the list is written (24 Oct).
-    let old_k = DataKey::EscrowsOf(union.clone());
-    if let Some(old) = env.storage().persistent().get::<_, Vec<u64>>(&old_k) {
-        for id in old.iter() {
-            env.storage().persistent().remove(&DataKey::Escrow(id));
-        }
-        env.storage().persistent().remove(&old_k);
-    }
     let k = DataKey::OpenEscrows(union.clone());
     env.storage().persistent().set(&k, rows);
     bump(env, &k);
@@ -691,7 +619,8 @@ fn close_code(env: &Env, code_hash: &BytesN<32>) {
     bump(env, &k);
 }
 
-/// A leader's own swap: not paused, a leader of the union, her identity checked, a fresh rate.
+/// Her own swap: not paused, a leader or title holder of the union (self mode, executive decision 4 Nov), her
+/// identity checked, a fresh rate.
 fn leader_swap_checks(
     env: &Env,
     union: &Address,
@@ -699,7 +628,10 @@ fn leader_swap_checks(
     amount: i128,
 ) -> Result<RateFix, Error> {
     require_not_paused(env)?;
-    require_leader(env, union, leader)?;
+    leader.require_auth();
+    if !is_member_or_leader(env, union, leader) {
+        return Err(Error::NotMember);
+    }
     if !env
         .storage()
         .persistent()
@@ -961,33 +893,6 @@ impl FxPoolContract {
 
     // ---------- senior route (R24, R46, R77) ----------
 
-    /// The trust accepts or drops a senior investor (KYC kept off-chain).
-    pub fn set_senior_investor(
-        env: Env,
-        investor: Address,
-        accepted: bool,
-        kyc_ref: BytesN<32>,
-    ) -> Result<(), Error> {
-        require_admin(&env)?;
-        let k = DataKey::SeniorInvestor(investor.clone());
-        env.storage().persistent().set(
-            &k,
-            &SeniorInvestor {
-                accepted,
-                kyc_ref: kyc_ref.clone(),
-            },
-        );
-        bump(&env, &k);
-        SeniorInvestorSet {
-            investor,
-            accepted,
-            kyc_ref,
-        }
-        .publish(&env);
-        bump_instance(&env);
-        Ok(())
-    }
-
     /// The attester posts the day's INR/USD fix (FBIL), valid at most 2 days (R77). Reflector
     /// replaces it later; this stays as the evented override.
     pub fn set_rate(
@@ -996,12 +901,19 @@ impl FxPoolContract {
         inr_per_usd: i128,
         valid_until: u64,
     ) -> Result<(), Error> {
+        require_not_paused(&env)?;
         attester.require_auth();
         if !RolesClient::new(&env, &get(&env, &DataKey::Roles)).has_role(&attester, &Role::Attester)
         {
             return Err(Error::Unauthorized);
         }
         let now = env.ledger().timestamp();
+        // At most one attester fix per 12 hours (executive decision 2 Nov, review H4); the trust's
+        // `override_rate` is not limited.
+        let at: Option<u64> = env.storage().instance().get(&DataKey::AttesterFixAt);
+        if at.is_some_and(|t| now < t + RATE_MIN_GAP) {
+            return Err(Error::RateTooSoon);
+        }
         if inr_per_usd <= 0 || valid_until <= now || valid_until > now + MAX_RATE_AGE {
             return Err(Error::BadRate);
         }
@@ -1029,6 +941,7 @@ impl FxPoolContract {
                 set_by: attester.clone(),
             },
         );
+        env.storage().instance().set(&DataKey::AttesterFixAt, &now);
         RateSet {
             inr_per_usd,
             valid_until,
@@ -1077,68 +990,49 @@ impl FxPoolContract {
         Ok(())
     }
 
-    /// An accepted senior investor deposits USDC; it stays in fx_pool as the guarantee behind
-    /// vouchers, and the same value in nIN goes into the union's senior pool in their name (R46).
-    /// Members are refused: fund_core rejects title holders. Returns the nIN minted.
-    pub fn mint_senior(
+    /// The senior contract (executive decision 2 Nov), set once by the trust: it holds all senior USDC.
+    pub fn set_senior(env: Env, senior: Address) -> Result<(), Error> {
+        require_admin(&env)?;
+        if env.storage().instance().has(&DataKey::Senior) {
+            return Err(Error::SeniorAlreadySet);
+        }
+        env.storage().instance().set(&DataKey::Senior, &senior);
+        SeniorSet { senior }.publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// The senior contract only (2 Nov): `nin` minted into the union's senior pool in `investor`'s name, for
+    /// USDC the senior contract took in (or, for the vault, holds) at the fix. fx_pool holds no senior USDC.
+    pub fn mint_senior_nin(
         env: Env,
-        investor: Address,
         union: Address,
-        usdc: i128,
-        tag: Tag,
-    ) -> Result<i128, Error> {
+        investor: Address,
+        nin: i128,
+    ) -> Result<(), Error> {
         require_not_paused(&env)?;
-        investor.require_auth();
-        if usdc <= 0 {
-            return Err(Error::AmountZero);
-        }
-        let ok = env
-            .storage()
-            .persistent()
-            .get::<_, SeniorInvestor>(&DataKey::SeniorInvestor(investor.clone()))
-            .map(|l| l.accepted)
-            .unwrap_or(false);
-        if !ok {
-            return Err(Error::Unauthorized);
-        }
-        let rate: RateFix = env
+        let senior: Address = env
             .storage()
             .instance()
-            .get(&DataKey::Rate)
-            .ok_or(Error::StaleOracle)?;
-        if env.ledger().timestamp() > rate.valid_until {
-            return Err(Error::StaleOracle);
-        }
-        let nin = usdc
-            .checked_mul(rate.inr_per_usd)
-            .map(|v| v / RATE_ONE)
-            .ok_or(Error::CapExceeded)?;
+            .get(&DataKey::Senior)
+            .ok_or(Error::Unauthorized)?;
+        senior.require_auth();
         if nin <= 0 {
             return Err(Error::AmountZero);
         }
         let me = env.current_contract_address();
-        let usdc_addr: Address = get(&env, &DataKey::Usdc);
-        TokenClient::new(&env, &usdc_addr).transfer(&investor, &me, &usdc);
         StellarAssetClient::new(&env, &nin_addr(&env)).mint(&me, &nin);
         let core = core_addr(&env)?;
         authorize_pull(&env, &core, nin);
         FundCoreClient::new(&env, &core).deposit_senior(&union, &investor, &nin);
-        let k = DataKey::SeniorUsdc(union.clone(), tag);
-        // The guarantee is held, never spent: only what is above the floor can pay a Bring.
-        let held: i128 = env.storage().persistent().get(&k).unwrap_or(0);
-        env.storage().persistent().set(&k, &(held + usdc));
-        bump(&env, &k);
-        SeniorMinted {
+        SeniorNinMinted {
             union,
             investor,
-            tag,
-            usdc,
             nin,
-            inr_per_usd: rate.inr_per_usd,
         }
         .publish(&env);
         bump_instance(&env);
-        Ok(nin)
+        Ok(())
     }
 
     /// A leader adds USDC to her union's treasury (executive decision 22 Oct): the USDC stays in
@@ -1193,7 +1087,7 @@ impl FxPoolContract {
     }
 
     /// A leader's own swap, USDC → nIN in her wallet (executive decision 22 Oct): a leader of the union whose identity
-    /// the anchor checked. Her USDC stays in fx_pool, in the union's leader-swap bucket, as the backing of that nIN.
+    /// the anchor checked; since 4 Nov also a title holder of the union in self mode, `leader` = her account. Her USDC stays in fx_pool, in the union's leader-swap bucket, as the backing of that nIN.
     pub fn swap_usdc_to_nin(
         env: Env,
         leader: Address,
@@ -1281,22 +1175,12 @@ impl FxPoolContract {
             .unwrap_or(0)
     }
 
-    pub fn senior_investor(env: Env, investor: Address) -> Option<SeniorInvestor> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::SeniorInvestor(investor))
+    pub fn senior(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Senior)
     }
 
     pub fn rate(env: Env) -> Option<RateFix> {
         env.storage().instance().get(&DataKey::Rate)
-    }
-
-    /// USDC taken in for a union under one tag (R24).
-    pub fn senior_usdc(env: Env, union: Address, tag: Tag) -> i128 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::SeniorUsdc(union, tag))
-            .unwrap_or(0)
     }
 
     // ---------- calls from fund_core ----------

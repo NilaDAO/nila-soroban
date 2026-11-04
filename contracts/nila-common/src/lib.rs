@@ -1,4 +1,6 @@
 #![no_std]
+// The generated clients carry each call's arguments; `pay_voucher` has eight (2 Nov).
+#![allow(clippy::too_many_arguments)]
 //! Shared types, TTL policy, and cross-contract client traits.
 //!
 //! Storage policy (TAD §4.3):
@@ -123,9 +125,26 @@ pub trait FundCoreTrait {
     // Senior money set aside for unclaimed voucher hours (the floor under Bring offers).
     fn senior_earmark(union: Address) -> i128;
     // machinery only: an owner claimed work on a voucher (`units`: the centi tractor acres they
-    // used); pay the owner `amount` in full from the voucher's reserve (26 Oct: the voucher is
-    // the member's, its debt is separate).
-    fn pay_voucher(union: Address, token_id: BytesN<32>, owner: Address, units: u32, amount: i128);
+    // used). The owner is paid `prepay` now from the voucher's reserve; `postpaid` is held for her
+    // and settled into her balance as the member repays, in full when the loan closes, and by senior
+    // at a default (owner split, 1 Nov: the owner carries no default risk). `to_union` is the union's
+    // parts of the price (2 Nov), into its treasury as she repays; lost to senior at a default.
+    fn pay_voucher(
+        union: Address,
+        token_id: BytesN<32>,
+        owner: Address,
+        units: u32,
+        prepay: i128,
+        postpaid: i128,
+        to_union: i128,
+    );
+    // The senior contract only (`redeem`, executive decision 2 Nov): a senior exit; (principal, interest, cost) in nIN.
+    fn claim_senior(union: Address, investor: Address, max_shares: i128) -> (i128, i128, i128);
+    // The senior contract only (`pay_income`, 2 Nov): owed senior interest an LP paid in USDC; burned and
+    // booked off cash at hand. Returns what cash at hand covered.
+    fn take_senior_income(union: Address, investor: Address, amount: i128) -> i128;
+    // Whether fund_core knows the union (2 Nov).
+    fn union_exists(union: Address) -> bool;
 }
 
 // The crop calendar (25 Oct): a crop share's window from its crop code and planned sowing.

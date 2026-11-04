@@ -184,7 +184,13 @@ pub struct MachinerySet {
     pub machinery: Address,
 }
 
-// An owner claimed hours on her voucher: prepay paid from senior, the rest pending (R85).
+#[contractevent]
+pub struct SeniorSet {
+    pub senior: Address,
+}
+
+// An owner claimed work on a voucher: `prepay` paid to her now, `pending` held as her postpaid part (R85,
+// owner split 1 Nov).
 #[contractevent]
 pub struct VoucherPaid {
     #[topic]
@@ -195,6 +201,65 @@ pub struct VoucherPaid {
     pub hours: u32,
     pub prepay: i128,
     pub pending: i128,
+}
+
+// An owner's postpaid part settled into her balance (owner split, 1 Nov): from the member's repayment,
+// at the close, or by senior at a default (`default`). She collects it with `collect`.
+#[contractevent]
+pub struct OwnerDueSettled {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub token_id: BytesN<32>,
+    pub owner: Address,
+    pub amount: i128,
+    pub default: bool,
+}
+
+// The union's parts of a voucher's price (2 Nov): into its treasury (`lost` false), or back to senior
+// at a default (`lost` true).
+#[contractevent]
+pub struct UnionDueSettled {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub token_id: BytesN<32>,
+    pub amount: i128,
+    pub lost: bool,
+}
+
+// A senior exit through fx_pool (executive decision 2 Nov): `principal` burned (fx_pool pays the USDC
+// at par), `interest` owed to the investor until an LP pays it in USDC.
+#[contractevent]
+pub struct SeniorRedeemed {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub investor: Address,
+    pub shares: i128,
+    pub principal: i128,
+    pub interest: i128,
+}
+
+// Senior income owed paid out (2 Nov): the nIN burned; an LP took the rupees and paid the USDC.
+#[contractevent]
+pub struct SeniorIncomeTaken {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub investor: Address,
+    pub amount: i128,
+    pub cash_settled: i128,
+}
+
+// An owner collected her balance.
+#[contractevent]
+pub struct OwnerCollected {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub owner: Address,
+    pub amount: i128,
 }
 
 // She released a voucher loan that owed nothing: closed, unclaimed hours lapse.
