@@ -105,7 +105,12 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     `roles.set_union_settings(union, {wait, session_len, session_contracts: [fund_core, machinery], sms_key,
     fx_pool, usdc})` (wait 1 h – 30 days, session 60–900 s; out of range is refused). Until a union has set them,
     its members' accounts get no recovery and no leader session (`NoSettings`). An account is created with no union;
-    the member names it herself (`account.set_union(union)`, her signature).
+    the member names it herself (`account.set_union(union)`, her signature). **Recovery has one path (executive
+    decision 4 Nov):** `account.recover_by_sms(signer, leader)`, signed by the union's `sms_key` and one leader of
+    the union, for a new Ed25519 (Privy) or P-256 (keypad) key; anyone calls `execute_recovery` after the wait. A
+    union without `sms_key` has no recovery (`NoSmsKey`). A pending recovery freezes the account and cannot be
+    cancelled. The 4 Nov account wasm differs from the 3 Nov one: build the deployer from it (new account
+    addresses for every key).
 
 ### C2. Upgrading a deployment from before 25 Oct (instead of C. for an existing set)
 

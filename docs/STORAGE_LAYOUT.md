@@ -211,7 +211,7 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
 | `Roles` | instance | Address of roles: who leads the union, and the union's settings (`union_settings`) |
 | `Union` | instance | Address of the union the member named (`set_union`, her own signature); absent until she names one |
 | `Signer` | instance | `Signer::Ed25519(BytesN<32>)` (the Privy Stellar wallet, smartphones) or `Signer::P256(BytesN<65>)` (the keypad's device key) |
-| `Pending` | instance | `Pending{signer, at}`: a proposed recovery and when it may take effect |
+| `Pending` | instance | `Pending{signer, at}`: a recovery proposed by `recover_by_sms` (the one path) and when it may take effect |
 | `Session` | instance | u64: until when a leader of the union may sign for the account |
 | `Lien` | instance | i128: USDC locked by fx_pool (LP positions) |
 | `LienPool` / `LienUsdc` | instance | the fx_pool and USDC the union named at the lock that opened the lien; only that fx_pool unlocks or takes it; removed when the lien is back at 0 |
@@ -223,6 +223,10 @@ union the member named: no union → `NoUnion` (14), no settings → `NoSettings
 `set_union` and `upgrade(new_wasm_hash)` take the account's own signature only and are refused while frozen
 (`Frozen`), in a leader session (`InSession`, 16) or with a lien (`Locked`); a leader session never reaches the
 account itself or the USDC, whatever the union lists. A pending `Pending` freezes the account (29 Oct, unchanged).
+4 Nov (executive decision): one recovery path, `recover_by_sms(signer, leader)` (the union's SMS key and one leader
+of the union; either signer type), executed by anyone after the union's wait with `execute_recovery`. `recover`,
+`recover_by_leaders` and `cancel_recovery` and the `RecoveryCancelled` event are gone; a pending recovery is never
+cancelled or replaced. No storage key changed, but the account wasm did: a new deployer, so new account addresses.
 Fresh deploy only: accounts made by a factory keep a `Factory` entry and the old constructor's layout.
 
 ## deployer (3 Nov): one for all unions, immutable

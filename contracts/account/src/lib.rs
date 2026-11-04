@@ -16,13 +16,14 @@
 //! reaches only the contracts the union lists (fund_core, machinery), never this account itself
 //! (so never `set_union` or `upgrade`) or the USDC token.
 //! Recovery replaces the signer on the same address, so titles, shares, investments and
-//! balances stay: proposed by one leader of the union together with the node's SMS key, once
-//! the new phone has opened the one-time SMS link (a lost keypad phone; executive decision 2 Nov),
-//! by two leaders of the union, or by the union's multisig account; it takes effect after the
-//! union's wait. A pending recovery freezes the account (executive decision 29 Oct, a stolen
-//! phone): the current signer signs nothing, no task and no session, and cannot cancel or change
-//! union; only the union's multisig account cancels, so a member disputes a recovery through the
-//! union. Neither proposer can sign a task. The node's SMS key alone can do nothing.
+//! balances stay. **It has exactly one path (executive decision 4 Nov):** `recover_by_sms`, the
+//! union's SMS key (roles union settings) together with one leader of the union, once the new
+//! phone has opened the one-time SMS link; it takes effect after the union's wait
+//! (`execute_recovery`, anyone). The new signer may be either type: a smartphone's new Privy key
+//! (Ed25519) or a keypad's device key (P-256). A pending recovery freezes the account (executive
+//! decision 29 Oct, a stolen phone): the current signer signs nothing, no task and no session,
+//! and cannot change union or code; it is not cancelled or replaced, it executes after the wait.
+//! Neither proposer can sign a task. The node's SMS key alone can do nothing.
 //! LP positions (executive decision 31 Oct): fx_pool (the one the union names) locks USDC in
 //! this account. A Collect locks the LP's own USDC at accept and takes it into fx_pool at the
 //! scan (`pay`); a Bring puts the union's USDC here and locks it, until a Collect of the same LP
@@ -56,7 +57,7 @@ contractmeta!(
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum Error {
-    /// Not two different leaders of the account's union.
+    /// The co-signer of a recovery is not a leader of the account's union.
     NotLeaders = 1,
     /// No recovery pending, or its wait has not passed.
     NotReady = 2,
@@ -70,7 +71,7 @@ pub enum Error {
     Expired = 6,
     /// A signature of another key type than the signer's.
     WrongKind = 7,
-    /// A recovery is pending: the account signs nothing until it executes or the union cancels it.
+    /// A recovery is pending: the account signs nothing until it executes.
     Frozen = 8,
     /// The union names no fx_pool or USDC (LP positions are not set up for it), or the caller is
     /// not the fx_pool that holds the lien.
@@ -178,9 +179,6 @@ pub struct RecoveryProposed {
 pub struct SignerSet {
     pub signer: Signer,
 }
-
-#[contractevent]
-pub struct RecoveryCancelled {}
 
 #[contractevent]
 pub struct SessionStarted {
@@ -396,38 +394,10 @@ impl AccountContract {
         env.storage().instance().remove(&DataKey::Session);
     }
 
-    /// The union's multisig account proposes a new signer (e.g. a keypad member's new phone).
-    pub fn recover(env: Env, signer: Signer) -> Result<(), Error> {
-        union_of(&env)?.require_auth();
-        propose(&env, signer)
-    }
-
-    /// Two leaders of the account's union together propose a new signer (a lost phone).
-    pub fn recover_by_leaders(
-        env: Env,
-        signer: Signer,
-        leader_a: Address,
-        leader_b: Address,
-    ) -> Result<(), Error> {
-        let union = union_of(&env)?;
-        if leader_a == leader_b {
-            return Err(Error::NotLeaders);
-        }
-        leader_a.require_auth();
-        leader_b.require_auth();
-        if !is_leader(&env, &union, &leader_a) || !is_leader(&env, &union, &leader_b) {
-            return Err(Error::NotLeaders);
-        }
-        // Two leaders cannot replace a pending proposal (restarting the wait would keep the account frozen, and
-        // could swap the key): only the union's multisig cancels it or overrides it with `recover`.
-        if frozen(&env) {
-            return Err(Error::Frozen);
-        }
-        propose(&env, signer)
-    }
-
-    /// One leader of the union and the node's SMS key together propose a new signer (2 Nov): the
-    /// node co-signs only for the device key the new phone registered through the SMS link.
+    /// The one recovery path (executive decision 4 Nov): one leader of the union and the union's
+    /// SMS key together propose a new signer, of either type (a smartphone's new Privy key,
+    /// Ed25519, or a keypad's device key, P-256); the node co-signs only for the key the new phone
+    /// registered through the SMS link. It takes effect after the union's wait.
     pub fn recover_by_sms(env: Env, signer: Signer, leader: Address) -> Result<(), Error> {
         let union = union_of(&env)?;
         leader.require_auth();
@@ -436,7 +406,7 @@ impl AccountContract {
         if !is_leader(&env, &union, &leader) {
             return Err(Error::NotLeaders);
         }
-        // As with two leaders: a pending recovery is cancelled or overridden by the union only.
+        // A pending recovery is never replaced (that would restart the wait and could swap the key).
         if frozen(&env) {
             return Err(Error::Frozen);
         }
@@ -454,16 +424,6 @@ impl AccountContract {
             return Err(Error::NotReady);
         }
         set_signer(&env, p.signer);
-        Ok(())
-    }
-
-    /// The union's multisig account cancels a proposed recovery (a member's dispute goes to the
-    /// union); the account's own signer cannot, since a pending recovery freezes it.
-    pub fn cancel_recovery(env: Env) -> Result<(), Error> {
-        union_of(&env)?.require_auth();
-        env.storage().instance().remove(&DataKey::Pending);
-        RecoveryCancelled {}.publish(&env);
-        bump_instance(&env);
         Ok(())
     }
 
