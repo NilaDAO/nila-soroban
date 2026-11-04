@@ -6,8 +6,10 @@
 //!   R17). Member cash opens a 7-day escrow, the union's cash at hand (R15).
 //! - Cash at hand never exceeds the union's treasury; a draw's cash part settles it (D9); an
 //!   escrow left unsettled after 7 days is covered by burning treasury nIN.
-//! - Cash-out (D13, R16): she escrows nIN under a one-time code; the leader's scan pays out
-//!   and burns it; she reclaims it after expiry.
+//! - Cash-out (24 Oct): `cash_out_signed`, her signed QR (NILA:N) scanned by the leader; her nIN
+//!   is clawed back. The code cash-out (`request_cash_out`, `reclaim_cash_out`) and the move
+//!   (`mint_moved`, `pay_out`) were removed on 4 Nov: the moved Polygon nIN wallets are settled by
+//!   hand at the desk, outside the contract.
 //! - nIN SAC admin (R8): member trustlines stay deauthorised and are authorised only inside
 //!   the call that moves her nIN (R10), and only for a title holder or leader of the union.
 //!
@@ -47,14 +49,12 @@ contractmeta!(
 
 #[cfg(not(feature = "testnet-short-windows"))]
 pub const DAY: u64 = 86_400;
-/// Ten seconds, not one: a cash-out must outlive a few ledgers between request and pay-out.
+/// Ten seconds, not one: an escrow or offer must outlive a few ledgers.
 #[cfg(feature = "testnet-short-windows")]
 pub const DAY: u64 = 10;
 
 /// Cash at hand is lent out or settled within 7 days (R15).
 pub const ESCROW_TERM: u64 = 7 * DAY;
-/// A cash-out code lives at most 7 days.
-pub const MAX_CASH_OUT_TERM: u64 = 7 * DAY;
 /// ₹10,000 per scan and per cash-out at launch (R76), 7 decimals.
 pub const DEFAULT_MAX_SCAN: i128 = 10_000 * 10_000_000;
 /// Open escrows per union: the leader settles before scanning more.
@@ -98,8 +98,7 @@ pub enum Error {
     ScanUsed = 12,
     TooManyEscrows = 13,
     NotExpired = 14,
-    Expired = 15,
-    CodeUsed = 16,
+    // 15 (Expired) and 16 (CodeUsed) removed 4 Nov with the move's code cash-out; numbers not reused.
     BadExpiry = 17,
     /// A repay or recovery scan names no loan.
     NoLoan = 18,
@@ -116,10 +115,7 @@ pub enum Error {
     TooManyOffers = 27,
     /// The union's USDC (LP-collected plus senior above the floor) does not cover it.
     NoUsdc = 28,
-    /// This Polygon burn was minted on Stellar already (the move).
-    AlreadyMoved = 29,
-    /// The move budget the trust set does not cover this mint.
-    MoveBudget = 30,
+    // 29 (AlreadyMoved) and 30 (MoveBudget) removed 4 Nov with `mint_moved`; numbers not reused.
     /// The anchor's signed quote no longer matches what the offer pays or takes (C9b).
     QuoteChanged = 31,
     /// The anchor's signed quote has run out (C9b).
@@ -180,9 +176,6 @@ pub enum DataKey {
     CashAtHand(Address),
     /// A union's open escrows, oldest first, in one entry (24 Oct).
     OpenEscrows(Address),
-    CashOut(BytesN<32>),
-    /// A code paid out or reclaimed: never accepted again (its preimage is public).
-    CodeUsed(BytesN<32>),
     Rate,
     /// The trust's anchor account: it accepts LPs after SEP-12 (R20).
     Anchor,
@@ -197,11 +190,6 @@ pub enum DataKey {
     DayOut(u64),
     /// How far the attester's fix may move from the last one, in bp.
     RateBandBp,
-    /// A Polygon nIN burn already minted on Stellar (the move, M1): its Polygon tx hash.
-    Moved(BytesN<32>),
-    /// What the attester may still mint for the move: set by the trust to the members' total
-    /// Polygon nIN at a snapshot (executive decision, 16 Oct); 0 until set.
-    MoveBudget,
     /// The anchor's swap key (ed25519 public key): it signs each LP accept (C9b, C16). Instance.
     SwapKey,
     /// USDC a union's leaders swapped into its treasury: the backing of that treasury nIN (22 Oct).
@@ -235,37 +223,6 @@ pub struct OpenEscrow {
     pub amount: i128,
     pub remaining: i128,
     pub expires: u64,
-}
-
-/// Her nIN held under a one-time code until the leader pays out or she reclaims (D13).
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CashOut {
-    pub member: Address,
-    pub union: Address,
-    pub amount: i128,
-    pub expires: u64,
-}
-
-/// Her Polygon nIN, burned on Polygon, minted to her on Stellar (the move, M1; executive decision 16 Oct).
-#[contractevent]
-pub struct NinMoved {
-    #[topic]
-    pub union: Address,
-    #[topic]
-    pub member: Address,
-    pub amount: i128,
-    /// The Polygon tx that burned it.
-    pub polygon_burn: BytesN<32>,
-    /// sha256 of her one-time code: the cash-out a leader pays at the desk (22 Oct).
-    pub code_hash: BytesN<32>,
-}
-
-/// The trust changed the move budget: by `delta`, now `budget`.
-#[contractevent]
-pub struct MoveBudgetSet {
-    pub delta: i128,
-    pub budget: i128,
 }
 
 #[contractevent]
@@ -311,28 +268,6 @@ pub struct EscrowExpired {
     pub covered: i128,
 }
 
-#[contractevent]
-pub struct CashOutRequested {
-    #[topic]
-    pub union: Address,
-    #[topic]
-    pub member: Address,
-    pub code_hash: BytesN<32>,
-    pub amount: i128,
-    pub expires: u64,
-}
-
-#[contractevent]
-pub struct CashOutPaid {
-    #[topic]
-    pub union: Address,
-    #[topic]
-    pub member: Address,
-    pub code_hash: BytesN<32>,
-    pub leader: Address,
-    pub amount: i128,
-}
-
 /// A signed cash-out at the desk (24 Oct): her nIN burned, the rupees counted out to her.
 #[contractevent]
 pub struct CashOutSigned {
@@ -341,16 +276,6 @@ pub struct CashOutSigned {
     #[topic]
     pub member: Address,
     pub leader: Address,
-    pub amount: i128,
-}
-
-#[contractevent]
-pub struct CashOutReclaimed {
-    #[topic]
-    pub union: Address,
-    #[topic]
-    pub member: Address,
-    pub code_hash: BytesN<32>,
     pub amount: i128,
 }
 
@@ -611,12 +536,6 @@ fn settle(env: &Env, union: &Address, amount: i128) -> i128 {
         .publish(env);
     }
     took
-}
-
-fn close_code(env: &Env, code_hash: &BytesN<32>) {
-    let k = DataKey::CodeUsed(code_hash.clone());
-    env.storage().persistent().set(&k, &true);
-    bump(env, &k);
 }
 
 /// Her own swap: not paused, a leader or title holder of the union (self mode, executive decision 4 Nov), her
@@ -1210,203 +1129,7 @@ impl FxPoolContract {
         Ok(())
     }
 
-    // ---------- the move (M1) ----------
-
-    /// The move (executive decision, 16 Oct): her Polygon nIN was burned on Polygon (tx
-    /// `polygon_burn`); the attester mints the same amount here, once per burn, as a cash-out she collects
-    /// at the desk (`mint_moved`, 22 Oct: no nIN in a member's wallet). She
-    /// must hold an attested title in the union (or be a leader), so the oracle burns on
-    /// Polygon only after her title is on Stellar. At most `max_scan` per burn, like a scan.
-    /// The trust adds to (or, negative, takes back from) what the attester may still mint for
-    /// the move: the members' Polygon nIN at a snapshot (16 Oct), and later batches. Adding,
-    /// never replacing, so moves already minted are never counted twice. Never below zero.
-    pub fn add_move_budget(env: Env, delta: i128) -> Result<i128, Error> {
-        require_admin(&env)?;
-        let left: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MoveBudget)
-            .unwrap_or(0);
-        let budget = left + delta;
-        if delta == 0 || budget < 0 {
-            return Err(Error::AmountZero);
-        }
-        env.storage().instance().set(&DataKey::MoveBudget, &budget);
-        MoveBudgetSet { delta, budget }.publish(&env);
-        bump_instance(&env);
-        Ok(budget)
-    }
-
-    pub fn move_budget(env: Env) -> i128 {
-        env.storage()
-            .instance()
-            .get(&DataKey::MoveBudget)
-            .unwrap_or(0)
-    }
-
-    pub fn mint_moved(
-        env: Env,
-        attester: Address,
-        union: Address,
-        member: Address,
-        amount: i128,
-        polygon_burn: BytesN<32>,
-        code_hash: BytesN<32>,
-    ) -> Result<(), Error> {
-        require_not_paused(&env)?;
-        attester.require_auth();
-        if !RolesClient::new(&env, &get(&env, &DataKey::Roles)).has_role(&attester, &Role::Attester)
-        {
-            return Err(Error::Unauthorized);
-        }
-        check_amount(&env, amount)?;
-        if !is_member_or_leader(&env, &union, &member) {
-            return Err(Error::NotMember);
-        }
-        let k = DataKey::Moved(polygon_burn.clone());
-        if env.storage().persistent().has(&k) {
-            return Err(Error::AlreadyMoved);
-        }
-        let ck = DataKey::CashOut(code_hash.clone());
-        if env.storage().persistent().has(&ck)
-            || env
-                .storage()
-                .persistent()
-                .has(&DataKey::CodeUsed(code_hash.clone()))
-        {
-            return Err(Error::CodeUsed);
-        }
-        let budget: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MoveBudget)
-            .unwrap_or(0);
-        if amount > budget {
-            return Err(Error::MoveBudget);
-        }
-        env.storage()
-            .instance()
-            .set(&DataKey::MoveBudget, &(budget - amount));
-        env.storage().persistent().set(&k, &true);
-        bump(&env, &k);
-        // No nIN in a member's wallet (executive decision 22 Oct): the moved nIN is minted into fx_pool as a
-        // cash-out under her code, which never expires; a leader of her union pays it with `pay_out`.
-        StellarAssetClient::new(&env, &nin_addr(&env))
-            .mint(&env.current_contract_address(), &amount);
-        env.storage().persistent().set(
-            &ck,
-            &CashOut {
-                member: member.clone(),
-                union: union.clone(),
-                amount,
-                expires: u64::MAX,
-            },
-        );
-        bump(&env, &ck);
-        bump_instance(&env);
-        NinMoved {
-            union,
-            member,
-            amount,
-            polygon_burn,
-            code_hash,
-        }
-        .publish(&env);
-        Ok(())
-    }
-
-    pub fn moved(env: Env, polygon_burn: BytesN<32>) -> bool {
-        env.storage()
-            .persistent()
-            .has(&DataKey::Moved(polygon_burn))
-    }
-
-    // ---------- member cash-out (D13, R16) ----------
-
-    /// A7: her nIN moves into fx_pool under `code_hash` = sha256 of the one-time code she
-    /// shows the leader. Expires at most 7 days out.
-    pub fn request_cash_out(
-        env: Env,
-        member: Address,
-        union: Address,
-        amount: i128,
-        code_hash: BytesN<32>,
-        expires: u64,
-    ) -> Result<(), Error> {
-        require_not_paused(&env)?;
-        member.require_auth();
-        check_positive(amount)?;
-        let now = env.ledger().timestamp();
-        if expires <= now || expires > now + MAX_CASH_OUT_TERM {
-            return Err(Error::BadExpiry);
-        }
-        if !is_member_or_leader(&env, &union, &member) {
-            return Err(Error::NotMember);
-        }
-        let k = DataKey::CashOut(code_hash.clone());
-        if env.storage().persistent().has(&k)
-            || env
-                .storage()
-                .persistent()
-                .has(&DataKey::CodeUsed(code_hash.clone()))
-        {
-            return Err(Error::CodeUsed);
-        }
-        sandwich_transfer(
-            &env,
-            &member,
-            &env.current_contract_address(),
-            &member,
-            amount,
-        );
-        env.storage().persistent().set(
-            &k,
-            &CashOut {
-                member: member.clone(),
-                union: union.clone(),
-                amount,
-                expires,
-            },
-        );
-        bump(&env, &k);
-        CashOutRequested {
-            union,
-            member,
-            code_hash,
-            amount,
-            expires,
-        }
-        .publish(&env);
-        bump_instance(&env);
-        Ok(())
-    }
-
-    /// A1b / C6: the leader scanned her code and counted the rupees out. The nIN burns and
-    /// the cash leaves the union's cash at hand.
-    pub fn pay_out(env: Env, leader: Address, code: Bytes) -> Result<i128, Error> {
-        require_not_paused(&env)?;
-        let code_hash: BytesN<32> = env.crypto().sha256(&code).into();
-        let k = DataKey::CashOut(code_hash.clone());
-        let co: CashOut = env.storage().persistent().get(&k).ok_or(Error::NotFound)?;
-        require_leader(&env, &co.union, &leader)?;
-        if env.ledger().timestamp() >= co.expires {
-            return Err(Error::Expired);
-        }
-        env.storage().persistent().remove(&k);
-        close_code(&env, &code_hash);
-        TokenClient::new(&env, &nin_addr(&env)).burn(&env.current_contract_address(), &co.amount);
-        settle(&env, &co.union, co.amount);
-        CashOutPaid {
-            union: co.union,
-            member: co.member,
-            code_hash,
-            leader,
-            amount: co.amount,
-        }
-        .publish(&env);
-        bump_instance(&env);
-        Ok(co.amount)
-    }
+    // ---------- cash-out: the signed QR ----------
 
     /// The signed cash-out (executive decision 24 Oct; a machine owner's income): her QR carries her
     /// authorisation of (union, amount), used once by its Soroban nonce, expiring at its ledger (~48 h); any
@@ -1437,34 +1160,6 @@ impl FxPoolContract {
         .publish(&env);
         bump_instance(&env);
         Ok(amount)
-    }
-
-    /// Anyone, after expiry: an uncollected cash-out goes back to her wallet.
-    pub fn reclaim_cash_out(env: Env, code_hash: BytesN<32>) -> Result<i128, Error> {
-        let k = DataKey::CashOut(code_hash.clone());
-        let co: CashOut = env.storage().persistent().get(&k).ok_or(Error::NotFound)?;
-        if env.ledger().timestamp() < co.expires {
-            return Err(Error::NotExpired);
-        }
-        env.storage().persistent().remove(&k);
-        close_code(&env, &code_hash);
-        // Her own nIN back (C12): the one authorisation without a fresh membership check.
-        sandwich_transfer(
-            &env,
-            &env.current_contract_address(),
-            &co.member,
-            &co.member,
-            co.amount,
-        );
-        CashOutReclaimed {
-            union: co.union,
-            member: co.member,
-            code_hash,
-            amount: co.amount,
-        }
-        .publish(&env);
-        bump_instance(&env);
-        Ok(co.amount)
     }
 
     // ---------- upgrade (admin, timelock, nila_common::upgrade) ----------
@@ -1535,10 +1230,6 @@ impl FxPoolContract {
         open_escrows(&env, &union)
             .iter()
             .find(|r| r.id == escrow_id)
-    }
-
-    pub fn cash_out(env: Env, code_hash: BytesN<32>) -> Option<CashOut> {
-        env.storage().persistent().get(&DataKey::CashOut(code_hash))
     }
 
     pub fn max_scan(env: Env) -> i128 {

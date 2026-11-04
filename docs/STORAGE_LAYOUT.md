@@ -118,8 +118,6 @@ storage:
 | `NextEscrow` | instance | u64 |
 | `OpenEscrows(union)` | persistent | Vec of `OpenEscrow{id, member, purpose, amount, remaining, expires}`, oldest first (max 64; 24 Oct) |
 | `CashAtHand(union)` | persistent | i128 |
-| `CashOut(code_hash)` | persistent | `CashOut{member, union, amount, expires}` |
-| `CodeUsed(code_hash)` | persistent | bool (a code is closed for good) |
 | `Rate` | instance | `RateFix{inr_per_usd, valid_until, set_by}` (R77) |
 | `AttesterFixAt` | instance | u64 when the attester last set the fix: at most one per 12 hours (2 Nov) |
 | `Senior` | instance | Address of the senior contract, the one caller of `mint_senior_nin` (2 Nov, set once) |
@@ -170,6 +168,13 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
 - **C8 (16 Oct, the move):** fx_pool gained two keys, `Moved(BytesN<32>)` (persistent, a Polygon burn
   already minted on Stellar) and `MoveBudget` (instance, i128: what the attester may still mint for the move). Appended only: existing keys and values encode as before, so a C7 fx_pool
   can be upgraded in place. The frozen-layout hash changed only because the sample list grew.
+- **The move and the code cash-out removed (4 Nov, executive decision):** `mint_moved`, `pay_out`,
+  `add_move_budget`, `move_budget`, `moved` and the `cash_out` view are gone, and with them the fx_pool keys
+  `CashOut(BytesN<32>)`, `CodeUsed(BytesN<32>)`, `Moved(BytesN<32>)`, `MoveBudget` and the `CashOut` value. The ~3
+  moved Polygon nIN wallets are settled by hand at the desk, outside the contract. Removed only: the remaining keys
+  encode as before (a variant encodes by its name), so an fx_pool can be upgraded in place; any entry left under a
+  removed key is never read again. The frozen-layout hash was re-pinned because the sample list shrank. Error
+  codes 15, 16, 29, 30 are gaps, not reused.
 - **Acre vouchers (27 Oct, executive decision):** machinery counts **acres**, not hours: `Machine.hours_per_week` →
   `acres_per_week`, `Voucher.hours` → `units` (centi tractor acres), `WeekUse` counts centi acres, `Rate` is per acre,
   and the new key `CropRate(union, type, family)`. Field names are part of the stored encoding, so a machinery holding
@@ -211,7 +216,7 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
 | `Roles` | instance | Address of roles: who leads the union, and the union's settings (`union_settings`) |
 | `Union` | instance | Address of the union the member named (`set_union`, her own signature); absent until she names one |
 | `Signer` | instance | `Signer::Ed25519(BytesN<32>)` (the Privy Stellar wallet, smartphones) or `Signer::P256(BytesN<65>)` (the keypad's device key) |
-| `Pending` | instance | `Pending{signer, at}`: a proposed recovery and when it may take effect |
+| `Pending` | instance | `Pending{signer, at}`: a recovery proposed by `recover_by_sms` (the one path) and when it may take effect |
 | `Session` | instance | u64: until when a leader of the union may sign for the account |
 | `Lien` | instance | i128: USDC locked by fx_pool (LP positions) |
 | `LienPool` / `LienUsdc` | instance | the fx_pool and USDC the union named at the lock that opened the lien; only that fx_pool unlocks or takes it; removed when the lien is back at 0 |
@@ -223,6 +228,10 @@ union the member named: no union → `NoUnion` (14), no settings → `NoSettings
 `set_union` and `upgrade(new_wasm_hash)` take the account's own signature only and are refused while frozen
 (`Frozen`), in a leader session (`InSession`, 16) or with a lien (`Locked`); a leader session never reaches the
 account itself or the USDC, whatever the union lists. A pending `Pending` freezes the account (29 Oct, unchanged).
+4 Nov (executive decision): one recovery path, `recover_by_sms(signer, leader)` (the union's SMS key and one leader
+of the union; either signer type), executed by anyone after the union's wait with `execute_recovery`. `recover`,
+`recover_by_leaders` and `cancel_recovery` and the `RecoveryCancelled` event are gone; a pending recovery is never
+cancelled or replaced. No storage key changed, but the account wasm did: a new deployer, so new account addresses.
 Fresh deploy only: accounts made by a factory keep a `Factory` entry and the old constructor's layout.
 
 ## deployer (3 Nov): one for all unions, immutable

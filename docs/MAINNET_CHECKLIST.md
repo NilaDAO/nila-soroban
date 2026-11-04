@@ -105,7 +105,12 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     `roles.set_union_settings(union, {wait, session_len, session_contracts: [fund_core, machinery], sms_key,
     fx_pool, usdc})` (wait 1 h – 30 days, session 60–900 s; out of range is refused). Until a union has set them,
     its members' accounts get no recovery and no leader session (`NoSettings`). An account is created with no union;
-    the member names it herself (`account.set_union(union)`, her signature).
+    the member names it herself (`account.set_union(union)`, her signature). **Recovery has one path (executive
+    decision 4 Nov):** `account.recover_by_sms(signer, leader)`, signed by the union's `sms_key` and one leader of
+    the union, for a new Ed25519 (Privy) or P-256 (keypad) key; anyone calls `execute_recovery` after the wait. A
+    union without `sms_key` has no recovery (`NoSmsKey`). A pending recovery freezes the account and cannot be
+    cancelled. The 4 Nov account wasm differs from the 3 Nov one: build the deployer from it (new account
+    addresses for every key).
 
 ### C2. Upgrading a deployment from before 25 Oct (instead of C. for an existing set)
 
@@ -130,7 +135,7 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
       the trust account.
 - [ ] The nIN SAC `admin` = fx_pool. The issuer has master weight 0 and no other signers.
 - [ ] fx_pool `fund_core` and fund_core `fx_pool` point at each other.
-- [ ] `is_paused` = false. `max_scan` = 10,000 nIN (leader swaps, USDC into the treasury and the move mint only; cash scans, desk payouts and LP offers are uncapped since 30 Oct). `daily_cap` = 2,500 USDC: it caps the USDC
+- [ ] `is_paused` = false. `max_scan` = 10,000 nIN (leader swaps and USDC into the treasury only; cash scans, desk payouts and LP offers are uncapped since 30 Oct). `daily_cap` = 2,500 USDC: it caps the USDC
       Bring offers pay out in a day.
 - [ ] LP offers: `anchor` = the trust's anchor account (nila-anchor), `lp_fee` = 100 (1%).
 - [ ] Senior: `fx_pool.senior()` and `fund_core.get_config().senior` = the senior contract; `senior.cap()` as agreed;
@@ -148,13 +153,12 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
       `upgrade_delay` = 172800 (48 h) on every contract: demo builds have a 60-second timelock.
 - [ ] One small end-to-end run per union, with real people:
   - treasury scan, invest scan, draw, repay scan;
-  - a cash-out and a pay-out (a leader's; members hold no nIN, 22 Oct);
-  - a member's investment collected over the desk (`claim_junior_cash`) and a moved member's cash-out
-    (`mint_moved` → `pay_out`); her nIN balance stays 0 throughout;
+  - a signed cash-out (`cash_out_signed`, NILA:N QR scanned by the leader; the code cash-out and the move's
+    `mint_moved` / `pay_out` were removed 4 Nov: the ~3 moved Polygon nIN wallets are settled by hand at the desk);
+  - a member's investment collected over the desk (`claim_junior_cash`); her nIN balance stays 0 throughout;
   - a leader's treasury withdraw and her deposit of her own nIN back (C10, sponsored by the node, O15).
 
-  fund_core nIN must equal junior + senior + treasury + rainy + machine owners' balances (C5), and fx_pool must hold no nIN
-  outside open cash-outs.
+  fund_core nIN must equal junior + senior + treasury + rainy + machine owners' balances (C5), and fx_pool must hold no nIN.
 
 ## E. Operations
 
@@ -169,8 +173,7 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 - **Pause.** The trust signs `pause`.
   - **fund_core** stops every money path, and expiry burns stop with it. The public
     `mark_default` stops too (D-d), so a long pause delays defaults.
-  - **fx_pool** stops scans, cash-outs, pay-outs and expiry burns, the attester's fix and LP settles (2 Nov).
-    Reclaim of her own nIN stays open.
+  - **fx_pool** stops scans, cash-outs and expiry burns, the attester's fix and LP settles (2 Nov).
   - **senior** (`set_paused`) stops deposits, exits, income payouts and the vault's guarantee (2 Nov).
   - **land_title** stops title writes (`set_title`, `set_record`, `burn_title`).
   - **roles and fund_viewer have no pause**; they move no money.
@@ -184,7 +187,7 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
   5. Lowering the delay waits out the current delay, and must then be applied within 7 days.
      Any raise or `cancel_upgrade` voids a filed lowering. The delay is never above 30 days.
 - **Caps.** Raise in steps, each evented:
-  - fx_pool `set_max_scan` (leader swaps, USDC into the treasury, the move mint);
+  - fx_pool `set_max_scan` (leader swaps, USDC into the treasury);
   - per union `max_loan` is a recommendation only since 30 Oct (the crop plan and the leaders hold ₹10,000 for the
     first cycle; `draw_loan` does not check it).
 - **TTL and archival.**

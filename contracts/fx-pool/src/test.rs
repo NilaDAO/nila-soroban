@@ -80,14 +80,6 @@ fn pause_stops_the_desk() {
         f.try_cash_scan_mint(&who, &who, &Purpose::Invest, &who, &NIN, &h, &None),
         Err(Ok(Error::Paused))
     );
-    assert_eq!(
-        f.try_request_cash_out(&who, &who, &NIN, &h, &1_700_000_100),
-        Err(Ok(Error::Paused))
-    );
-    assert_eq!(
-        f.try_pay_out(&who, &Bytes::from_array(&env, &[1])),
-        Err(Ok(Error::Paused))
-    );
     f.unpause();
     assert!(!f.is_paused());
 }
@@ -113,13 +105,10 @@ fn upgrade_waits_out_the_timelock() {
 }
 
 #[test]
-fn unknown_escrow_and_code() {
+fn unknown_escrow() {
     let (env, f, _) = setup();
     let u = Address::generate(&env);
     assert_eq!(f.try_burn_expired_escrow(&u, &1), Err(Ok(Error::NotFound)));
-    let h = BytesN::from_array(&env, &[3; 32]);
-    assert_eq!(f.try_reclaim_cash_out(&h), Err(Ok(Error::NotFound)));
-    assert_eq!(f.cash_out(&h), None);
     assert_eq!(f.cash_at_hand(&Address::generate(&env)), 0);
 }
 
@@ -149,8 +138,6 @@ fn storage_layout_is_frozen() {
     v.push_back(DataKey::NextEscrow.into_val(&env));
     v.push_back(DataKey::OpenEscrows(a.clone()).into_val(&env));
     v.push_back(DataKey::CashAtHand(a.clone()).into_val(&env));
-    v.push_back(DataKey::CashOut(h.clone()).into_val(&env));
-    v.push_back(DataKey::CodeUsed(h.clone()).into_val(&env));
     v.push_back(DataKey::Senior.into_val(&env));
     v.push_back(DataKey::AttesterFixAt.into_val(&env));
     v.push_back(DataKey::Rate.into_val(&env));
@@ -162,8 +149,6 @@ fn storage_layout_is_frozen() {
     v.push_back(DataKey::OffersOf(a.clone()).into_val(&env));
     v.push_back(DataKey::DayOut(1).into_val(&env));
     v.push_back(DataKey::RateBandBp.into_val(&env));
-    v.push_back(DataKey::Moved(h.clone()).into_val(&env));
-    v.push_back(DataKey::MoveBudget.into_val(&env));
     v.push_back(DataKey::SwapKey.into_val(&env));
     v.push_back(
         LpMember {
@@ -219,15 +204,6 @@ fn storage_layout_is_frozen() {
     ] {
         v.push_back(pu.into_val(&env));
     }
-    v.push_back(
-        CashOut {
-            member: a.clone(),
-            union: a.clone(),
-            amount: 1,
-            expires: 2,
-        }
-        .into_val(&env),
-    );
     for k in [
         nila_common::upgrade::UpgradeKey::UpgDelay,
         nila_common::upgrade::UpgradeKey::UpgPending,
@@ -262,7 +238,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "eaf082fef0aa88eec7d23fa02115dd307da928366fe6dce6a4460151f34534f1",
+        hex, "f825389a33a6862da2638e13bd7727809b234b08d39de8267e97b564b5ace2a5",
         "fx_pool storage layout changed"
     );
 }
