@@ -55,7 +55,12 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
   - **Set `home_domain` and publish `stellar.toml` before the lock.** After the lock the issuer
     can sign nothing.
 - [ ] Oracle and attester accounts: keys on hardware or in SSM, never in a repo.
-- [ ] Fee-bump sponsor for member transactions (R12), funded.
+- [ ] **XLM top-up sponsor, funded** (replaces the R12 fee-bump sponsor: the node fee-bumps nothing since 4 Nov;
+      each account pays its own fees). The node's `StellarXlmTopup` beat (nila-sensing `beats/stellar_xlm_topup.py`)
+      sends XLM from the sponsor key to every leader (`roles` LeaderSet) and every ID-checked account whose balance is
+      below **2 XLM**, up to **5 XLM**; at most **3 top-ups an account a day**, and it stops while the sponsor itself
+      is below its **floor of 50 XLM**. It runs on the `stellar` Celery queue: the mainnet compose needs the **second
+      Celery worker on that queue**, or the beat's tasks wait forever. Budget and refills: go-live plan, decision 3.
 
 ## C. Deploy order (each step signed by the account named)
 
@@ -66,8 +71,12 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 3. Deployer: `fund_viewer(admin = trust)`.
 4. Deployer: `fund_core(admin = trust, roles, land_title, nin_sac)`.
 5. Deployer: `fx_pool(admin = trust, roles, land_title, nin_sac, usdc_sac, daily_cap)`.
+5a. Deployer: `machinery(admin = trust, roles, land_title)` (the voucher contract: rates, machines, grants and owner
+    claims).
 6. Trust: `fx_pool.set_fund_core(fund_core)`. **Set once.**
 7. Trust: `fund_core.set_fx_pool(fx_pool)`. **Set once.**
+7a. Trust: `machinery.set_fund_core(fund_core)` and `fund_core.set_machinery(machinery)`. **Both set once.** Without
+    them every voucher draw, grant and owner claim is refused (`NotMachinery`).
 8. Issuer: `set_admin(fx_pool)` on the nIN SAC.
 9. Trust: `fx_pool.activate()`, which authorises the balances of fx_pool and fund_core.
 10. Issuer: **lock** with master weight 0 (executive decision, 10 Oct). Without the lock, classic ops still
@@ -82,6 +91,14 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     - fees 100 + 77
     - `enforce_token_amount` **off** (executive decision, 10 Oct): the attested amount mimics the field's
       yield, not a loan limit.
+14a. Each union account (3 of 5), on machinery: `set_rate(union, machine_type, parts)` for each of the 13 machine
+    types it offers (price an acre in parts: driver, diesel, maintenance, insurance, depreciation, margin; first
+    prices = the old price an hour × the catalogue's hours an acre, as in nila-integrations
+    `scripts/demo/stellar-deploy.sh`), and `set_crop_rate` where one crop costs differently (e.g. type 9 × sugarcane).
+    **Type 1 (tractor + rotavator) is required before the first voucher draw:** it is the voucher's unit
+    (`value_per_tractor_acre`, `prepay_per_tractor_acre`); without it a voucher is worth 0. Only if the union departs
+    from the defaults: `set_prepay_share(union, driver_bp)` (default 5,000 = half the driver part at the job) and
+    `set_union_parts(union, mask)` (default depreciation + margin to the treasury).
 15. Attester: `land_title.set_title` for each existing Polygon title (F1, the move).
 16. Deployer: `crop_calendar(admin = trust)` (25 Oct). Trust: `crop_calendar.set_windows(family, windows)` for every
     crop family registered on Polygon, from the node's catalogue (`nila-sensing scripts/crop_calendar.py`, which
@@ -102,8 +119,10 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     unions**. It has no admin, no settings and no upgrade, so its account code and roles are fixed for good: a new
     account code later means a member upgrades her own account (`account.upgrade(hash)`, her signature); a new
     deployer would give every key a new address. Each union account (3 of 5):
-    `roles.set_union_settings(union, {wait, session_len, session_contracts: [fund_core, machinery], sms_key,
-    fx_pool, usdc})` (wait 1 h – 30 days, session 60–900 s; out of range is refused). Until a union has set them,
+    `roles.set_union_settings(union, {wait, session_len, session_contracts: [fund_core], sms_key, fx_pool, usdc})`
+    (**only fund_core**, executive decision 4 Nov: every leader-session call is fund_core `draw_loan`, `request_unbond`,
+    `claim_junior_cash` or `return_voucher`; their machinery and fx_pool sub-calls are authorised by fund_core, not by
+    the member, so no other contract is in her account's auth contexts; desk cash-outs use her own signed QR) (wait 1 h – 30 days, session 60–900 s; out of range is refused). Until a union has set them,
     its members' accounts get no recovery and no leader session (`NoSettings`). An account is created with no union;
     the member names it herself (`account.set_union(union)`, her signature). **Recovery has one path (executive
     decision 4 Nov):** `account.recover_by_sms(signer, leader)`, signed by the union's `sms_key` and one leader of
@@ -113,6 +132,9 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     addresses for every key).
 
 ### C2. Upgrading a deployment from before 25 Oct (instead of C. for an existing set)
+
+**Not used for the first mainnet deploy** (4 Nov): mainnet is a fresh deployment by C. above; nothing on Stellar
+mainnet predates 25 Oct. Kept for a testnet set that does.
 
 1. Pause the node's attester beat (`attest_food_token` would be refused between the upgrade and step 3).
 2. Trust: upgrade fund_core and fx_pool (48-hour timelock; `upgrade`, then `execute_upgrade`). fund_core leaves
@@ -126,15 +148,20 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
 
 ## D. Verify after deploy (read-only)
 
-- [ ] `upgrade_delay` = 172800 (48 h) on all six (with crop_calendar); `pending_upgrade` and `pending_delay` = null.
+- [ ] `upgrade_delay` = 172800 (48 h) on all eight (roles, land_title, fund_viewer, fund_core, fx_pool, machinery,
+      crop_calendar, senior); `pending_upgrade` and `pending_delay` = null.
       The delay is stored at the constructor and survives upgrades, so check it on the
       deployed contract itself.
 - [ ] `deployer.account_wasm()` = the reproducible `nila_account.wasm` hash and `deployer.roles()` = roles; each
-      union's `roles.union_settings(union)` names this fx_pool, the USDC SAC and [fund_core, machinery].
-- [ ] `admin` (roles, land_title, fund_viewer, fx_pool) and `get_config().admin` (fund_core) =
+      union's `roles.union_settings(union)` names this fx_pool, the USDC SAC and `session_contracts` = [fund_core] only.
+- [ ] `admin` (roles, land_title, fund_viewer, fx_pool, machinery, crop_calendar, senior) and `get_config().admin` (fund_core) =
       the trust account.
 - [ ] The nIN SAC `admin` = fx_pool. The issuer has master weight 0 and no other signers.
 - [ ] fx_pool `fund_core` and fund_core `fx_pool` point at each other.
+- [ ] Machinery: `machinery.fund_core()` = fund_core and `fund_core.get_config().machinery` = machinery;
+      `machinery.is_paused()` = false. Per union: `machinery.rate(union, 1)` is set and
+      `value_per_tractor_acre(union)` > 0; `rate(union, t)` for each type the union offers; `prepay_share(union)` and
+      `union_parts(union)` as the union decided (5,000 and 48 = depreciation + margin by default).
 - [ ] `is_paused` = false. `max_scan` = 10,000 nIN (leader swaps and USDC into the treasury only; cash scans, desk payouts and LP offers are uncapped since 30 Oct). `daily_cap` = 2,500 USDC: it caps the USDC
       Bring offers pay out in a day.
 - [ ] LP offers: `anchor` = the trust's anchor account (nila-anchor), `lp_fee` = 100 (1%).
