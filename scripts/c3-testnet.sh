@@ -116,6 +116,8 @@ tx stellar contract invoke --id "$ROLES" --source ${P}-admin -- \
   set_role --account ${P}-attester --role 1 --enabled true >/dev/null
 tx stellar contract invoke --id "$ROLES" --source ${P}-admin -- \
   set_role --account ${P}-oracle --role 0 --enabled true >/dev/null
+tx stellar contract invoke --id "$ROLES" --source ${P}-admin -- \
+  admit_union --union "$UNION" --details_hash "$(printf '00%.0s' {1..32})" >/dev/null
 tx stellar contract invoke --id "$ROLES" --source ${P}-union -- \
   set_leader --union "$UNION" --account ${P}-leader --enabled true >/dev/null
 

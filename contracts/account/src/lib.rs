@@ -349,10 +349,14 @@ impl AccountContract {
     }
 
     /// The member names (or changes) her union, with her own signature: never while a recovery
-    /// is pending, a leader session runs, or a lien stands.
+    /// is pending, a leader session runs, or a lien stands. Only a union with settings in roles
+    /// (`NoSettings` otherwise), so never one the trust has not admitted (decision 008).
     pub fn set_union(env: Env, union: Address) -> Result<(), Error> {
         member_only(&env)?;
         env.current_contract_address().require_auth();
+        roles(&env)
+            .union_settings(&union)
+            .ok_or(Error::NoSettings)?;
         env.storage().instance().set(&DataKey::Union, &union);
         UnionSet { union }.publish(&env);
         bump_instance(&env);

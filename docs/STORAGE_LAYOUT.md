@@ -44,6 +44,12 @@ storage:
 | `Leader(union, account)` | persistent | bool |
 | `UnionRole(union, account, UnionRole)` | persistent | bool (treasurer, secretary) |
 | `UnionSettings(union)` | persistent | `UnionSettings{wait, session_len, session_contracts, sms_key: Option, fx_pool: Option, usdc: Option}` (3 Nov, member-owned accounts; set by the union account, read by its members' accounts, TTL extended on read) |
+| `Admitted(union)` | persistent | `BytesN<32>` details hash = sha256(name ‖ 0x00 ‖ geo) of the union account's `nila.name` / `nila.geo` data (3 Nov, decision 008; written by the trust's `admit_union`, removed by `revoke_union`, TTL extended on read) |
+
+Revoke keeps the union's `Leader`, `UnionRole` and `UnionSettings` entries; while `Admitted(union)` is absent,
+`is_leader`, `has_union_role` and `union_settings` answer false / None and the union's own writes are refused
+(`NotAdmitted`). Admitting again restores them as stored. The layout hash was re-pinned on 3 Nov to sample
+`UnionSettings(union)`, `Admitted(union)` and the `UnionSettings` struct (new keys at the end; nothing stored changed).
 
 ## land_title
 

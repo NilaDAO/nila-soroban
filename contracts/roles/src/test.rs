@@ -8,6 +8,10 @@ use soroban_sdk::{
     Address, Env, IntoVal, Symbol,
 };
 
+fn h(env: &Env, b: u8) -> BytesN<32> {
+    BytesN::from_array(env, &[b; 32])
+}
+
 fn setup() -> (Env, Address, RolesContractClient<'static>) {
     let env = Env::default();
     env.mock_all_auths();
@@ -26,6 +30,7 @@ fn role_and_leader_round_trip() {
     let attester = Address::generate(&env);
     let union = Address::generate(&env);
     let leader = Address::generate(&env);
+    client.admit_union(&union, &h(&env, 1));
 
     assert!(!client.is_oracle(&oracle));
     client.set_role(&oracle, &Role::Oracle, &true);
@@ -65,6 +70,17 @@ fn set_leader_is_signed_by_the_union_not_the_admin() {
     let client = RolesContractClient::new(&env, &id);
     let union = Address::generate(&env);
     let leader = Address::generate(&env);
+    client
+        .mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &id,
+                fn_name: "admit_union",
+                args: (&union, h(&env, 1)).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .admit_union(&union, &h(&env, 1));
 
     // Only the admin signs: rejected.
     let res = client
@@ -116,9 +132,14 @@ fn union_roles_are_per_union_and_union_signed() {
     let union_a = Address::generate(&env);
     let union_b = Address::generate(&env);
     let who = Address::generate(&env);
+    client.admit_union(&union_a, &h(&env, 1));
 
     client.set_union_role(&union_a, &who, &UnionRole::Treasurer, &true);
     assert_eq!(env.auths()[0].0, union_a);
+    assert_eq!(
+        client.try_set_union_role(&union_b, &who, &UnionRole::Treasurer, &true),
+        Err(Ok(Error::NotAdmitted))
+    );
     assert!(client.has_union_role(&union_a, &who, &UnionRole::Treasurer));
     assert!(!client.has_union_role(&union_a, &who, &UnionRole::Secretary));
     assert!(!client.has_union_role(&union_b, &who, &UnionRole::Treasurer));
@@ -136,6 +157,8 @@ fn leaders_of_one_union_are_not_leaders_of_another() {
     let union_a = Address::generate(&env);
     let union_b = Address::generate(&env);
     let leader = Address::generate(&env);
+    client.admit_union(&union_a, &h(&env, 1));
+    client.admit_union(&union_b, &h(&env, 2));
     client.set_leader(&union_a, &leader, &true);
     assert!(client.is_leader(&union_a, &leader));
     assert!(!client.is_leader(&union_b, &leader));
@@ -147,6 +170,7 @@ fn reads_keep_a_leader_alive() {
     let (env, _admin, client) = setup();
     let union = Address::generate(&env);
     let leader = Address::generate(&env);
+    client.admit_union(&union, &h(&env, 1));
     client.set_leader(&union, &leader, &true);
     // 100 days of reads only, then past the original 120-day TTL.
     env.ledger()
@@ -203,6 +227,20 @@ fn storage_layout_is_frozen() {
     for r in [UnionRole::Treasurer, UnionRole::Secretary] {
         v.push_back(DataKey::UnionRole(a.clone(), a.clone(), r).into_val(&env));
     }
+    // 3 Nov: union settings and the trust's admission (decision 008), new keys at the end.
+    v.push_back(DataKey::UnionSettings(a.clone()).into_val(&env));
+    v.push_back(DataKey::Admitted(a.clone()).into_val(&env));
+    v.push_back(
+        UnionSettings {
+            wait: 1,
+            session_len: 2,
+            session_contracts: soroban_sdk::vec![&env, a.clone()],
+            sms_key: Some(a.clone()),
+            fx_pool: Some(a.clone()),
+            usdc: Some(a.clone()),
+        }
+        .into_val(&env),
+    );
     for k in [
         nila_common::upgrade::UpgradeKey::UpgDelay,
         nila_common::upgrade::UpgradeKey::UpgPending,
@@ -225,7 +263,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "268e98646454ff294a044c0846fbf36be2d733e9ea860acd55d7c98e5a51dcc9",
+        hex, "b10c8ed1cbe20551d3522746593c24c4c15e21266eb34313ce2fa8bcf9f3825a",
         "roles storage layout changed"
     );
 }
@@ -272,6 +310,7 @@ fn a_filed_lowering_never_stays_armed_and_the_delay_is_bounded() {
 fn union_settings_bounds_and_auth() {
     let (env, _admin, client) = setup();
     let union = Address::generate(&env);
+    client.admit_union(&union, &h(&env, 1));
     assert_eq!(client.union_settings(&union), None);
     let ok = UnionSettings {
         wait: WAIT_MIN,
@@ -316,4 +355,164 @@ fn union_settings_bounds_and_auth() {
     assert!(client.try_set_union_settings(&union, &ok).is_err());
     // Another union's settings stay unset.
     assert_eq!(client.union_settings(&Address::generate(&env)), None);
+}
+
+fn settings(env: &Env) -> UnionSettings {
+    UnionSettings {
+        wait: WAIT_MIN,
+        session_len: SESSION_MIN,
+        session_contracts: soroban_sdk::vec![env],
+        sms_key: None,
+        fx_pool: None,
+        usdc: None,
+    }
+}
+
+/// Decision 008: only the roles admin (the trust) admits or revokes a union; the union itself
+/// cannot admit itself.
+#[test]
+fn admit_and_revoke_are_admin_only() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let id = env.register(RolesContract, (admin.clone(),));
+    let client = RolesContractClient::new(&env, &id);
+    let union = Address::generate(&env);
+    let mock = |who: &Address, f: &'static str, args: soroban_sdk::Vec<soroban_sdk::Val>| {
+        std::vec![MockAuthInvoke {
+            contract: &id,
+            fn_name: f,
+            args,
+            sub_invokes: &[],
+        }]
+        .into_iter()
+        .map(move |invoke| (who.clone(), invoke))
+        .collect::<std::vec::Vec<_>>()
+    };
+    // No signature, or the union's own: refused.
+    assert!(client.try_admit_union(&union, &h(&env, 1)).is_err());
+    let m = mock(&union, "admit_union", (&union, h(&env, 1)).into_val(&env));
+    assert!(client
+        .mock_auths(&[MockAuth {
+            address: &m[0].0,
+            invoke: &m[0].1,
+        }])
+        .try_admit_union(&union, &h(&env, 1))
+        .is_err());
+    assert!(!client.is_union(&union));
+    // The admin: accepted, and the admin is the only authoriser.
+    let m = mock(&admin, "admit_union", (&union, h(&env, 1)).into_val(&env));
+    client
+        .mock_auths(&[MockAuth {
+            address: &m[0].0,
+            invoke: &m[0].1,
+        }])
+        .admit_union(&union, &h(&env, 1));
+    assert_eq!(env.auths()[0].0, admin);
+    assert!(client.is_union(&union));
+    // Revoke: the union cannot, the admin can.
+    let m = mock(&union, "revoke_union", (&union,).into_val(&env));
+    assert!(client
+        .mock_auths(&[MockAuth {
+            address: &m[0].0,
+            invoke: &m[0].1,
+        }])
+        .try_revoke_union(&union)
+        .is_err());
+    assert!(client.is_union(&union));
+    let m = mock(&admin, "revoke_union", (&union,).into_val(&env));
+    client
+        .mock_auths(&[MockAuth {
+            address: &m[0].0,
+            invoke: &m[0].1,
+        }])
+        .revoke_union(&union);
+    assert!(!client.is_union(&union));
+}
+
+/// Before admission a union can name no leaders, officers or settings.
+#[test]
+fn a_union_not_admitted_is_refused() {
+    let (env, _admin, client) = setup();
+    let union = Address::generate(&env);
+    let who = Address::generate(&env);
+    assert!(!client.is_union(&union));
+    assert_eq!(client.union_admission(&union), None);
+    assert_eq!(
+        client.try_set_leader(&union, &who, &true),
+        Err(Ok(Error::NotAdmitted))
+    );
+    assert_eq!(
+        client.try_set_union_role(&union, &who, &UnionRole::Secretary, &true),
+        Err(Ok(Error::NotAdmitted))
+    );
+    assert_eq!(
+        client.try_set_union_settings(&union, &settings(&env)),
+        Err(Ok(Error::NotAdmitted))
+    );
+    // Revoking a union never admitted is refused too.
+    assert_eq!(client.try_revoke_union(&union), Err(Ok(Error::NotAdmitted)));
+}
+
+/// Revoked: the entries stay, but leaders, officers and settings read as absent; admitting again
+/// restores them as they were. A revoked union cannot change them either.
+#[test]
+fn revoke_hides_leaders_and_settings_and_readmission_restores_them() {
+    let (env, _admin, client) = setup();
+    let union = Address::generate(&env);
+    let leader = Address::generate(&env);
+    client.admit_union(&union, &h(&env, 1));
+    client.set_leader(&union, &leader, &true);
+    client.set_union_role(&union, &leader, &UnionRole::Treasurer, &true);
+    client.set_union_settings(&union, &settings(&env));
+    assert!(client.is_leader(&union, &leader));
+
+    client.revoke_union(&union);
+    assert!(!client.is_union(&union));
+    assert!(!client.is_leader(&union, &leader));
+    assert!(!client.has_union_role(&union, &leader, &UnionRole::Treasurer));
+    assert_eq!(client.union_settings(&union), None);
+    assert_eq!(
+        client.try_set_leader(&union, &leader, &false),
+        Err(Ok(Error::NotAdmitted))
+    );
+    env.as_contract(&client.address, || {
+        assert!(env
+            .storage()
+            .persistent()
+            .has(&DataKey::Leader(union.clone(), leader.clone())));
+    });
+
+    client.admit_union(&union, &h(&env, 2));
+    assert!(client.is_leader(&union, &leader));
+    assert!(client.has_union_role(&union, &leader, &UnionRole::Treasurer));
+    assert_eq!(client.union_settings(&union), Some(settings(&env)));
+}
+
+/// Admitting again replaces the details hash; both calls publish their events.
+#[test]
+fn readmission_updates_the_hash_and_events_are_published() {
+    use soroban_sdk::{testutils::Events as _, Event};
+    let (env, _admin, client) = setup();
+    let union = Address::generate(&env);
+    client.admit_union(&union, &h(&env, 1));
+    assert_eq!(
+        env.events().all(),
+        std::vec![UnionAdmitted {
+            union: union.clone(),
+            details_hash: h(&env, 1),
+        }
+        .to_xdr(&env, &client.address)]
+    );
+    assert_eq!(client.union_admission(&union), Some(h(&env, 1)));
+    client.admit_union(&union, &h(&env, 2));
+    assert_eq!(client.union_admission(&union), Some(h(&env, 2)));
+    client.revoke_union(&union);
+    assert_eq!(
+        env.events().all(),
+        std::vec![UnionRevoked {
+            union: union.clone()
+        }
+        .to_xdr(&env, &client.address)]
+    );
+    assert_eq!(client.union_admission(&union), None);
 }

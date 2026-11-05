@@ -189,6 +189,7 @@ fn setup() -> Fx {
     let roles = nila_roles::RolesContractClient::new(&env, &roles_id);
     roles.set_role(&oracle, &nila_roles::Role::Oracle, &true);
     roles.set_role(&attester, &nila_roles::Role::Attester, &true);
+    roles.admit_union(&union, &soroban_sdk::BytesN::from_array(&env, &[1; 32]));
     roles.set_leader(&union, &leader, &true);
 
     let titles_id = env.register(LandTitleContract, (admin.clone(), roles_id.clone()));

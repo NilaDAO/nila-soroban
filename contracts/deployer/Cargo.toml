@@ -17,3 +17,4 @@ nila-common = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 nila-account = { path = "../account" }
+nila-roles = { path = "../roles" }
