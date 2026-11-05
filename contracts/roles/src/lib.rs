@@ -32,7 +32,8 @@ pub enum Error {
     UpgradeNotReady = 4,
     /// Above the 30-day maximum.
     BadDelay = 5,
-    /// A union setting outside its bounds (wait 1 h – 30 d, session 60–900 s): refused, not clamped.
+    /// A union setting outside its bounds (wait 1 h – 30 d, session 60–900 s), a session contract
+    /// without the core role, or only one of fx_pool and USDC: refused, not clamped.
     BadSetting = 6,
     /// The union is not admitted by the trust (`admit_union`, decision 008): it cannot name leaders,
     /// officers or settings, and `revoke_union` of a union not admitted is refused too.
@@ -50,11 +51,13 @@ pub struct UnionSettings {
     pub wait: u64,
     /// Leader session length, seconds (60–900).
     pub session_len: u64,
-    /// The contracts a leader session may call for an account (fund_core, machinery).
+    /// The contracts a leader session may call for an account: only contracts the trust gave the
+    /// core role (`set_role(.., Core, true)`), i.e. fund_core (executive decision 4 Nov).
     pub session_contracts: Vec<Address>,
     /// The node's SMS key: with one leader it proposes a keypad recovery (none: SMS recovery off).
     pub sms_key: Option<Address>,
     /// The fx_pool that may lock an account's USDC for LP positions, and the USDC (none: no LPs).
+    /// Both or neither.
     pub fx_pool: Option<Address>,
     pub usdc: Option<Address>,
 }
@@ -320,7 +323,9 @@ impl RolesContract {
     }
 
     /// The settings the union's accounts read (recovery wait, session, SMS key, fx_pool and USDC).
-    /// Signed by the union account (3 of 5). Out-of-range values are refused (`BadSetting`).
+    /// Signed by the union account (3 of 5). Refused (`BadSetting`): values out of range, a session
+    /// contract the trust has not given the core role (review 5 Nov: a union could otherwise let
+    /// leaders sign XLM or fx_pool calls for its members), or fx_pool without USDC or the reverse.
     pub fn set_union_settings(
         env: Env,
         union: Address,
@@ -330,6 +335,11 @@ impl RolesContract {
         require_admitted(&env, &union)?;
         if !(WAIT_MIN..=WAIT_MAX).contains(&settings.wait)
             || !(SESSION_MIN..=SESSION_MAX).contains(&settings.session_len)
+            || settings.fx_pool.is_some() != settings.usdc.is_some()
+            || settings
+                .session_contracts
+                .iter()
+                .any(|c| !read_flag(&env, &DataKey::Role(c, Role::Core)))
         {
             return Err(Error::BadSetting);
         }

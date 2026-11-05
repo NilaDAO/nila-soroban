@@ -1878,7 +1878,7 @@ impl FundCore {
         prepay: i128,
         postpaid: i128,
         to_union: i128,
-    ) -> Result<(), Error> {
+    ) -> Result<(i128, i128, i128), Error> {
         require_not_paused(&env)?;
         cfg(&env)
             .machinery
@@ -1954,7 +1954,8 @@ impl FundCore {
         }
         .publish(&env);
         bump_instance(&env);
-        Ok(())
+        // What was booked, capped by the reserve (machinery's VoucherClaimed reports these).
+        Ok((pre, post, uni))
     }
 
     // An owner collects her settled postpaid parts (owner split, 1 Nov): her balance to her wallet, at

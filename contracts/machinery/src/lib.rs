@@ -838,7 +838,9 @@ impl MachineryContract {
         // One claim per signature; the rest of her voucher stays with her (R55).
         v.used += units;
         save_voucher(&env, &union, &token_id, &v);
-        FundCoreClient::new(&env, &core_addr(&env)?).pay_voucher(
+        // fund_core caps the three parts by the voucher's reserve (a rate rise after the draw):
+        // the event and the return carry what it booked, not what was asked.
+        let (prepay, pending, to_union) = FundCoreClient::new(&env, &core_addr(&env)?).pay_voucher(
             &union, &token_id, &owner, &units, &prepay, &pending, &to_union,
         );
         VoucherClaimed {

@@ -198,6 +198,9 @@ pub enum DataKey {
     IdChecked(Address),
     /// USDC a union's id-checked leaders swapped into nIN in their own wallets: paid back only from here (22 Oct).
     LeaderSwapUsdc(Address),
+    /// (union, account) -> USDC that account swapped in and has not swapped back (review 5 Nov):
+    /// a swap back is capped by it, so nIN from elsewhere never draws on others' backing.
+    SwapUsdc(Address, Address),
     /// An LP's position in a union (union, LP), 31 Oct.
     LpPos(Address, Address),
     /// USDC held in fx_pool for a union's LPs' Collect positions (31 Oct).
@@ -572,11 +575,15 @@ fn leader_swap_checks(
     Ok(rate)
 }
 
-fn add_leader_swap(env: &Env, union: &Address, usdc: i128) {
-    let k = DataKey::LeaderSwapUsdc(union.clone());
-    let held: i128 = env.storage().persistent().get(&k).unwrap_or(0);
-    env.storage().persistent().set(&k, &(held + usdc));
-    bump(env, &k);
+fn add_leader_swap(env: &Env, union: &Address, who: &Address, usdc: i128) {
+    for k in [
+        DataKey::LeaderSwapUsdc(union.clone()),
+        DataKey::SwapUsdc(union.clone(), who.clone()),
+    ] {
+        let held: i128 = env.storage().persistent().get(&k).unwrap_or(0);
+        env.storage().persistent().set(&k, &(held + usdc));
+        bump(env, &k);
+    }
 }
 
 /// R10: her trustline is authorised only for the transfer and deauthorised right after.
@@ -1023,7 +1030,7 @@ impl FxPoolContract {
         TokenClient::new(&env, &get::<Address>(&env, &DataKey::Usdc)).transfer(&leader, &me, &usdc);
         StellarAssetClient::new(&env, &nin_addr(&env)).mint(&me, &nin);
         sandwich_transfer(&env, &me, &leader, &leader, nin);
-        add_leader_swap(&env, &union, usdc);
+        add_leader_swap(&env, &union, &leader, usdc);
         LeaderSwap {
             union,
             leader,
@@ -1038,7 +1045,8 @@ impl FxPoolContract {
     }
 
     /// Back: her nIN is burned and USDC at the rate is paid only from the union's leader-swap bucket (never the LP,
-    /// senior or treasury USDC); refused when the bucket is short.
+    /// senior or treasury USDC), and never more than she swapped in herself and has not swapped back (review 5 Nov:
+    /// owner income or other nIN goes out by the desk, `cash_out_signed`); refused (`NoUsdc`) when either is short.
     pub fn swap_nin_to_usdc(
         env: Env,
         leader: Address,
@@ -1056,7 +1064,9 @@ impl FxPoolContract {
         }
         let k = DataKey::LeaderSwapUsdc(union.clone());
         let held: i128 = env.storage().persistent().get(&k).unwrap_or(0);
-        if usdc > held {
+        let own_k = DataKey::SwapUsdc(union.clone(), leader.clone());
+        let own: i128 = env.storage().persistent().get(&own_k).unwrap_or(0);
+        if usdc > held || usdc > own {
             return Err(Error::NoUsdc);
         }
         let me = env.current_contract_address();
@@ -1065,6 +1075,8 @@ impl FxPoolContract {
         TokenClient::new(&env, &get::<Address>(&env, &DataKey::Usdc)).transfer(&me, &leader, &usdc);
         env.storage().persistent().set(&k, &(held - usdc));
         bump(&env, &k);
+        env.storage().persistent().set(&own_k, &(own - usdc));
+        bump(&env, &own_k);
         LeaderSwap {
             union,
             leader,
@@ -1083,6 +1095,14 @@ impl FxPoolContract {
         env.storage()
             .persistent()
             .get(&DataKey::LeaderSwapUsdc(union))
+            .unwrap_or(0)
+    }
+
+    /// USDC an account swapped in and may still swap back (its cap on `swap_nin_to_usdc`).
+    pub fn swap_usdc(env: Env, union: Address, account: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::SwapUsdc(union, account))
             .unwrap_or(0)
     }
 

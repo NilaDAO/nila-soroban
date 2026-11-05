@@ -3021,7 +3021,12 @@ fn self_claim_rate_rise_and_handing_hours_back() {
     c.attest_food_token(&fx.attester, &fx.union, &id2, &fx.borrower, &0, &200);
     c.draw_loan(&fx.union, &fx.borrower, &id2, &0, &200);
     mc.set_rate(&fx.union, &1, &tractor(15_000_000));
-    mc.claim(&v.owner, &v.machine, &fx.union, &id, &400, &400);
+    // The claim (and its VoucherClaimed) reports what fund_core booked, capped by the reserve
+    // (review 5 Nov), not the ₹4,500 postpaid asked.
+    assert_eq!(
+        mc.claim(&v.owner, &v.machine, &fx.union, &id, &400, &400),
+        (6 * PRE, 1_600 * NIN)
+    );
     // Owner split: the prepay at the new price (₹4,200) first, then what the reserve still holds
     // (₹1,600 of the ₹4,500 postpaid) is held for the owner.
     assert_eq!(fx.token().balance(&v.owner), 6 * PRE);
@@ -3662,6 +3667,26 @@ fn id_checked_member_swaps_in_self_mode() {
     assert_eq!(f.swap_nin_to_usdc(&her, &fx.union, &(475 * NIN)), 5 * NIN);
     assert_eq!(fx.token().balance(&her), 475 * NIN);
     assert_eq!(f.leader_swap_usdc(&fx.union), 5 * NIN);
+    assert_eq!(f.swap_usdc(&fx.union, &her), 5 * NIN);
+    // Review 5 Nov: nIN from elsewhere (owner pay, say) never draws on another's backing. A leader
+    // swaps 20 USDC in; she gets 475 nIN more from elsewhere, yet swaps back at most her own 5 USDC,
+    // never the leader's.
+    f.set_id_checked(&fx.leader, &true, &loan_id(&fx.env, 0x54));
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&fx.leader, &(20 * NIN));
+    f.swap_usdc_to_nin(&fx.leader, &fx.union, &(20 * NIN));
+    let nin = StellarAssetClient::new(&fx.env, &fx.token().address);
+    nin.set_authorized(&her, &true);
+    nin.mint(&her, &(475 * NIN));
+    nin.set_authorized(&her, &false);
+    assert_eq!(f.leader_swap_usdc(&fx.union), 25 * NIN);
+    assert_eq!(
+        f.try_swap_nin_to_usdc(&her, &fx.union, &(950 * NIN)),
+        Err(Ok(FxError::NoUsdc))
+    );
+    assert_eq!(f.swap_nin_to_usdc(&her, &fx.union, &(475 * NIN)), 5 * NIN);
+    assert_eq!(f.swap_usdc(&fx.union, &her), 0);
+    assert_eq!(f.swap_usdc(&fx.union, &fx.leader), 20 * NIN);
+    assert_eq!(f.leader_swap_usdc(&fx.union), 20 * NIN);
     // Her own signature is required.
     fx.env.set_auths(&[]);
     assert!(f.try_swap_nin_to_usdc(&her, &fx.union, &NIN).is_err());

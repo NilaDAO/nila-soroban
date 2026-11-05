@@ -17,7 +17,8 @@ fn setup() -> (Env, Address, DeployerClient<'static>) {
 }
 
 /// The account wasm built by `cargo build --release --target wasm32v1-none` (CI builds it before
-/// the tests and sets NILA_REQUIRE_WASM=1; a local `cargo test` without it skips the deploy tests).
+/// the tests). Missing, the deploy tests fail (review 5 Nov: they passed without running); set
+/// NILA_SKIP_WASM=1 to skip them on purpose.
 fn account_wasm() -> Option<std::vec::Vec<u8>> {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -25,8 +26,8 @@ fn account_wasm() -> Option<std::vec::Vec<u8>> {
     );
     match std::fs::read(path) {
         Ok(b) => Some(b),
-        Err(_) if std::env::var("NILA_REQUIRE_WASM").is_ok() => {
-            panic!("{path} missing: build the wasm first")
+        Err(_) if std::env::var("NILA_SKIP_WASM").is_err() => {
+            panic!("{path} missing: build the wasm first (or set NILA_SKIP_WASM=1)")
         }
         Err(_) => {
             std::eprintln!("skipped: {path} not built");

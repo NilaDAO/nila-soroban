@@ -312,14 +312,34 @@ fn union_settings_bounds_and_auth() {
     let union = Address::generate(&env);
     client.admit_union(&union, &h(&env, 1));
     assert_eq!(client.union_settings(&union), None);
+    let fund_core = Address::generate(&env);
     let ok = UnionSettings {
         wait: WAIT_MIN,
         session_len: SESSION_MAX,
-        session_contracts: soroban_sdk::vec![&env, Address::generate(&env)],
+        session_contracts: soroban_sdk::vec![&env, fund_core.clone()],
         sms_key: Some(Address::generate(&env)),
         fx_pool: None,
         usdc: None,
     };
+    // A session contract without the core role is refused (review 5 Nov); fund_core gets it.
+    assert_eq!(
+        client.try_set_union_settings(&union, &ok),
+        Err(Ok(Error::BadSetting))
+    );
+    client.set_role(&fund_core, &Role::Core, &true);
+    // fx_pool without USDC, or USDC without fx_pool: refused.
+    for (p, u) in [
+        (Some(Address::generate(&env)), None),
+        (None, Some(Address::generate(&env))),
+    ] {
+        let mut bad = ok.clone();
+        bad.fx_pool = p;
+        bad.usdc = u;
+        assert_eq!(
+            client.try_set_union_settings(&union, &bad),
+            Err(Ok(Error::BadSetting))
+        );
+    }
     for (w, s) in [
         (WAIT_MIN - 1, 300),
         (WAIT_MAX + 1, 300),

@@ -13,8 +13,9 @@
 //! itself (self mode), or (assist and keypad mode) starts a short session in which any leader of
 //! the account's union may sign for it: the member's phone shows one signed QR, the leader's app
 //! submits `start_session` and then the tasks, each signed by the leader's own account. A session
-//! reaches only the contracts the union lists (fund_core, machinery), never this account itself
-//! (so never `set_union` or `upgrade`) or the USDC token.
+//! reaches only the contracts the union lists (fund_core only, executive decision 4 Nov; roles
+//! accepts only contracts the trust gave the core role), never this account itself (so never
+//! `set_union` or `upgrade`) or the USDC token.
 //! Recovery replaces the signer on the same address, so titles, shares, investments and
 //! balances stay. **It has exactly one path (executive decision 4 Nov):** `recover_by_sms`, the
 //! union's SMS key (roles union settings) together with one leader of the union, once the new
@@ -27,8 +28,10 @@
 //! LP positions (executive decision 31 Oct): fx_pool (the one the union names) locks USDC in
 //! this account. A Collect locks the LP's own USDC at accept and takes it into fx_pool at the
 //! scan (`pay`); a Bring puts the union's USDC here and locks it, until a Collect of the same LP
-//! takes it back (`pay`) or a settle past the rate margin unlocks it. While a lien stands the
-//! signer cannot authorize a USDC transfer, burn or approve directly; free USDC goes out with
+//! takes it back (`pay`) or a settle past the rate margin unlocks it. The account never signs an
+//! `approve` on any contract (review 5 Nov: an allowance given while no USDC was guarded would
+//! outlive a later lien, and `transfer_from` asks this account nothing). While a lien stands the
+//! signer cannot authorize a USDC transfer or burn directly; free USDC goes out with
 //! `send_usdc`, which keeps the lien covered. Only fx_pool locks, unlocks or takes locked USDC.
 //! **The lien's fx_pool is fixed at the first lock (3 Nov):** the fx_pool and USDC the union
 //! names when the lien goes from 0 to above 0 are recorded; while the lien stands only that
@@ -261,29 +264,30 @@ fn free_usdc(env: &Env, usdc: &Address) -> i128 {
     TokenClient::new(env, usdc).balance(&env.current_contract_address()) - lien(env)
 }
 
-/// The lien (30 Oct): no USDC approve ever (no flow needs one), and no direct USDC transfer or
-/// burn while a lien stands (`send_usdc` checks the balance; the USDC contract cannot be read
-/// here, as it is on the call stack when it asks for this account's authorization). The USDC is
-/// the lien's, else the union's; with neither there is no USDC to guard.
-fn usdc_guarded(env: &Env) -> Option<Address> {
-    let s = env.storage().instance();
-    s.get(&DataKey::LienUsdc)
-        .or_else(|| settings(env).ok().and_then(|st| st.usdc))
+/// The USDC that counts for the guard: the lien's, else the union's (`st`, read once by the
+/// caller); with neither there is no USDC to guard.
+fn usdc_guarded(env: &Env, st: &Option<UnionSettings>) -> Option<Address> {
+    env.storage()
+        .instance()
+        .get(&DataKey::LienUsdc)
+        .or_else(|| st.as_ref().and_then(|st| st.usdc.clone()))
 }
 
+/// The lien (30 Oct): no `approve` ever, on any contract (no flow needs one; an allowance would
+/// survive a later lien, as `transfer_from` never asks this account), and no direct USDC transfer
+/// or burn while a lien stands (`send_usdc` checks the balance; the USDC contract cannot be read
+/// here, as it is on the call stack when it asks for this account's authorization).
 fn guard_usdc(env: &Env, token: &Option<Address>, contexts: &Vec<Context>) -> Result<(), Error> {
-    let Some(token) = token else {
-        return Ok(());
-    };
     let liened = lien(env) > 0;
     for c in contexts.iter() {
         if let Context::Contract(cc) = c {
-            if cc.contract != *token {
-                continue;
-            }
             let f = cc.fn_name;
-            if f == symbol_short!("approve")
-                || (liened && (f == symbol_short!("transfer") || f == symbol_short!("burn")))
+            if f == symbol_short!("approve") {
+                return Err(Error::Locked);
+            }
+            if liened
+                && Some(&cc.contract) == token.as_ref()
+                && (f == symbol_short!("transfer") || f == symbol_short!("burn"))
             {
                 return Err(Error::Locked);
             }
@@ -558,7 +562,10 @@ impl CustomAccountInterface for AccountContract {
         if frozen(&env) {
             return Err(Error::Frozen);
         }
-        let usdc = usdc_guarded(&env);
+        // The union's settings, read once for the guard and the session check.
+        let union = union_of(&env).ok();
+        let st = union.as_ref().and_then(|u| roles(&env).union_settings(u));
+        let usdc = usdc_guarded(&env, &st);
         guard_usdc(&env, &usdc, &auth_contexts)?;
         match signature {
             Signature::Ed25519(sig) => match get(&env, DataKey::Signer) {
@@ -576,13 +583,13 @@ impl CustomAccountInterface for AccountContract {
                 _ => return Err(Error::WrongKind),
             },
             Signature::Leader(leader) => {
-                let Ok(union) = union_of(&env) else {
+                let Some(union) = union else {
                     return Err(Error::NoSession);
                 };
                 if !in_session(&env) || !is_leader(&env, &union, &leader) {
                     return Err(Error::NoSession);
                 }
-                let allowed = settings(&env)?.session_contracts;
+                let allowed = st.ok_or(Error::NoSettings)?.session_contracts;
                 let me = env.current_contract_address();
                 for c in auth_contexts.iter() {
                     match c {

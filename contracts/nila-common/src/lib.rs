@@ -129,6 +129,7 @@ pub trait FundCoreTrait {
     // and settled into her balance as the member repays, in full when the loan closes, and by senior
     // at a default (owner split, 1 Nov: the owner carries no default risk). `to_union` is the union's
     // parts of the price (2 Nov), into its treasury as she repays; lost to senior at a default.
+    // Returns what was booked (prepay, postpaid, to_union): each capped by the voucher's reserve.
     fn pay_voucher(
         union: Address,
         token_id: BytesN<32>,
@@ -137,7 +138,7 @@ pub trait FundCoreTrait {
         prepay: i128,
         postpaid: i128,
         to_union: i128,
-    );
+    ) -> (i128, i128, i128);
     // The senior contract only (`redeem`, executive decision 2 Nov): a senior exit; (principal, interest, cost) in nIN.
     fn claim_senior(union: Address, investor: Address, max_shares: i128) -> (i128, i128, i128);
     // The senior contract only (`pay_income`, 2 Nov): owed senior interest an LP paid in USDC; burned and

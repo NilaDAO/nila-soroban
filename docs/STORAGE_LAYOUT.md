@@ -43,7 +43,7 @@ storage:
 | `Role(account, Role)` | persistent | bool (oracle, attester, core) |
 | `Leader(union, account)` | persistent | bool |
 | `UnionRole(union, account, UnionRole)` | persistent | bool (treasurer, secretary) |
-| `UnionSettings(union)` | persistent | `UnionSettings{wait, session_len, session_contracts, sms_key: Option, fx_pool: Option, usdc: Option}` (3 Nov, member-owned accounts; set by the union account, read by its members' accounts, TTL extended on read) |
+| `UnionSettings(union)` | persistent | `UnionSettings{wait, session_len, session_contracts, sms_key: Option, fx_pool: Option, usdc: Option}` (3 Nov, member-owned accounts; set by the union account, read by its members' accounts, TTL extended on read; every session contract must hold `Role(.., Core)`, fx_pool and usdc both or neither, review 5 Nov) |
 | `Admitted(union)` | persistent | `BytesN<32>` details hash = sha256(name ‖ 0x00 ‖ geo) of the union account's `nila.name` / `nila.geo` data (3 Nov, decision 008; written by the trust's `admit_union`, removed by `revoke_union`, TTL extended on read) |
 
 Revoke keeps the union's `Leader`, `UnionRole` and `UnionSettings` entries; while `Admitted(union)` is absent,
@@ -135,6 +135,8 @@ Revoke keeps the union's `Leader`, `UnionRole` and `UnionSettings` entries; whil
 | `DayOut(day)` | **temporary** | i128 USDC paid out that day, against the daily cap |
 | `RateBandBp` | instance | u32 how far the attester's fix may move (default 500 = 5%) |
 | `SwapKey` | instance | BytesN<32> the anchor's ed25519 swap key; `accept` needs its signature (C9b) |
+| `LeaderSwapUsdc(union)` | persistent | i128 USDC behind the union's swapped nIN (`swap_usdc_to_nin` less `swap_nin_to_usdc`) |
+| `SwapUsdc(union, account)` | persistent | i128 USDC that account swapped in and has not swapped back; caps its `swap_nin_to_usdc` (review 5 Nov) |
 
 ## senior (executive decision 2 Nov): all senior USDC
 

@@ -128,6 +128,8 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     makes `is_leader` false and `union_settings` None at once: no leader rights, sessions or recovery for its members'
     accounts until it is admitted again. fund_core does **not** check admission yet (follow-up, size gate): a revoked
     union's `set_union_config` must also be handled by the trust.
+    The trust first gives fund_core the core role, `roles.set_role(fund_core, Core, true)` (trust 3 of 5, once):
+    `set_union_settings` refuses any session contract without it, and fx_pool without usdc or the reverse (review 5 Nov).
     Each union account (3 of 5):
     `roles.set_union_settings(union, {wait, session_len, session_contracts: [fund_core], sms_key, fx_pool, usdc})`
     (**only fund_core**, executive decision 4 Nov: every leader-session call is fund_core `draw_loan`, `request_unbond`,

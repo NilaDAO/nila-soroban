@@ -77,6 +77,8 @@ fn bare() -> T {
     let roles_id = env.register(RolesContract, (Address::generate(&env),));
     let roles = RolesContractClient::new(&env, &roles_id);
     roles.admit_union(&union_ms, &BytesN::from_array(&env, &[1; 32]));
+    // The trust gives fund_core the core role: only such contracts may be session contracts.
+    roles.set_role(&fund_core, &nila_roles::Role::Core, &true);
     roles.set_leader(&union_ms, &leaders[0], &true);
     roles.set_leader(&union_ms, &leaders[1], &true);
     roles.set_union_settings(
@@ -363,6 +365,23 @@ fn usdc_call(env: &Env, usdc: &Address, f: &str) -> Vec<Context> {
     ]
 }
 
+/// Review 5 Nov: with no union named (so no USDC to guard) an approve is still refused, so no
+/// allowance can wait for a later lien.
+#[test]
+fn no_approve_even_with_no_union() {
+    let t = bare();
+    let token = Address::generate(&t.env);
+    assert_eq!(
+        check(
+            &t,
+            [1; 32],
+            sign(&t.env, &t.key, &[1; 32]),
+            &usdc_call(&t.env, &token, "approve")
+        ),
+        Err(Ok(Error::Locked))
+    );
+}
+
 #[test]
 fn only_fx_pool_locks_and_never_above_her_free_usdc() {
     let p = pledge();
@@ -404,6 +423,17 @@ fn while_a_lien_stands_usdc_leaves_only_by_send_usdc_within_the_free_part() {
     assert_eq!(
         check(t, [1; 32], k(1), &call_on(&t.env, &t.fund_core)),
         Ok(())
+    );
+    // No approve on any contract, USDC or not (review 5 Nov).
+    let other_token = Address::generate(&t.env);
+    assert_eq!(
+        check(
+            t,
+            [1; 32],
+            k(1),
+            &usdc_call(&t.env, &other_token, "approve")
+        ),
+        Err(Ok(Error::Locked))
     );
     // Her free 20 go out with send_usdc; more does not.
     let to = Address::generate(&t.env);
@@ -714,8 +744,10 @@ fn upgrade_needs_her_own_signature() {
     t.env.set_auths(&[]);
     assert!(t.c.try_upgrade(&h).is_err());
     t.env.mock_all_auths();
-    // A leader session never reaches the account itself.
+    // A leader session never reaches the account itself, even if the trust wrongly gave it the
+    // core role and the union listed it (roles refuses the list otherwise).
     let mut st = t.settings();
+    t.roles.set_role(&t.acct, &nila_roles::Role::Core, &true);
     st.session_contracts.push_back(t.acct.clone());
     t.set_settings(&st);
     t.c.start_session(&1_800_000_600);
@@ -733,7 +765,8 @@ fn upgrade_needs_her_own_signature() {
         check(t, [1; 32], Signature::Leader(t.leaders[0].clone()), &su),
         Err(Ok(Error::OutsideSession))
     );
-    // Nor the USDC, even if listed.
+    // Nor the USDC, even if listed (and given the core role).
+    t.roles.set_role(&p.usdc, &nila_roles::Role::Core, &true);
     st.session_contracts.push_back(p.usdc.clone());
     t.set_settings(&st);
     assert_eq!(
@@ -770,7 +803,9 @@ fn her_upgrade_moves_the_account_to_new_code() {
     );
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
-        Err(_) if std::env::var("NILA_REQUIRE_WASM").is_ok() => panic!("{path} missing"),
+        Err(_) if std::env::var("NILA_SKIP_WASM").is_err() => {
+            panic!("{path} missing: build the wasm first (or set NILA_SKIP_WASM=1)")
+        }
         Err(_) => return,
     };
     let t = setup();
