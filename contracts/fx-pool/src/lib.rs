@@ -130,6 +130,8 @@ pub enum Error {
     RateTooSoon = 36,
     /// The senior contract is set once (2 Nov).
     SeniorAlreadySet = 37,
+    /// The LP's account `pay` did not bring fx_pool the USDC asked (review 5 Nov).
+    NotPaid = 38,
 }
 
 /// INR per USD, 7 decimals (nIN per USDC), set by the attester from the FBIL fix (R77).

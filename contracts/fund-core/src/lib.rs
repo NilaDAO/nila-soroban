@@ -2139,13 +2139,20 @@ impl FundCore {
                 i_add(&env, &Counter::Treasury(union.clone()), m_i)?;
             }
         }
-        // Her investment's cash to senior for the voucher value and interest she owed.
+        // Her investment's cash to senior for the voucher value and interest she owed. With no senior
+        // shareholders to earn the interest it stays with the union, as in `senior_interest`.
         jm.cash -= m_s + m_vi;
-        sm.cash += m_s + m_vi;
+        sm.cash += m_s;
         sm.total_borrows -= core::cmp::min(sm.total_borrows, v_rest);
-        if m_vi > 0 && sm.total_shares > 0 {
-            sm.index = index_bump(&env, sm.index, sm.total_shares, m_vi).ok_or(Error::Overflow)?;
-            p_add(&env, &DataKey::SeniorIncome(union.clone()), m_vi)?;
+        if m_vi > 0 {
+            if sm.total_shares > 0 {
+                sm.cash += m_vi;
+                sm.index =
+                    index_bump(&env, sm.index, sm.total_shares, m_vi).ok_or(Error::Overflow)?;
+                p_add(&env, &DataKey::SeniorIncome(union.clone()), m_vi)?;
+            } else {
+                i_add(&env, &Counter::Treasury(union.clone()), m_vi)?;
+            }
         }
 
         // 2. Unpaid principal: junior pool, then senior (index haircuts). Unpaid interest

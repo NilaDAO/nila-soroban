@@ -3864,5 +3864,81 @@ mod fake_lp {
     #[contractimpl]
     impl FakeLp {
         pub fn send_usdc(_env: Env, _to: Address, _amount: i128) {}
+        // An upgraded LP account (review 5 Nov): its lien is for show; it locks and pays nothing.
+        pub fn lock(_env: Env, amount: i128) -> i128 {
+            amount
+        }
+        pub fn unlock(_env: Env, _amount: i128) -> i128 {
+            0
+        }
+        pub fn pay(_env: Env, _amount: i128) -> i128 {
+            0
+        }
     }
+}
+
+/// Review 5 Nov (finding 2): a Collect is booked only for the USDC that actually arrived in fx_pool; an LP
+/// account whose `pay` brings nothing is refused at the scan, so the leader keeps the cash.
+#[test]
+fn a_collect_is_booked_only_for_usdc_that_arrived() {
+    let fx = setup();
+    let f = fx.fx();
+    let (_anchor, _lp) = fx.lp_ready();
+    let (s24, q) = fx.ids();
+    let own = f.treasury_usdc(&fx.union);
+    // An account whose `pay` brings nothing.
+    let fake = fx.env.register(fake_lp::FakeLp, ());
+    fx.give_title(&fake);
+    f.set_id_checked(&fake, &true, &loan_id(&fx.env, 0x61));
+    f.set_lp(&fx.union, &fake, &true, &loan_id(&fx.env, 0x62));
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&fake, &(50 * NIN));
+    let c = fx.offer_of(OfferKind::Collect, 950 * NIN);
+    assert_eq!(fx.acc(&fake, &c, &s24, &q), 10 * NIN);
+    let hand = f.cash_at_hand(&fx.union);
+    assert_eq!(f.try_confirm(&fx.leader, &c), Err(Ok(FxError::NotPaid)));
+    assert_eq!(f.cash_at_hand(&fx.union), hand);
+    assert_eq!(f.lp_usdc(&fx.union), 0);
+    assert_eq!(f.treasury_usdc(&fx.union), own);
+}
+
+/// Review 5 Nov (finding 11): with no senior shareholders left, the voucher interest her investment covers at
+/// a default goes to the union treasury, as `senior_interest` does at a repayment; it is not left in senior
+/// cash that no one can claim.
+#[test]
+fn default_voucher_interest_goes_to_the_treasury_when_senior_has_no_shares() {
+    let v = vsetup();
+    let (fx, c, s) = (&v.fx, v.fx.core(), v.fx.senior());
+    let id = loan_id(&fx.env, 1);
+    fx.invest(&fx.borrower, 3_000 * NIN);
+    c.attest_food_token(
+        &fx.attester,
+        &fx.union,
+        &id,
+        &fx.borrower,
+        &(300 * NIN),
+        &200,
+    );
+    c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &200);
+    // A month on she gives every hour back: the voucher value is repaid to senior, its interest is not.
+    fx.at(T0 + 30 * 86_400);
+    c.return_voucher(&fx.borrower, &fx.union, &id, &200);
+    // Every senior investor leaves before the default.
+    let p = c.senior_position(&fx.union, &v.investor);
+    c.request_unbond(&fx.union, &v.investor, &p.shares, &true);
+    fx.at(T0 + 44 * 86_400 + 1);
+    s.redeem(&v.investor, &fx.union, &0);
+    assert_eq!(c.get_senior_market(&fx.union).total_shares, 0);
+    c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
+    fx.at(T0 + 111 * 86_400 + 1);
+    let treasury = c.union_treasury(&fx.union);
+    let senior_cash = c.get_senior_market(&fx.union).cash;
+    c.mark_default(&fx.union, &id);
+    let gained = c.union_treasury(&fx.union) - treasury;
+    assert!(gained > 0);
+    assert_eq!(c.senior_income(&fx.union), 0);
+    // Senior cash takes back the voucher value only, never the interest.
+    let sm = c.get_senior_market(&fx.union);
+    assert_eq!(sm.total_borrows, 0);
+    assert!(sm.cash >= senior_cash);
+    v.assert_conserved();
 }
