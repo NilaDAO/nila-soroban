@@ -1,0 +1,41 @@
+# Config for scripts/mainnet-deploy.sh — PUBLIC values only (addresses, names). Copy it outside the repo or into
+# .deploy/ (gitignored) and fill it. Keys are stellar CLI identities, named here; their secrets never appear.
+
+NET=mainnet                                   # testnet for the rehearsal
+RPC_URL=https://rpc.lightsail.network/        # testnet: https://soroban-testnet.stellar.org
+
+# Signers (stellar CLI identities)
+DEPLOYER_ID=nila-mainnet-deployer             # hot key, ~150 XLM; delete after D passes
+ADMIN_ID=nila-admin-ledger                    # the trust admin on the Ledger (m/44'/148'/1')
+ISSUER_ID=                                    # the nIN issuer (the trust); funded, no trustlines
+UNION_ID=                                     # optional: the union account's key as a CLI identity; empty = the
+                                              # union's calls are written to .deploy/deploy-mainnet.union-calls.sh
+
+# Assets
+USDC_ASSET=USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN   # Circle; testnet: USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
+HOME_DOMAIN=anchor.nila.land                  # the issuer's home_domain: its stellar.toml lists nIN (before the lock)
+
+# Node keys (public; the secrets are in SSM /nila/)
+ATTESTER=GDHZEOQID34M3GMYUN6P4TLKI2XHHGIL6WHTUF3ARG4VXYJTSYVKXUNH
+ORACLE=GDHJN74PSSE5O7VBHDZFSRAUVESJUHNE6FMHX3F3SPQN4OHNB3WLRKON
+SMS_KEY=GCEGQZDRJKQ7A3BVV3IS6I4EVO3CSM4TVYSDCBABUU2NLLWY3UNQSC3G
+
+# The union (decision 008): its account, its public details, its leaders
+UNION=                                        # G… Mother Theresa Union's Stellar account (set from UNION_ID if given)
+UNION_NAME="Mother Theresa Union"             # nila.name on its account, up to 64 bytes
+UNION_GEO=tf05sf                              # nila.geo: geohash of its centre (11.879, 78.965)
+UNION_DISPLAY="Mother Theresa Union"          # fund_viewer.create_union display name
+LEADERS=""                                    # space-separated: each leader's Nila account (C… or G…)
+RECOVERY_WAIT=14400                           # 4 h (executive decision 2 Nov)
+SESSION_LEN=300                               # 5-minute leader sessions
+
+# Limits
+DAILY_CAP_USDC=2500
+SENIOR_CAP_USDC=0                             # unaudited: no senior deposits until the audit
+
+# Crop calendar: nila-sensing `scripts/crop_calendar.py` output (needs the Polygon crop families: FoodToken P2)
+CAL_WINDOWS=.deploy/crop-windows.txt
+
+# The anchor (go-live step 5): its public account and the swap key's public G… (empty = set later)
+ANCHOR_ACCOUNT=
+ANCHOR_SWAP_KEY=

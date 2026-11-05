@@ -11,3 +11,4 @@ test_snapshots/
 !contracts/**/src/**
 Cargo.lock.bak
 *.zip
+/.deploy
