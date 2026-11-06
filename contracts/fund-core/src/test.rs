@@ -2682,7 +2682,10 @@ fn senior_exits_at_par_and_its_interest_comes_in_usdc_through_an_lp() {
         Err(Err(_))
     ));
     fx.at(T0 + YEAR / 2 + 14 * 86_400);
+    let room = c.cash_room(&fx.union);
     assert_eq!(s.redeem(&v.investor, &fx.union, &0), 200 * NIN);
+    // The interest now owed waits at the office for an LP: it counts in the cash room (review 5 Nov).
+    assert_eq!(c.cash_room(&fx.union), room + v_int);
     assert_eq!(tok.balance(&v.investor), 200 * NIN);
     assert_eq!((tok.balance(&fx.senior_id), s.total()), (0, 0));
     assert_eq!(s.union_usdc(&fx.union, &Tag::Offshore), 0);
@@ -3976,4 +3979,22 @@ fn a_payout_from_expired_cash_pays_the_treasury_back() {
     fx.draw(&loan_id(&fx.env, 3), 50 * NIN);
     assert_eq!(c.union_treasury(&fx.union), 1_000 * NIN);
     fx.assert_conserved();
+}
+
+/// Review 5 Nov (finding 12): once the trust revokes a union, its machines claim no more vouchers.
+#[test]
+fn a_revoked_unions_machines_claim_no_more() {
+    let v = vsetup();
+    let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
+    use nila_machinery::Error as ME;
+    let id = loan_id(&fx.env, 1);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &400);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &400);
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &400, &100);
+    let roles = c.get_config().roles;
+    nila_roles::RolesContractClient::new(&fx.env, &roles).revoke_union(&fx.union);
+    assert_eq!(
+        mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &400, &100),
+        Err(Ok(ME::Unavailable))
+    );
 }

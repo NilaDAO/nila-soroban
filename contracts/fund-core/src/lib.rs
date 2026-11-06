@@ -2454,13 +2454,14 @@ impl FundCore {
     }
 
     // How much cash the union's office may hold (executive decision 30 Oct, on-chain 31 Oct): the treasury, the
-    // withdrawals started and not collected (junior claimable principal), and the cash parts of undrawn food tokens
-    // whose window closes in this week or the next `ROOM_WEEKS`: cash members are due to take out again. fx_pool
-    // refuses a cash scan above it.
+    // withdrawals started and not collected (junior claimable principal), senior interest owed and waiting for an
+    // LP (review 5 Nov), and the cash parts of undrawn food tokens whose window closes in this week or the next
+    // `ROOM_WEEKS`: cash members are due to take out again. fx_pool refuses a cash scan above it.
     pub fn cash_room(env: Env, union: Address) -> i128 {
         let w = env.ledger().timestamp() / (7 * DAY);
         let mut room = i_get(&env, &Counter::Treasury(union.clone()))
-            + load_market(&env, true, &union).claimable_principal;
+            + load_market(&env, true, &union).claimable_principal
+            + p_i128(&env, &DataKey::SeniorOwedTotal(union.clone()));
         for i in w..=w + ROOM_WEEKS {
             room += env
                 .storage()

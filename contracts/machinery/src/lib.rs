@@ -786,7 +786,11 @@ impl MachineryContract {
         if m.owner != owner {
             return Err(Error::NotOwner);
         }
-        if m.union != union || m.on_hold {
+        // A union the trust revoked claims no more (review 5 Nov): its machines stop with it.
+        if m.union != union
+            || m.on_hold
+            || !RolesClient::new(&env, &get(&env, &DataKey::Roles)).is_union(&union)
+        {
             return Err(Error::Unavailable);
         }
         let mut v = load_voucher(&env, &union, &token_id)?;

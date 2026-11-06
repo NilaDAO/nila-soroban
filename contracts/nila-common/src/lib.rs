@@ -95,6 +95,8 @@ pub trait RolesTrait {
     fn is_oracle(account: Address) -> bool;
     fn is_leader(union: Address, account: Address) -> bool;
     fn has_role(account: Address, role: Role) -> bool;
+    // The trust admitted the union and has not revoked it (decision 008).
+    fn is_union(union: Address) -> bool;
 }
 
 // What fund_core asks of fx_pool (C3). fx_pool never reads back into fund_core inside
