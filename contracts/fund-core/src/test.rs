@@ -1370,6 +1370,7 @@ fn storage_layout_is_frozen() {
         DataKey::SeniorOwed(a.clone(), a.clone()),
         DataKey::SeniorIncome(a.clone()),
         DataKey::SeniorOwedTotal(a.clone()),
+        DataKey::ExpiredCash(a.clone()),
     ] {
         v.push_back(k.into_val(&env));
     }
@@ -1503,7 +1504,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "44ec2c0939fe67cfc0393f29da1f11e89dfe3a21ee64e6f036ee11b566353936",
+        hex, "993cea76fe3913665e3090f520d33b5f19d6089b2c3c93fa55c5c59645ba5ecf",
         "fund_core storage layout changed"
     );
 }
@@ -3941,4 +3942,38 @@ fn default_voucher_interest_goes_to_the_treasury_when_senior_has_no_shares() {
     assert_eq!(sm.total_borrows, 0);
     assert!(sm.cash >= senior_cash);
     v.assert_conserved();
+}
+
+/// Review 5 Nov (finding 8): rupees paid out of the drawer above the open cash batches came from expired cash
+/// the treasury already paid for, so that much nIN goes back to the treasury instead of being burned.
+#[test]
+fn a_payout_from_expired_cash_pays_the_treasury_back() {
+    let fx = setup();
+    let c = fx.core();
+    fx.scan(Purpose::Treasury, &fx.leader, 1_000 * NIN, 1, None)
+        .unwrap();
+    let e = fx
+        .scan(Purpose::Invest, &fx.borrower, 800 * NIN, 2, None)
+        .unwrap();
+    fx.at(T0 + 7 * 86_400);
+    fx.fx().burn_expired_escrow(&fx.union, &e);
+    // The treasury paid for the ₹800 still in the drawer.
+    assert_eq!(c.union_treasury(&fx.union), 200 * NIN);
+    assert_eq!(fx.fx().cash_at_hand(&fx.union), 0);
+    // ₹500 of it goes out as a loan's cash: the treasury gets ₹500 back.
+    let id = loan_id(&fx.env, 1);
+    fx.draw(&id, 500 * NIN);
+    assert_eq!(c.union_treasury(&fx.union), 700 * NIN);
+    fx.assert_conserved();
+    // A fresh scan of ₹100, then ₹350 out: ₹100 from the open batch (burned), ₹250 from the expired cash.
+    fx.scan(Purpose::Invest, &fx.neighbour, 100 * NIN, 3, None)
+        .unwrap();
+    fx.draw(&loan_id(&fx.env, 2), 350 * NIN);
+    assert_eq!(fx.fx().cash_at_hand(&fx.union), 0);
+    assert_eq!(c.union_treasury(&fx.union), 950 * NIN);
+    fx.assert_conserved();
+    // The last ₹50 of the expired cash goes out too: the treasury is back to its ₹1,000.
+    fx.draw(&loan_id(&fx.env, 3), 50 * NIN);
+    assert_eq!(c.union_treasury(&fx.union), 1_000 * NIN);
+    fx.assert_conserved();
 }

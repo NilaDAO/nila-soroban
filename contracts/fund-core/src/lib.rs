@@ -108,6 +108,9 @@ pub enum DataKey {
     SeniorIncome(Address),
     // All `SeniorOwed` of a union: nIN held in fund_core outside every pool (2 Nov).
     SeniorOwedTotal(Address),
+    // Expired cash the treasury paid for and still in the union's drawer (review 5 Nov): a payout
+    // above the open cash batches takes it, and its nIN goes back to the treasury.
+    ExpiredCash(Address),
 }
 
 #[contract]
@@ -783,6 +786,25 @@ fn senior_interest(env: &Env, union: &Address, interest: i128) -> Result<(), Err
     Ok(())
 }
 
+// Rupees handed out of the office drawer (a cash withdrawal, a loan's cash part, senior interest taken by an
+// LP; review 5 Nov): the part the open cash batches hold leaves cash at hand and its nIN is burned. The rest
+// came from expired cash the treasury already paid for (`cover_expired_escrow`), so that much of its nIN goes
+// back to the treasury instead of being burned. Returns what cash at hand covered.
+fn pay_out_cash(env: &Env, union: &Address, amount: i128) -> Result<i128, Error> {
+    let fx = cfg(env).fx_pool.ok_or(Error::NotFxPool)?;
+    let settled = FxPoolClient::new(env, &fx).settle_cash(union, &amount);
+    let ek = DataKey::ExpiredCash(union.clone());
+    let back = core::cmp::min(amount - settled, p_i128(env, &ek));
+    if back > 0 {
+        p_add(env, &ek, -back)?;
+        i_add(env, &Counter::Treasury(union.clone()), back)?;
+    }
+    if amount > back {
+        nin(env).burn(&env.current_contract_address(), &(amount - back));
+    }
+    Ok(settled)
+}
+
 // At a default: her unclaimed hours lapse and their reserve goes back to senior cash. Returns it.
 fn void_vouchers(
     env: &Env,
@@ -1202,6 +1224,7 @@ impl FundCore {
         let covered = amount - left;
         if covered > 0 {
             nin(&env).burn(&env.current_contract_address(), &covered);
+            p_add(&env, &DataKey::ExpiredCash(union.clone()), covered)?;
         }
         EscrowCovered {
             union,
@@ -1309,9 +1332,7 @@ impl FundCore {
         member.require_auth_for_args((union.clone(), max_shares).into_val(&env));
         require_leader(&env, &union, &leader)?;
         let (amount, _) = claim(&env, true, &union, &member, max_shares, false)?;
-        nin(&env).burn(&env.current_contract_address(), &amount);
-        let fx = cfg(&env).fx_pool.ok_or(Error::NotFxPool)?;
-        let settled = FxPoolClient::new(&env, &fx).settle_cash(&union, &amount);
+        let settled = pay_out_cash(&env, &union, amount)?;
         Claimed {
             investor: member,
             union,
@@ -1387,9 +1408,7 @@ impl FundCore {
         }
         p_add(&env, &k, -amount)?;
         p_add(&env, &DataKey::SeniorOwedTotal(union.clone()), -amount)?;
-        nin(&env).burn(&env.current_contract_address(), &amount);
-        let fx = cfg(&env).fx_pool.ok_or(Error::NotFxPool)?;
-        let settled = FxPoolClient::new(&env, &fx).settle_cash(&union, &amount);
+        let settled = pay_out_cash(&env, &union, amount)?;
         SeniorIncomeTaken {
             union,
             investor,
@@ -1647,9 +1666,7 @@ impl FundCore {
 
         let mut settled = 0;
         if cash > 0 {
-            nin(&env).burn(&env.current_contract_address(), &cash);
-            let fx = cfg(&env).fx_pool.ok_or(Error::NotFxPool)?;
-            settled = FxPoolClient::new(&env, &fx).settle_cash(&union, &cash);
+            settled = pay_out_cash(&env, &union, cash)?;
         }
 
         LoanDrawn {

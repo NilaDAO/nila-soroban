@@ -89,6 +89,7 @@ Revoke keeps the union's `Leader`, `UnionRole` and `UnionSettings` entries; whil
 | `SeniorOwed(union, investor)` | persistent | i128 senior interest taken out of the pool at an exit, owed until an LP pays it in USDC (`take_senior_income`, 2 Nov); the nIN stays in fund_core, outside senior cash |
 | `SeniorIncome(union)` | persistent | i128 voucher interest senior earned in the union and has not yet taken out (2 Nov) |
 | `SeniorOwedTotal(union)` | persistent | i128 all `SeniorOwed` of the union: nIN in fund_core outside every pool (counted in the conservation check) |
+| `ExpiredCash(union)` | persistent | i128 expired cash the treasury paid for (`cover_expired_escrow`) and still in the drawer; a cash payout above the open batches takes it and its nIN goes back to the treasury (review 5 Nov) |
 
 ## crop_calendar (25 Oct)
 
