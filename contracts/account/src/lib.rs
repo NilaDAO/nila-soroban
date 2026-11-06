@@ -139,6 +139,25 @@ pub enum DataKey {
     /// The fx_pool and USDC of the lien, recorded at the lock that opened it (3 Nov).
     LienPool,
     LienUsdc,
+    /// A change of union or code waiting out the union's recovery wait (review 5 Nov).
+    Move,
+}
+
+/// What a waiting move changes (review 5 Nov).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MoveTo {
+    Union(Address),
+    Code(BytesN<32>),
+}
+
+/// A move of an account that already names a union: it applies after the union's recovery wait,
+/// and a recovery proposed meanwhile cancels it, so a stolen key can never outrun recovery.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Move {
+    pub to: MoveTo,
+    pub at: u64,
 }
 
 /// A union's settings as roles keeps them (`roles.union_settings`, 3 Nov); same layout as
@@ -191,6 +210,13 @@ pub struct SessionStarted {
 #[contractevent]
 pub struct SessionUsed {
     pub leader: Address,
+}
+
+/// A change of union or code is waiting (review 5 Nov); `finish_move` applies it from `at`.
+#[contractevent]
+pub struct MoveWaiting {
+    pub to: MoveTo,
+    pub at: u64,
 }
 
 /// The member named her union (3 Nov).
@@ -319,10 +345,11 @@ fn member_only(env: &Env) -> Result<(), Error> {
     Ok(())
 }
 
-/// A proposal freezes the account and ends any running session.
+/// A proposal freezes the account, ends any running session and cancels a waiting move.
 fn propose(env: &Env, signer: Signer) -> Result<(), Error> {
     let at = env.ledger().timestamp() + settings(env)?.wait;
     env.storage().instance().remove(&DataKey::Session);
+    env.storage().instance().remove(&DataKey::Move);
     env.storage().instance().set(
         &DataKey::Pending,
         &Pending {
@@ -333,6 +360,27 @@ fn propose(env: &Env, signer: Signer) -> Result<(), Error> {
     RecoveryProposed { signer, at }.publish(env);
     bump_instance(env);
     Ok(())
+}
+
+/// Review 5 Nov: with no union named yet (a new account) a move applies at once; once a union is
+/// named it waits the union's recovery wait (`finish_move`). Returns true when it waits.
+fn wait_move(env: &Env, to: MoveTo) -> Result<bool, Error> {
+    if !env.storage().instance().has(&DataKey::Union) {
+        return Ok(false);
+    }
+    let at = env.ledger().timestamp() + settings(env)?.wait;
+    env.storage()
+        .instance()
+        .set(&DataKey::Move, &Move { to: to.clone(), at });
+    MoveWaiting { to, at }.publish(env);
+    bump_instance(env);
+    Ok(true)
+}
+
+fn apply_union(env: &Env, union: Address) {
+    env.storage().instance().set(&DataKey::Union, &union);
+    UnionSet { union }.publish(env);
+    bump_instance(env);
 }
 
 fn is_leader(env: &Env, union: &Address, who: &Address) -> bool {
@@ -354,17 +402,45 @@ impl AccountContract {
 
     /// The member names (or changes) her union, with her own signature: never while a recovery
     /// is pending, a leader session runs, or a lien stands. Only a union with settings in roles
-    /// (`NoSettings` otherwise), so never one the trust has not admitted (decision 008).
+    /// (`NoSettings` otherwise), so never one the trust has not admitted (decision 008). Her first
+    /// union applies at once; a change waits the union's recovery wait (`finish_move`, review 5 Nov).
     pub fn set_union(env: Env, union: Address) -> Result<(), Error> {
         member_only(&env)?;
         env.current_contract_address().require_auth();
         roles(&env)
             .union_settings(&union)
             .ok_or(Error::NoSettings)?;
-        env.storage().instance().set(&DataKey::Union, &union);
-        UnionSet { union }.publish(&env);
-        bump_instance(&env);
+        if !wait_move(&env, MoveTo::Union(union.clone()))? {
+            apply_union(&env, union);
+        }
         Ok(())
+    }
+
+    /// Anyone, once a waiting move's time has come and no recovery cancelled it: the change of
+    /// union or code applies (review 5 Nov). Same conditions as the move itself.
+    pub fn finish_move(env: Env) -> Result<(), Error> {
+        let m: Move = env
+            .storage()
+            .instance()
+            .get(&DataKey::Move)
+            .ok_or(Error::NotReady)?;
+        if env.ledger().timestamp() < m.at {
+            return Err(Error::NotReady);
+        }
+        member_only(&env)?;
+        env.storage().instance().remove(&DataKey::Move);
+        match m.to {
+            MoveTo::Union(u) => {
+                roles(&env).union_settings(&u).ok_or(Error::NoSettings)?;
+                apply_union(&env, u);
+            }
+            MoveTo::Code(h) => env.deployer().update_current_contract_wasm(h),
+        }
+        Ok(())
+    }
+
+    pub fn pending_move(env: Env) -> Option<Move> {
+        env.storage().instance().get(&DataKey::Move)
     }
 
     /// The account's own signer moves to a new key (a new phone).
@@ -437,6 +513,7 @@ impl AccountContract {
 
     /// The member alone moves her account to new code (her own signature; a leader session never
     /// reaches this account): never while a recovery is pending, a session runs, or a lien stands.
+    /// Once a union is named it waits the union's recovery wait (`finish_move`, review 5 Nov).
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         member_only(&env)?;
         env.current_contract_address().require_auth();
@@ -445,7 +522,9 @@ impl AccountContract {
         {
             return Err(Error::Current);
         }
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        if !wait_move(&env, MoveTo::Code(new_wasm_hash.clone()))? {
+            env.deployer().update_current_contract_wasm(new_wasm_hash);
+        }
         Ok(())
     }
 

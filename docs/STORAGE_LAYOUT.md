@@ -229,6 +229,7 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
 | `Session` | instance | u64: until when a leader of the union may sign for the account |
 | `Lien` | instance | i128: USDC locked by fx_pool (LP positions) |
 | `LienPool` / `LienUsdc` | instance | the fx_pool and USDC the union named at the lock that opened the lien; only that fx_pool unlocks or takes it; removed when the lien is back at 0 |
+| `Move` | instance | `Move { to: Union(addr) \| Code(hash), at }`: a change of union or code once a union is named, applied by `finish_move` from `at` (the union's recovery wait); a recovery proposal removes it (review 5 Nov) |
 
 3 Nov (member-owned accounts, executive decision): the `Factory` key is gone. The constructor is `(roles, signer)`,
 with no union; the immutable `deployer` (one for all unions) deploys it at the address that follows from the key.
