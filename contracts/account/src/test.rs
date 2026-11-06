@@ -873,6 +873,11 @@ fn a_move_waits_and_a_recovery_cancels_it() {
     let m = t.c.pending_move().unwrap();
     assert_eq!(m.at, t.env.ledger().timestamp() + wait);
     assert_eq!(t.c.try_finish_move(), Err(Ok(Error::NotReady)));
+    // Asked again later (her app at the next start): the wait does not restart.
+    t.env.ledger().set_timestamp(m.at - 1);
+    t.c.set_union(&other);
+    assert_eq!(t.c.pending_move().unwrap().at, m.at);
+    t.env.ledger().set_timestamp(m.at - wait);
     // Her leader and the SMS key start a recovery: the move is cancelled.
     sms_on(&t);
     let new_key = SigningKey::from_slice(&[42u8; 32]).unwrap();

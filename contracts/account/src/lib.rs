@@ -368,6 +368,11 @@ fn wait_move(env: &Env, to: MoveTo) -> Result<bool, Error> {
     if !env.storage().instance().has(&DataKey::Union) {
         return Ok(false);
     }
+    // The same move asked again (her app at each start) keeps its time: the wait never restarts.
+    let waiting: Option<Move> = env.storage().instance().get(&DataKey::Move);
+    if waiting.is_some_and(|m| m.to == to) {
+        return Ok(true);
+    }
     let at = env.ledger().timestamp() + settings(env)?.wait;
     env.storage()
         .instance()
