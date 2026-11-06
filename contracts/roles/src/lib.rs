@@ -41,7 +41,7 @@ pub enum Error {
 }
 
 /// What a union sets for the Nila accounts that name it (executive decision 3 Nov: member-owned
-/// accounts; was the per-union account factory). Signed by the union account (3 of 5).
+/// accounts; was the per-union account factory). Signed by the union account (2 of 3).
 /// nila-account decodes the same type (kept apart from nila-common so the other contracts do not
 /// carry its spec).
 #[contracttype]
@@ -272,7 +272,8 @@ impl RolesContract {
     }
 
     /// Leaders of a union, all equal. Signed by the union account itself, whose
-    /// 5 signers / threshold 3 make `require_auth` the 3 of 5 (D12, R4, R5).
+    /// 3 signers / threshold 2 make `require_auth` the 2 of 3 (D12, R4, R5; 2-of-3 since 6 Nov, was
+    /// 3-of-5). The contract counts neither: a union may have more leaders than signers.
     pub fn set_leader(
         env: Env,
         union: Address,
@@ -323,7 +324,7 @@ impl RolesContract {
     }
 
     /// The settings the union's accounts read (recovery wait, session, SMS key, fx_pool and USDC).
-    /// Signed by the union account (3 of 5). Refused (`BadSetting`): values out of range, a session
+    /// Signed by the union account (2 of 3). Refused (`BadSetting`): values out of range, a session
     /// contract the trust has not given the core role (review 5 Nov: a union could otherwise let
     /// leaders sign XLM or fx_pool calls for its members), or fx_pool without USDC or the reverse.
     pub fn set_union_settings(
