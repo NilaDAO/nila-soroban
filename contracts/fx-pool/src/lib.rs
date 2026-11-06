@@ -113,7 +113,8 @@ pub enum Error {
     /// The offer is not in the state this call needs.
     OfferState = 26,
     TooManyOffers = 27,
-    /// The union's USDC (LP-collected plus senior above the floor) does not cover it.
+    /// The union's USDC (its treasury USDC for a Bring, the leader-swap USDC for a swap back) does not
+    /// cover it.
     NoUsdc = 28,
     // 29 (AlreadyMoved) and 30 (MoveBudget) removed 4 Nov with `mint_moved`; numbers not reused.
     /// The anchor's signed quote no longer matches what the offer pays or takes (C9b).
@@ -130,6 +131,8 @@ pub enum Error {
     RateTooSoon = 36,
     /// The senior contract is set once (2 Nov).
     SeniorAlreadySet = 37,
+    /// The LP's account `pay` did not bring fx_pool the USDC asked (review 5 Nov).
+    NotPaid = 38,
 }
 
 /// INR per USD, 7 decimals (nIN per USDC), set by the attester from the FBIL fix (R77).

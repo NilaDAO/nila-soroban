@@ -1370,6 +1370,7 @@ fn storage_layout_is_frozen() {
         DataKey::SeniorOwed(a.clone(), a.clone()),
         DataKey::SeniorIncome(a.clone()),
         DataKey::SeniorOwedTotal(a.clone()),
+        DataKey::ExpiredCash(a.clone()),
     ] {
         v.push_back(k.into_val(&env));
     }
@@ -1503,7 +1504,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "44ec2c0939fe67cfc0393f29da1f11e89dfe3a21ee64e6f036ee11b566353936",
+        hex, "993cea76fe3913665e3090f520d33b5f19d6089b2c3c93fa55c5c59645ba5ecf",
         "fund_core storage layout changed"
     );
 }
@@ -2463,7 +2464,7 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
         Err(Ok(ME::Unavailable))
     );
     mc.set_hold(&v.owner, &v.machine, &false, &0);
-    // Only a leader registers; only members own machines; rates are the union's (3 of 5).
+    // Only a leader registers; only members own machines; rates are the union's (2 of 3).
     assert_eq!(
         mc.try_register_machine(&fx.borrower, &fx.union, &v.owner, &1, &40, &id),
         Err(Ok(ME::NotLeader))
@@ -2681,7 +2682,10 @@ fn senior_exits_at_par_and_its_interest_comes_in_usdc_through_an_lp() {
         Err(Err(_))
     ));
     fx.at(T0 + YEAR / 2 + 14 * 86_400);
+    let room = c.cash_room(&fx.union);
     assert_eq!(s.redeem(&v.investor, &fx.union, &0), 200 * NIN);
+    // The interest now owed waits at the office for an LP: it counts in the cash room (review 5 Nov).
+    assert_eq!(c.cash_room(&fx.union), room + v_int);
     assert_eq!(tok.balance(&v.investor), 200 * NIN);
     assert_eq!((tok.balance(&fx.senior_id), s.total()), (0, 0));
     assert_eq!(s.union_usdc(&fx.union, &Tag::Offshore), 0);
@@ -3864,5 +3868,133 @@ mod fake_lp {
     #[contractimpl]
     impl FakeLp {
         pub fn send_usdc(_env: Env, _to: Address, _amount: i128) {}
+        // An upgraded LP account (review 5 Nov): its lien is for show; it locks and pays nothing.
+        pub fn lock(_env: Env, amount: i128) -> i128 {
+            amount
+        }
+        pub fn unlock(_env: Env, _amount: i128) -> i128 {
+            0
+        }
+        pub fn pay(_env: Env, _amount: i128) -> i128 {
+            0
+        }
     }
+}
+
+/// Review 5 Nov (finding 2): a Collect is booked only for the USDC that actually arrived in fx_pool; an LP
+/// account whose `pay` brings nothing is refused at the scan, so the leader keeps the cash.
+#[test]
+fn a_collect_is_booked_only_for_usdc_that_arrived() {
+    let fx = setup();
+    let f = fx.fx();
+    let (_anchor, _lp) = fx.lp_ready();
+    let (s24, q) = fx.ids();
+    let own = f.treasury_usdc(&fx.union);
+    // An account whose `pay` brings nothing.
+    let fake = fx.env.register(fake_lp::FakeLp, ());
+    fx.give_title(&fake);
+    f.set_id_checked(&fake, &true, &loan_id(&fx.env, 0x61));
+    f.set_lp(&fx.union, &fake, &true, &loan_id(&fx.env, 0x62));
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&fake, &(50 * NIN));
+    let c = fx.offer_of(OfferKind::Collect, 950 * NIN);
+    assert_eq!(fx.acc(&fake, &c, &s24, &q), 10 * NIN);
+    let hand = f.cash_at_hand(&fx.union);
+    assert_eq!(f.try_confirm(&fx.leader, &c), Err(Ok(FxError::NotPaid)));
+    assert_eq!(f.cash_at_hand(&fx.union), hand);
+    assert_eq!(f.lp_usdc(&fx.union), 0);
+    assert_eq!(f.treasury_usdc(&fx.union), own);
+}
+
+/// Review 5 Nov (finding 11): with no senior shareholders left, the voucher interest her investment covers at
+/// a default goes to the union treasury, as `senior_interest` does at a repayment; it is not left in senior
+/// cash that no one can claim.
+#[test]
+fn default_voucher_interest_goes_to_the_treasury_when_senior_has_no_shares() {
+    let v = vsetup();
+    let (fx, c, s) = (&v.fx, v.fx.core(), v.fx.senior());
+    let id = loan_id(&fx.env, 1);
+    fx.invest(&fx.borrower, 3_000 * NIN);
+    c.attest_food_token(
+        &fx.attester,
+        &fx.union,
+        &id,
+        &fx.borrower,
+        &(300 * NIN),
+        &200,
+    );
+    c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &200);
+    // A month on she gives every hour back: the voucher value is repaid to senior, its interest is not.
+    fx.at(T0 + 30 * 86_400);
+    c.return_voucher(&fx.borrower, &fx.union, &id, &200);
+    // Every senior investor leaves before the default.
+    let p = c.senior_position(&fx.union, &v.investor);
+    c.request_unbond(&fx.union, &v.investor, &p.shares, &true);
+    fx.at(T0 + 44 * 86_400 + 1);
+    s.redeem(&v.investor, &fx.union, &0);
+    assert_eq!(c.get_senior_market(&fx.union).total_shares, 0);
+    c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
+    fx.at(T0 + 111 * 86_400 + 1);
+    let treasury = c.union_treasury(&fx.union);
+    let senior_cash = c.get_senior_market(&fx.union).cash;
+    c.mark_default(&fx.union, &id);
+    let gained = c.union_treasury(&fx.union) - treasury;
+    assert!(gained > 0);
+    assert_eq!(c.senior_income(&fx.union), 0);
+    // Senior cash takes back the voucher value only, never the interest.
+    let sm = c.get_senior_market(&fx.union);
+    assert_eq!(sm.total_borrows, 0);
+    assert!(sm.cash >= senior_cash);
+    v.assert_conserved();
+}
+
+/// Review 5 Nov (finding 8): rupees paid out of the drawer above the open cash batches came from expired cash
+/// the treasury already paid for, so that much nIN goes back to the treasury instead of being burned.
+#[test]
+fn a_payout_from_expired_cash_pays_the_treasury_back() {
+    let fx = setup();
+    let c = fx.core();
+    fx.scan(Purpose::Treasury, &fx.leader, 1_000 * NIN, 1, None)
+        .unwrap();
+    let e = fx
+        .scan(Purpose::Invest, &fx.borrower, 800 * NIN, 2, None)
+        .unwrap();
+    fx.at(T0 + 7 * 86_400);
+    fx.fx().burn_expired_escrow(&fx.union, &e);
+    // The treasury paid for the ₹800 still in the drawer.
+    assert_eq!(c.union_treasury(&fx.union), 200 * NIN);
+    assert_eq!(fx.fx().cash_at_hand(&fx.union), 0);
+    // ₹500 of it goes out as a loan's cash: the treasury gets ₹500 back.
+    let id = loan_id(&fx.env, 1);
+    fx.draw(&id, 500 * NIN);
+    assert_eq!(c.union_treasury(&fx.union), 700 * NIN);
+    fx.assert_conserved();
+    // A fresh scan of ₹100, then ₹350 out: ₹100 from the open batch (burned), ₹250 from the expired cash.
+    fx.scan(Purpose::Invest, &fx.neighbour, 100 * NIN, 3, None)
+        .unwrap();
+    fx.draw(&loan_id(&fx.env, 2), 350 * NIN);
+    assert_eq!(fx.fx().cash_at_hand(&fx.union), 0);
+    assert_eq!(c.union_treasury(&fx.union), 950 * NIN);
+    fx.assert_conserved();
+    // The last ₹50 of the expired cash goes out too: the treasury is back to its ₹1,000.
+    fx.draw(&loan_id(&fx.env, 3), 50 * NIN);
+    assert_eq!(c.union_treasury(&fx.union), 1_000 * NIN);
+    fx.assert_conserved();
+}
+
+/// Review 5 Nov (finding 12): once the trust revokes a union, its machines claim no more vouchers.
+#[test]
+fn a_revoked_unions_machines_claim_no_more() {
+    let v = vsetup();
+    let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
+    use nila_machinery::Error as ME;
+    let id = loan_id(&fx.env, 1);
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &0, &400);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &0, &400);
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &400, &100);
+    let roles = c.get_config().roles;
+    nila_roles::RolesContractClient::new(&fx.env, &roles).revoke_union(&fx.union);
+    assert_eq!(
+        mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &400, &100),
+        Err(Ok(ME::Unavailable))
+    );
 }

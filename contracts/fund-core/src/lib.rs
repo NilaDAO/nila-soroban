@@ -108,6 +108,9 @@ pub enum DataKey {
     SeniorIncome(Address),
     // All `SeniorOwed` of a union: nIN held in fund_core outside every pool (2 Nov).
     SeniorOwedTotal(Address),
+    // Expired cash the treasury paid for and still in the union's drawer (review 5 Nov): a payout
+    // above the open cash batches takes it, and its nIN goes back to the treasury.
+    ExpiredCash(Address),
 }
 
 #[contract]
@@ -783,6 +786,25 @@ fn senior_interest(env: &Env, union: &Address, interest: i128) -> Result<(), Err
     Ok(())
 }
 
+// Rupees handed out of the office drawer (a cash withdrawal, a loan's cash part, senior interest taken by an
+// LP; review 5 Nov): the part the open cash batches hold leaves cash at hand and its nIN is burned. The rest
+// came from expired cash the treasury already paid for (`cover_expired_escrow`), so that much of its nIN goes
+// back to the treasury instead of being burned. Returns what cash at hand covered.
+fn pay_out_cash(env: &Env, union: &Address, amount: i128) -> Result<i128, Error> {
+    let fx = cfg(env).fx_pool.ok_or(Error::NotFxPool)?;
+    let settled = FxPoolClient::new(env, &fx).settle_cash(union, &amount);
+    let ek = DataKey::ExpiredCash(union.clone());
+    let back = core::cmp::min(amount - settled, p_i128(env, &ek));
+    if back > 0 {
+        p_add(env, &ek, -back)?;
+        i_add(env, &Counter::Treasury(union.clone()), back)?;
+    }
+    if amount > back {
+        nin(env).burn(&env.current_contract_address(), &(amount - back));
+    }
+    Ok(settled)
+}
+
 // At a default: her unclaimed hours lapse and their reserve goes back to senior cash. Returns it.
 fn void_vouchers(
     env: &Env,
@@ -1202,6 +1224,7 @@ impl FundCore {
         let covered = amount - left;
         if covered > 0 {
             nin(&env).burn(&env.current_contract_address(), &covered);
+            p_add(&env, &DataKey::ExpiredCash(union.clone()), covered)?;
         }
         EscrowCovered {
             union,
@@ -1309,9 +1332,7 @@ impl FundCore {
         member.require_auth_for_args((union.clone(), max_shares).into_val(&env));
         require_leader(&env, &union, &leader)?;
         let (amount, _) = claim(&env, true, &union, &member, max_shares, false)?;
-        nin(&env).burn(&env.current_contract_address(), &amount);
-        let fx = cfg(&env).fx_pool.ok_or(Error::NotFxPool)?;
-        let settled = FxPoolClient::new(&env, &fx).settle_cash(&union, &amount);
+        let settled = pay_out_cash(&env, &union, amount)?;
         Claimed {
             investor: member,
             union,
@@ -1387,9 +1408,7 @@ impl FundCore {
         }
         p_add(&env, &k, -amount)?;
         p_add(&env, &DataKey::SeniorOwedTotal(union.clone()), -amount)?;
-        nin(&env).burn(&env.current_contract_address(), &amount);
-        let fx = cfg(&env).fx_pool.ok_or(Error::NotFxPool)?;
-        let settled = FxPoolClient::new(&env, &fx).settle_cash(&union, &amount);
+        let settled = pay_out_cash(&env, &union, amount)?;
         SeniorIncomeTaken {
             union,
             investor,
@@ -1647,9 +1666,7 @@ impl FundCore {
 
         let mut settled = 0;
         if cash > 0 {
-            nin(&env).burn(&env.current_contract_address(), &cash);
-            let fx = cfg(&env).fx_pool.ok_or(Error::NotFxPool)?;
-            settled = FxPoolClient::new(&env, &fx).settle_cash(&union, &cash);
+            settled = pay_out_cash(&env, &union, cash)?;
         }
 
         LoanDrawn {
@@ -2139,13 +2156,20 @@ impl FundCore {
                 i_add(&env, &Counter::Treasury(union.clone()), m_i)?;
             }
         }
-        // Her investment's cash to senior for the voucher value and interest she owed.
+        // Her investment's cash to senior for the voucher value and interest she owed. With no senior
+        // shareholders to earn the interest it stays with the union, as in `senior_interest`.
         jm.cash -= m_s + m_vi;
-        sm.cash += m_s + m_vi;
+        sm.cash += m_s;
         sm.total_borrows -= core::cmp::min(sm.total_borrows, v_rest);
-        if m_vi > 0 && sm.total_shares > 0 {
-            sm.index = index_bump(&env, sm.index, sm.total_shares, m_vi).ok_or(Error::Overflow)?;
-            p_add(&env, &DataKey::SeniorIncome(union.clone()), m_vi)?;
+        if m_vi > 0 {
+            if sm.total_shares > 0 {
+                sm.cash += m_vi;
+                sm.index =
+                    index_bump(&env, sm.index, sm.total_shares, m_vi).ok_or(Error::Overflow)?;
+                p_add(&env, &DataKey::SeniorIncome(union.clone()), m_vi)?;
+            } else {
+                i_add(&env, &Counter::Treasury(union.clone()), m_vi)?;
+            }
         }
 
         // 2. Unpaid principal: junior pool, then senior (index haircuts). Unpaid interest
@@ -2430,13 +2454,14 @@ impl FundCore {
     }
 
     // How much cash the union's office may hold (executive decision 30 Oct, on-chain 31 Oct): the treasury, the
-    // withdrawals started and not collected (junior claimable principal), and the cash parts of undrawn food tokens
-    // whose window closes in this week or the next `ROOM_WEEKS`: cash members are due to take out again. fx_pool
-    // refuses a cash scan above it.
+    // withdrawals started and not collected (junior claimable principal), senior interest owed and waiting for an
+    // LP (review 5 Nov), and the cash parts of undrawn food tokens whose window closes in this week or the next
+    // `ROOM_WEEKS`: cash members are due to take out again. fx_pool refuses a cash scan above it.
     pub fn cash_room(env: Env, union: Address) -> i128 {
         let w = env.ledger().timestamp() / (7 * DAY);
         let mut room = i_get(&env, &Counter::Treasury(union.clone()))
-            + load_market(&env, true, &union).claimable_principal;
+            + load_market(&env, true, &union).claimable_principal
+            + p_i128(&env, &DataKey::SeniorOwedTotal(union.clone()));
         for i in w..=w + ROOM_WEEKS {
             room += env
                 .storage()
@@ -2462,7 +2487,7 @@ impl FundCore {
         owner_balance(&env, &union, &owner)
     }
 
-    // Senior cash held back for unclaimed voucher hours (fx_pool reads it, so it stays a call of its own).
+    // Senior cash held back for unclaimed voucher hours (a view of its own).
     pub fn senior_earmark(env: Env, union: Address) -> i128 {
         i_get(&env, &Counter::Earmark(union))
     }

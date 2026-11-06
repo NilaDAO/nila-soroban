@@ -81,7 +81,7 @@ pub enum Role {
     Core = 2,
 }
 
-// Officer roles inside one union, set by the union account (3 of 5, D12).
+// Officer roles inside one union, set by the union account (2 of 3, D12).
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -95,6 +95,8 @@ pub trait RolesTrait {
     fn is_oracle(account: Address) -> bool;
     fn is_leader(union: Address, account: Address) -> bool;
     fn has_role(account: Address, role: Role) -> bool;
+    // The trust admitted the union and has not revoked it (decision 008).
+    fn is_union(union: Address) -> bool;
 }
 
 // What fund_core asks of fx_pool (C3). fx_pool never reads back into fund_core inside
@@ -113,7 +115,8 @@ pub trait FxPoolTrait {
 #[contractclient(name = "FundCoreClient")]
 pub trait FundCoreTrait {
     fn deposit_junior(union: Address, member: Address, amount: i128);
-    // mint_senior: a senior investor's USDC, as nIN, into the union's senior pool (R46).
+    // mint_senior_nin (for the senior contract, 2 Nov): a senior investor's USDC, as nIN, into the
+    // union's senior pool (R46).
     fn deposit_senior(union: Address, investor: Address, amount: i128);
     fn repay_loan(union: Address, token_id: BytesN<32>, amount: i128) -> bool;
     fn credit_recovery(union: Address, token_id: BytesN<32>, amount: i128);
@@ -122,7 +125,7 @@ pub trait FundCoreTrait {
     fn cover_expired_escrow(union: Address, amount: i128) -> i128;
     fn union_treasury(union: Address) -> i128;
     fn cash_room(union: Address) -> i128;
-    // Senior money set aside for unclaimed voucher hours (the floor under Bring offers).
+    // Senior money set aside for unclaimed voucher hours.
     fn senior_earmark(union: Address) -> i128;
     // machinery only: an owner claimed work on a voucher (`units`: the centi tractor acres they
     // used). The owner is paid `prepay` now from the voucher's reserve; `postpaid` is held for her

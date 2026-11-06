@@ -736,7 +736,12 @@ impl FxPoolContract {
             OfferKind::Collect => {
                 settle(&env, &o.union, o.inr);
                 if close + open > 0 {
+                    // Booked only as far as the USDC actually arrived (review 5 Nov).
+                    let before = usdc.balance(&me);
                     LienClient::new(&env, &lp).pay(&(close + open));
+                    if usdc.balance(&me) - before < close + open {
+                        return Err(Error::NotPaid);
+                    }
                 }
                 add_usdc(&env, &DataKey::TreasuryUsdc(o.union.clone()), close);
                 add_usdc(&env, &held, open);

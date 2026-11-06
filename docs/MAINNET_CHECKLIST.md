@@ -48,8 +48,9 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     for executive decision (§F).**
   - Record the signer list. One signature and a plain key must fail (rehearsed in
     `c4-testnet.sh` with 2-of-3, including the trust's own master key).
-- [ ] **Union accounts (D12).** One account per union: 5 signers, threshold 3, master weight 0.
-      It appoints its leaders in roles.
+- [ ] **Union accounts (D12).** One account per union: 3 signers of weight 1, low/medium/high thresholds 2,
+      master weight 0 (2-of-3, executive decision 6 Nov; was 3-of-5). It appoints its leaders in roles (any number of
+      leaders; the three signers are among them). Rehearse on testnet: one signature must fail, two pass.
 - [ ] **nIN issuer = the trust (D7).** The legal side (X14) must be settled first. Then:
   - Flags: auth required, revocable, clawback enabled (R8).
   - **Set `home_domain` and publish `stellar.toml` before the lock.** After the lock the issuer
@@ -92,7 +93,7 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     - fees 100 + 77
     - `enforce_token_amount` **off** (executive decision, 10 Oct): the attested amount mimics the field's
       yield, not a loan limit.
-14a. Each union account (3 of 5), on machinery: `set_rate(union, machine_type, parts)` for each of the 13 machine
+14a. Each union account (2 of 3), on machinery: `set_rate(union, machine_type, parts)` for each of the 13 machine
     types it offers (price an acre in parts: driver, diesel, maintenance, insurance, depreciation, margin; first
     prices = the old price an hour × the catalogue's hours an acre, as in nila-integrations
     `scripts/demo/stellar-deploy.sh`), and `set_crop_rate` where one crop costs differently (e.g. type 9 × sugarcane).
@@ -121,7 +122,7 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     account code later means a member upgrades her own account (`account.upgrade(hash)`, her signature); a new
     deployer would give every key a new address.
     **Union admission (decision 008), before any of the union's own calls:** the union writes its details on its own
-    account (`manageData` `nila.name`, up to 64 bytes, and `nila.geo`, a 5–7 character geohash, signed by its 3 of 5);
+    account (`manageData` `nila.name`, up to 64 bytes, and `nila.geo`, a 5–7 character geohash, signed by its 2 of 3);
     the trust checks them and calls `roles.admit_union(union, sha256(name ‖ 0x00 ‖ geo))` (trust 3 of 5). Until then
     the union's `set_leader`, `set_union_role` and `set_union_settings` are refused (`NotAdmitted`). Admitting again
     replaces the hash (after the union changed its details). `roles.revoke_union(union)` (trust) keeps the entries but
@@ -130,7 +131,7 @@ Mark each box at deploy time, then keep a copy of this file with the transaction
     union's `set_union_config` must also be handled by the trust.
     The trust first gives fund_core the core role, `roles.set_role(fund_core, Core, true)` (trust 3 of 5, once):
     `set_union_settings` refuses any session contract without it, and fx_pool without usdc or the reverse (review 5 Nov).
-    Each union account (3 of 5):
+    Each union account (2 of 3):
     `roles.set_union_settings(union, {wait, session_len, session_contracts: [fund_core], sms_key, fx_pool, usdc})`
     (**only fund_core**, executive decision 4 Nov: every leader-session call is fund_core `draw_loan`, `request_unbond`,
     `claim_junior_cash` or `return_voucher`; their machinery and fx_pool sub-calls are authorised by fund_core, not by

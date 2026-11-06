@@ -89,6 +89,7 @@ Revoke keeps the union's `Leader`, `UnionRole` and `UnionSettings` entries; whil
 | `SeniorOwed(union, investor)` | persistent | i128 senior interest taken out of the pool at an exit, owed until an LP pays it in USDC (`take_senior_income`, 2 Nov); the nIN stays in fund_core, outside senior cash |
 | `SeniorIncome(union)` | persistent | i128 voucher interest senior earned in the union and has not yet taken out (2 Nov) |
 | `SeniorOwedTotal(union)` | persistent | i128 all `SeniorOwed` of the union: nIN in fund_core outside every pool (counted in the conservation check) |
+| `ExpiredCash(union)` | persistent | i128 expired cash the treasury paid for (`cover_expired_escrow`) and still in the drawer; a cash payout above the open batches takes it and its nIN goes back to the treasury (review 5 Nov) |
 
 ## crop_calendar (25 Oct)
 
@@ -228,6 +229,7 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
 | `Session` | instance | u64: until when a leader of the union may sign for the account |
 | `Lien` | instance | i128: USDC locked by fx_pool (LP positions) |
 | `LienPool` / `LienUsdc` | instance | the fx_pool and USDC the union named at the lock that opened the lien; only that fx_pool unlocks or takes it; removed when the lien is back at 0 |
+| `Move` | instance | `Move { to: Union(addr) \| Code(hash), at }`: a change of union or code once a union is named, applied by `finish_move` from `at` (the union's recovery wait); a recovery proposal removes it (review 5 Nov) |
 
 3 Nov (member-owned accounts, executive decision): the `Factory` key is gone. The constructor is `(roles, signer)`,
 with no union; the immutable `deployer` (one for all unions) deploys it at the address that follows from the key.

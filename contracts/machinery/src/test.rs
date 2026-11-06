@@ -51,7 +51,7 @@ fn rate_table_is_the_unions_and_sets_the_prepay() {
     let mut bad = parts(NIN);
     bad.diesel = -1;
     assert_eq!(c.try_set_rate(&union, &3, &bad), Err(Ok(Error::BadArg)));
-    // Only the union account (its leaders, 3 of 5) sets its rates.
+    // Only the union account (its signers, 2 of 3) sets its rates.
     env.set_auths(&[]);
     assert!(c.try_set_rate(&union, &1, &parts(NIN)).is_err());
 }

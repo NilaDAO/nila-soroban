@@ -4,6 +4,9 @@
 # attester's INR/USD fix sets the nIN minted into fund_core's senior pool; the deposit is tagged.
 # Usage: bash scripts/c5a-testnet.sh        (testnet only; refuses any other network)
 #
+# Record of its step (review 5 Nov): fx_pool's `mint_senior` was removed on 2 Nov; senior USDC now goes in through
+# the senior contract (`senior.deposit`), so this script no longer runs unchanged.
+#
 # USDC here is a throwaway classic asset "USDC" from a test issuer, so the run needs no faucet;
 # mainnet uses Circle's USDC SAC. Identities live in the stellar CLI config, never in this repo;
 # only public addresses and tx hashes are printed.

@@ -27,7 +27,7 @@ struct T {
     key: SigningKey,
     leaders: [Address; 2],
     fund_core: Address,
-    /// The union account (its 3-of-5 multisig): names the leaders, sets the settings.
+    /// The union account (its 2-of-3 multisig): names the leaders, sets the settings.
     union_ms: Address,
     roles: RolesContractClient<'static>,
 }
@@ -47,6 +47,13 @@ impl T {
         self.roles.set_union_settings(&u, &self.settings());
         u
     }
+}
+
+/// A waiting move (review 5 Nov): wait it out and apply it.
+fn finish(t: &T) {
+    let m = t.c.pending_move().unwrap();
+    t.env.ledger().set_timestamp(m.at);
+    t.c.finish_move();
 }
 
 fn signer_of(env: &Env, k: &SigningKey) -> Signer {
@@ -629,6 +636,7 @@ fn set_union_is_refused_when_frozen_in_a_session_or_with_a_lien() {
     t.env.ledger().set_timestamp(1_800_000_000 + 172_800);
     t.c.execute_recovery();
     t.c.set_union(&other);
+    finish(t);
     assert_eq!(t.c.union(), Some(other));
 }
 
@@ -705,7 +713,9 @@ fn recovery_and_sessions_use_the_named_unions_settings() {
         },
     );
     t.c.set_union(&b);
-    assert_eq!(t.c.start_session(&1_800_000_600), 1_800_000_060);
+    finish(&t);
+    let now = t.env.ledger().timestamp();
+    assert_eq!(t.c.start_session(&(now + 600)), now + 60);
     let ctx = call_on(&t.env, &t.fund_core);
     // Union A's leaders no longer sign for her; union B's do.
     assert_eq!(
@@ -727,8 +737,8 @@ fn recovery_and_sessions_use_the_named_unions_settings() {
     let b_sms = t.roles.union_settings(&b).unwrap().sms_key.unwrap();
     t.c.recover_by_sms(&new, &b_leaders[0]);
     assert!(t.env.auths().iter().any(|(a, _)| *a == b_sms));
-    assert_eq!(t.c.pending().unwrap().at, 1_800_000_000 + 3_600);
-    t.env.ledger().set_timestamp(1_800_003_600);
+    assert_eq!(t.c.pending().unwrap().at, now + 3_600);
+    t.env.ledger().set_timestamp(now + 3_600);
     t.c.execute_recovery();
     assert_eq!(t.c.signer(), new);
 }
@@ -817,6 +827,7 @@ fn her_upgrade_moves_the_account_to_new_code() {
     let auths = t.env.auths();
     assert_eq!(auths.len(), 1);
     assert_eq!(auths[0].0, t.acct);
+    finish(&t);
     assert_eq!(t.c.try_upgrade(&h), Err(Ok(Error::Current)));
     assert_eq!(t.c.union(), Some(t.union_ms.clone()));
 }
@@ -846,4 +857,40 @@ fn the_liens_fx_pool_is_fixed_at_the_first_lock() {
     t.c.lock(&1);
     assert_eq!(t.env.auths()[0].0, pool2);
     assert_eq!(t.c.lien_pool(), Some(pool2));
+}
+
+/// Review 5 Nov (finding 6): once a union is named, a change of union or code waits the union's recovery
+/// wait, and a recovery proposed meanwhile cancels it, so a stolen key cannot move the account out of
+/// its union's reach. Her first union applies at once.
+#[test]
+fn a_move_waits_and_a_recovery_cancels_it() {
+    let t = setup();
+    let other = t.other_union();
+    let wait = t.settings().wait;
+    // The thief, with her key, asks to move her to another union: nothing changes yet.
+    t.c.set_union(&other);
+    assert_eq!(t.c.union(), Some(t.union_ms.clone()));
+    let m = t.c.pending_move().unwrap();
+    assert_eq!(m.at, t.env.ledger().timestamp() + wait);
+    assert_eq!(t.c.try_finish_move(), Err(Ok(Error::NotReady)));
+    // Asked again later (her app at the next start): the wait does not restart.
+    t.env.ledger().set_timestamp(m.at - 1);
+    t.c.set_union(&other);
+    assert_eq!(t.c.pending_move().unwrap().at, m.at);
+    t.env.ledger().set_timestamp(m.at - wait);
+    // Her leader and the SMS key start a recovery: the move is cancelled.
+    sms_on(&t);
+    let new_key = SigningKey::from_slice(&[42u8; 32]).unwrap();
+    t.c.recover_by_sms(&signer_of(&t.env, &new_key), &t.leaders[0]);
+    assert_eq!(t.c.pending_move(), None);
+    t.env.ledger().set_timestamp(m.at);
+    assert_eq!(t.c.try_finish_move(), Err(Ok(Error::NotReady)));
+    t.c.execute_recovery();
+    assert_eq!(t.c.union(), Some(t.union_ms.clone()));
+    assert_eq!(t.c.signer(), signer_of(&t.env, &new_key));
+    // Unchallenged, the move applies after the wait (anyone may finish it).
+    t.c.set_union(&other);
+    finish(&t);
+    assert_eq!(t.c.union(), Some(other));
+    assert_eq!(t.c.pending_move(), None);
 }
