@@ -6,7 +6,9 @@
 # with the land_title mirror (executive decision, 9 Oct). The C2 flow is scripts/c2-testnet.sh.
 #
 # Identities live in the stellar CLI config (~/.config/stellar), never in this repo, and are
-# never printed — only public addresses are. The nIN issuer is a throwaway testnet key; the
+# never printed — only public addresses are.
+# The union account is 2-of-3 since 6 Nov (executive decision); this record keeps the 3-of-5 it ran
+# with on 8 Oct. A 2-of-3 rehearsal: scripts/c4-testnet.sh (the same native multisig, for the trust). The nIN issuer is a throwaway testnet key; the
 # trust binds as issuer only at mainnet (D7, X14).
 set -euo pipefail
 

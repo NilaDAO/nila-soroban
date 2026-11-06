@@ -81,7 +81,7 @@ pub enum Role {
     Core = 2,
 }
 
-// Officer roles inside one union, set by the union account (3 of 5, D12).
+// Officer roles inside one union, set by the union account (2 of 3, D12).
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]

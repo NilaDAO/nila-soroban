@@ -27,7 +27,7 @@ struct T {
     key: SigningKey,
     leaders: [Address; 2],
     fund_core: Address,
-    /// The union account (its 3-of-5 multisig): names the leaders, sets the settings.
+    /// The union account (its 2-of-3 multisig): names the leaders, sets the settings.
     union_ms: Address,
     roles: RolesContractClient<'static>,
 }

@@ -30,7 +30,7 @@ TAD §4.3 specifies six on-chain pieces: `fund_core`, `fund_viewer`, `fx_pool`, 
 | --- | --- | --- | --- |
 | `fund_core` | `nila-fund-core` → `nila_fund_core.wasm` | Ported. Deposits, 14-day unbond, junior-first loans, waterfall, first-loss, pause, cap, upgrade. | Core table: Direct / Adapt / Redesign as mapped. `drawLoanWithVoucher` is Redesign. `burnEscrowNin` is Drop. |
 | `fund_viewer` | `nila-fund-viewer` → `nila_fund_viewer.wasm` | Ported. Union registry, fund-type list (swap-remove), borrower index (cap 128). | Direct for registry + `on_loan_*`. `recoverVoucherSigner` Redesign. `recoverQuote1155Signer` Drop. |
-| `roles` | `nila-roles` → `nila_roles.wasm` | Role list (oracle, attester, core) + per-union leaders and officers. | Admin for trust-wide roles; `union.require_auth()` (3 of 5 account signers, D12) for leaders and officers. |
+| `roles` | `nila-roles` → `nila_roles.wasm` | Role list (oracle, attester, core) + per-union leaders and officers. | Admin for trust-wide roles; `union.require_auth()` (2 of 3 account signers, D12; 3 of 5 until 6 Nov) for leaders and officers. |
 | `membership` | `nila-membership` → `nila_membership.wasm` | Ported. Leader + attester confirm; `is_member` / `plots_of`. Replaces ERC-721 `balanceOf`. | TAD §4.2 / §7 table “Land-title balanceOf gates → membership”. |
 | nIN | Classic asset `nIN:ADMIN` + SAC | Issued on testnet. 7 decimals, `AUTH_REQUIRED`. Not a custom contract. | Direct substitution of `NilaNIN` ERC-20. |
 | `fx_pool` | `nila-fx-pool` → `nila_fx_pool.wasm` | **Tranche 0 skeleton only.** Constructor, daily-cap storage, temporary escrow, `open_escrow`, flattened `resolve_escrow_cash`. | Full §7.1 FX table (mint/redeem, Reflector, cash-scan, order books) is **not** implemented. |

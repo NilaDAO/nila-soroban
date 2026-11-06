@@ -3,7 +3,7 @@
 //!
 //! - **Price table** per union and machine type, in parts **per acre** (executive decision 27 Oct, was per
 //!   hour): driver, diesel, maintenance, insurance, depreciation, margin (D16, D20, R57). Set by the union
-//!   account (its leaders, 3 of 5); open and adjustable, like the prepay share (executive decision, 12 Oct).
+//!   account (its signers, 2 of 3); open and adjustable, like the prepay share (executive decision, 12 Oct).
 //!   Optionally a price per machine type **and crop family** (27 Oct: hauling sugarcane is not hauling paddy);
 //!   without one the type's price applies.
 //! - **Machines** (D15, R82, R83): a leader registers a member's machine (L13); it is available from
@@ -473,7 +473,7 @@ impl MachineryContract {
 
     // ---------- the union's rate table (R57, D16, D20) ----------
 
-    /// The union account (its leaders, 3 of 5) sets the price of a machine's acre in parts. The
+    /// The union account (its signers, 2 of 3) sets the price of a machine's acre in parts. The
     /// amounts are open and stay adjustable by the union (executive decision, 12 Oct), like the prepay share.
     pub fn set_rate(
         env: Env,
