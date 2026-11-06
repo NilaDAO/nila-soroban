@@ -6,6 +6,9 @@
 #   is paid the prepay at once → she repays everything at the desk → the owner collects the rest.
 # Usage: bash scripts/c5-testnet.sh        (testnet only; refuses any other network)
 #
+# Record of its step (review 5 Nov): fx_pool's `mint_senior` was removed on 2 Nov; senior USDC now goes in through
+# the senior contract (`senior.deposit`), so this script no longer runs unchanged.
+#
 # USDC is a throwaway test asset. Identities live in the stellar CLI config, never in this repo;
 # only public addresses and tx hashes are printed.
 set -euo pipefail

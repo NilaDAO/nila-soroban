@@ -2464,7 +2464,7 @@ fn claims_stay_inside_signed_hours_voucher_week_and_availability() {
         Err(Ok(ME::Unavailable))
     );
     mc.set_hold(&v.owner, &v.machine, &false, &0);
-    // Only a leader registers; only members own machines; rates are the union's (3 of 5).
+    // Only a leader registers; only members own machines; rates are the union's (2 of 3).
     assert_eq!(
         mc.try_register_machine(&fx.borrower, &fx.union, &v.owner, &1, &40, &id),
         Err(Ok(ME::NotLeader))

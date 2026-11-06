@@ -5,6 +5,9 @@
 # then drawn only above the voucher floor.
 # Usage: bash scripts/c5b-testnet.sh        (testnet only; refuses any other network)
 #
+# Record of its step (review 5 Nov): fx_pool's `mint_senior` was removed on 2 Nov; senior USDC now goes in through
+# the senior contract (`senior.deposit`), so this script no longer runs unchanged.
+#
 # USDC is a throwaway test asset "USDC" so no faucet is needed. Identities live in the stellar CLI
 # config, never in this repo; only public addresses and tx hashes are printed.
 #

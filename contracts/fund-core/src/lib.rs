@@ -2486,7 +2486,7 @@ impl FundCore {
         owner_balance(&env, &union, &owner)
     }
 
-    // Senior cash held back for unclaimed voucher hours (fx_pool reads it, so it stays a call of its own).
+    // Senior cash held back for unclaimed voucher hours (a view of its own).
     pub fn senior_earmark(env: Env, union: Address) -> i128 {
         i_get(&env, &Counter::Earmark(union))
     }
