@@ -27,7 +27,7 @@ A rule fires once per event, or once per state change for `state` and `http` rul
 | A17 | Escrow near expiry | state `fx_pool.open_escrows(union)`, `offers_of(union)` + `offer(id)` (open or accepted) | expires within 24 h | warn |
 | A18 | Escrow expired | event `escrow_expired`, `offer_closed` (state expired) | any | warn |
 | A19 | Anchor down | http `anchor.nila.land/.well-known/stellar.toml`, the anchor's health | not 200 twice in a row | page |
-| A20 | Much USDC moved in a day | event `offer_confirmed` (`usdc`), since 00:00 UTC; the stored `daily_cap` is no longer enforced (LP pledge, 30 Oct) | > 80 % of 2,500 USDC | warn |
+| A20 | Much USDC out in a day | events `redeemed` (senior exits) and `offer_confirmed` (LP offers), `usdc`, since 00:00 UTC; the daily cap on senior USDC is not in the contract yet (decided 19 Nov) | > 80 % of 2,500 USDC | warn |
 | A21 | Pause | event `paused`, `paused_set`; state `is_paused` / `paused` | any contract paused | page |
 | A22 | Cap changed | event `max_scan_set`, `daily_cap_set`, `cap_set`, `guarantee_cap_set`, `union_config_set` | any | warn |
 | A23 | fund_core does not add up | state: fund_core's nIN balance vs Σ unions (junior cash + senior cash + treasury + rainy reserve + senior earmark + owed to senior), as the tests' `assert_conserved` | difference > 1 nIN; or fx_pool holds nIN | page |

@@ -124,13 +124,16 @@ Each: what an attacker gains, what stops or limits it in code, what is **not** c
   **7 days** (`ESCROW_TERM`, then `burn_expired_escrow`, covered from the treasury); an LP offer ends at the expiry
   its leader set, after which anyone may call `expire_offer`. The swap key only accepts; the anchor account key stays
   with the trust operator.
-- **Not covered:** `daily_cap` (2,500 USDC, read 19 Nov) is still stored and evented but **no longer enforced**: the
-  LP pledge removed the pooled USDC it limited. A20 watches the USDC LP offers move per day instead.
+- **Not covered yet:** a daily limit on USDC out. fx_pool's `daily_cap` (2,500 USDC, read 19 Nov) is stored and
+  evented but no longer enforced since the LP pledge (30 Oct). Decided 19 Nov: the daily cap is for **senior** USDC
+  and is enforced in the `senior` contract (`redeem` beyond it refused until the next UTC day), in the lane-B upgrade.
+  Exposure today is nil (`senior.cap` 0); the cap must be live before `senior.cap` is raised. Until then A20 watches
+  the USDC that leaves per day.
 - **Disputes:** when the two sides disagree whether rupees changed hands, the union's board decides off-chain and
   executes with the existing calls (`cancel_offer`, `settle_position`) — or an on-chain `resolve_offer` (decision
   Q5, open).
 - **Alerts:** A17 (escrow within 24 h of expiry), A18 (escrow expired), A19 (anchor `stellar.toml` or health down),
-  A20 (USDC moved by LP offers in a day above 80 % of 2,500).
+  A20 (USDC out in a day, senior exits and LP offers, above 80 % of 2,500).
 
 ### 3.9 Contract bug with real money
 
@@ -153,7 +156,7 @@ Each: what an attacker gains, what stops or limits it in code, what is **not** c
 |---|---|---|---|
 | Upgrade delay | 48 h, all eight contracts | stays | — |
 | `max_scan` (leader swaps, USDC into treasury) | 10,000 nIN | ≥ the machine deposit, ₹4.4 lakh (N5, before the CCTP run) | trust 3-of-5 |
-| `daily_cap` | 2,500 USDC stored, **not enforced** since 30 Oct (LP pledge) | remove, or enforce again on LP confirms (decision) | trust, upgrade |
+| Daily cap on senior USDC out | none in `senior`; fx_pool's 2,500 USDC stored, not enforced (since 30 Oct) | enforced in `senior.redeem`, 2,500 USDC a day, before `senior.cap` rises (decided 19 Nov; lane-B upgrade) | contracts developer; trust upgrade |
 | `senior.cap` | 0 | after the audit | trust |
 | `senior.guarantee_cap` | 0 | after nUSD audit | trust |
 | Rate band (attester) | 5 % | stays | trust |
@@ -161,7 +164,7 @@ Each: what an attacker gains, what stops or limits it in code, what is **not** c
 
 ## 5. Open items
 
-1. Lock the nIN issuer (X14). 2. `daily_cap`: remove it or enforce it again (§3.8). 3. External audit of `fund_core` and `fx_pool` before any cap rises. 4. Dispute path
+1. Lock the nIN issuer (X14). 2. The daily cap on senior USDC out, in the `senior` contract before its cap rises (§3.8). 3. External audit of `fund_core` and `fx_pool` before any cap rises. 4. Dispute path
 (Q5). 5. Reflector (T2-B). 6. One union is checked by the state rules (A17, A23); a second union is added to the
 indexer's `INDEXER_UNIONS` when it is admitted.
 
