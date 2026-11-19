@@ -18,6 +18,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all -- --check
+      - name: Event schema is current (docs/EVENT_SCHEMA.md)
+        run: python3 scripts/event-schema.py --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       # Wasm before the tests: the deployer and account tests deploy the built account wasm.
