@@ -19,26 +19,26 @@ A rule fires once per event, or once per state change for `state` and `http` rul
 | A9 | Member-account recovery proposed | event `recovery_proposed` (member accounts) | any: the union's wait (4 h) is the window to react | page |
 | A10 | Large cash movement | event `cash_scanned`, `cash_out_signed` | amount > ₹50,000 | warn |
 | A11 | Member-account signer changed | event `signer_set` (member accounts) | any without a `recovery_proposed` on that account in the last 30 days | page |
-| A12 | Rate fix away from the reference | event `rate_set` (fx_pool); reference Chainlink USD/INR on Polygon | \|fix − reference\| > 2 % | page |
+| A12 | Rate fix away from the reference | state `fx_pool.rate()`; reference Chainlink USD/INR on Polygon (the feed the node's rate beat posts) | \|fix − reference\| > 2 % | page |
 | A13 | Rate stale | state `fx_pool.rate().valid_until` | less than 12 h left (the beat posts every 12 h) | warn |
 | A14 | Node key low on XLM | Horizon balances of attester, oracle, sponsor | attester or oracle < 10 XLM; sponsor < 50 XLM | warn |
-| A15 | End of season reported early | event `maturity_reported`; the crop's expected end (node) | > 30 days before the expected end | warn |
+| A15 | End of season reported early | event `maturity_reported`; state `fund_core.food_token().from_date` (its window's opening) | earlier than the opening + 45 days (the shortest crop, a green manure) | warn |
 | A16 | Loan defaulted | event `loan_defaulted` | any | warn |
-| A17 | Escrow near expiry | state: open offers and escrows, `expires` | within 24 h | warn |
+| A17 | Escrow near expiry | state `fx_pool.open_escrows(union)`, `offers_of(union)` + `offer(id)` (open or accepted) | expires within 24 h | warn |
 | A18 | Escrow expired | event `escrow_expired`, `offer_closed` (state expired) | any | warn |
 | A19 | Anchor down | http `anchor.nila.land/.well-known/stellar.toml`, the anchor's health | not 200 twice in a row | page |
-| A20 | USDC day cap nearly used | state `fx_pool` paid out today vs `daily_cap` | > 80 % | warn |
+| A20 | Much USDC moved in a day | event `offer_confirmed` (`usdc`), since 00:00 UTC; the stored `daily_cap` is no longer enforced (LP pledge, 30 Oct) | > 80 % of 2,500 USDC | warn |
 | A21 | Pause | event `paused`, `paused_set`; state `is_paused` / `paused` | any contract paused | page |
 | A22 | Cap changed | event `max_scan_set`, `daily_cap_set`, `cap_set`, `guarantee_cap_set`, `union_config_set` | any | warn |
-| A23 | fund_core does not add up | state: fund_core's nIN balance vs junior + senior + treasury + reserve + owners | difference > 1 nIN; or fx_pool holds nIN | page |
+| A23 | fund_core does not add up | state: fund_core's nIN balance vs Σ unions (junior cash + senior cash + treasury + rainy reserve + senior earmark + owed to senior), as the tests' `assert_conserved` | difference > 1 nIN; or fx_pool holds nIN | page |
 | A24 | Indexer behind | http `indexer.nila.land/health` | `ok` false, or a new gap in `/coverage` | warn |
 | A25 | Wiring changed | event `fx_pool_set`, `fund_core_set`, `machinery_set`, `senior_set`, `anchor_set`, `swap_key_set`, `activated` | any (each is set once at deploy) | page |
 
 ## Status (19 Nov)
 
-- Every `event` rule reads events the indexer keeps today, except A9 and A11: member-account events need the indexer's
-  topic filter across all contracts (next indexer step).
-- `state`, `http` and Horizon rules need the evaluator (next step: a check in the indexer container, every 10 minutes,
-  each firing stored and shown at `indexer.nila.land/alerts`).
+- All 25 rules are checked every 10 minutes by the indexer (nila-sensing `indexer/alerts.py`), shown at
+  [indexer.nila.land](https://indexer.nila.land/) and emailed (`page` and `warn`) through an SNS topic.
+- Read on mainnet 19 Nov: every rule ok. fund_core holds 21,713.18 nIN = junior cash 9,299 + treasury 12,414.18;
+  the fix in force equals Chainlink; no open escrow or offer.
+- State rules per union (A17, A23) read the unions in the indexer's `INDEXER_UNIONS` (Mother Theresa today).
 - Thresholds marked here are first values; each change to them is a commit to this file.
-- Where alerts are delivered (email, Telegram, ntfy) is open (decision N3); until then they are shown, not sent.

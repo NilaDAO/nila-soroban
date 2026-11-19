@@ -107,7 +107,7 @@ Each: what an attacker gains, what stops or limits it in code, what is **not** c
 - **Compromise:** `report_maturity` is set once per loan, not before the draw and not in the future. The earliest
   due date it can cause is draw + 90 + 21 days (`MIN_TERM`, `REPAY_WINDOW`); `mark_default` then needs that date
   passed. It cannot shorten a term below 111 days.
-- **Alerts:** A15 (maturity reported earlier than the crop's expected end), A16 (loan defaulted).
+- **Alerts:** A15 (end of season reported sooner than any crop grows), A16 (loan defaulted).
 
 ### 3.7 Rate staleness (Chainlink today, Reflector after T2-B)
 
@@ -119,18 +119,23 @@ Each: what an attacker gains, what stops or limits it in code, what is **not** c
 
 ### 3.8 Anchor settlement failure (LP offers, SEP-24)
 
-- **Limits:** an LP's USDC or a union's rupees wait in `fx_pool` escrow; an offer expires after **7 days**
-  (`ESCROW_TERM`) and anyone may call `expire_offer`; `daily_cap` limits the USDC paid out per day (**2,500 USDC**,
-  read 19 Nov). The swap key only accepts; the anchor account key stays with the trust operator.
+- **Limits:** since the LP pledge (30 Oct) an LP's USDC stays in her own account under a lien; `fx_pool` takes it
+  only when an accepted offer is confirmed. A union's cash above its treasury waits in a cash escrow that ends after
+  **7 days** (`ESCROW_TERM`, then `burn_expired_escrow`, covered from the treasury); an LP offer ends at the expiry
+  its leader set, after which anyone may call `expire_offer`. The swap key only accepts; the anchor account key stays
+  with the trust operator.
+- **Not covered:** `daily_cap` (2,500 USDC, read 19 Nov) is still stored and evented but **no longer enforced**: the
+  LP pledge removed the pooled USDC it limited. A20 watches the USDC LP offers move per day instead.
 - **Disputes:** when the two sides disagree whether rupees changed hands, the union's board decides off-chain and
   executes with the existing calls (`cancel_offer`, `settle_position`) — or an on-chain `resolve_offer` (decision
   Q5, open).
 - **Alerts:** A17 (escrow within 24 h of expiry), A18 (escrow expired), A19 (anchor `stellar.toml` or health down),
-  A20 (`daily_cap` use above 80 %).
+  A20 (USDC moved by LP offers in a day above 80 % of 2,500).
 
 ### 3.9 Contract bug with real money
 
-- **Limits:** caps (`max_scan` 10,000 nIN, `daily_cap` 2,500 USDC, `senior.cap` **0**: no senior deposit is taken);
+- **Limits:** caps (`max_scan` 10,000 nIN on leader swaps and USDC into the treasury; `senior.cap` **0**: no senior
+  deposit is taken);
   pause on `fund_core` (every money path, also `mark_default`), `fx_pool`, `senior`, `land_title`, `machinery`; all
   read **unpaused** 19 Nov. 48 h upgrade to fix. CI: tests, clippy, a 128 KiB size gate, a frozen storage layout.
 - **Not covered:** no external audit yet; the caps are the control until it is done (decision 10 Oct), and they
@@ -148,7 +153,7 @@ Each: what an attacker gains, what stops or limits it in code, what is **not** c
 |---|---|---|---|
 | Upgrade delay | 48 h, all eight contracts | stays | — |
 | `max_scan` (leader swaps, USDC into treasury) | 10,000 nIN | ≥ the machine deposit, ₹4.4 lakh (N5, before the CCTP run) | trust 3-of-5 |
-| `daily_cap` (USDC out per day) | 2,500 USDC | on evidence | trust |
+| `daily_cap` | 2,500 USDC stored, **not enforced** since 30 Oct (LP pledge) | remove, or enforce again on LP confirms (decision) | trust, upgrade |
 | `senior.cap` | 0 | after the audit | trust |
 | `senior.guarantee_cap` | 0 | after nUSD audit | trust |
 | Rate band (attester) | 5 % | stays | trust |
@@ -156,9 +161,9 @@ Each: what an attacker gains, what stops or limits it in code, what is **not** c
 
 ## 5. Open items
 
-1. Lock the nIN issuer (X14). 2. External audit of `fund_core` and `fx_pool` before any cap rises. 3. Dispute path
-(Q5). 4. Reflector (T2-B). 5. The indexer follows the ten contracts; member-account events (A9, A11) need a
-topic-only filter across all contracts (next step in `indexer/`). 6. Alert channel and page (N3).
+1. Lock the nIN issuer (X14). 2. `daily_cap`: remove it or enforce it again (§3.8). 3. External audit of `fund_core` and `fx_pool` before any cap rises. 4. Dispute path
+(Q5). 5. Reflector (T2-B). 6. One union is checked by the state rules (A17, A23); a second union is added to the
+indexer's `INDEXER_UNIONS` when it is admitted.
 
 ## 6. How to check this file
 
