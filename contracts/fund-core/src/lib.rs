@@ -65,6 +65,9 @@ pub const UPGRADE_DELAY: u64 = 60;
 pub const UNBONDING: u64 = 14 * DAY;
 // Repay window after the end of season (LOAN_RULES §1).
 pub const REPAY_WINDOW: u64 = 21 * DAY;
+// A crop share with a green manure before it opens from the green manure's sowing (20 Nov), at most this long before
+// its own window.
+pub const EARLY_OPEN: u64 = 75 * DAY;
 // Open loans per member, for `loans_of` and the lock (R27, R43).
 pub const MAX_LOANS_PER_MEMBER: u32 = 32;
 // Owners with a postpaid part open on one voucher (owner split, 1 Nov).
@@ -1520,6 +1523,43 @@ impl FundCore {
         }
         .publish(&env);
         bump_instance(&env);
+        Ok(())
+    }
+
+    // A crop share with a green manure before it (executive decision 20 Nov: the green manure is part of the crop's
+    // agreement) opens from the green manure's sowing: the attester sets that earlier opening, at most EARLY_OPEN
+    // before the share's own window and before anything is drawn.
+    pub fn open_early(
+        env: Env,
+        attester: Address,
+        union: Address,
+        token_id: BytesN<32>,
+        from_date: u64,
+    ) -> Result<(), Error> {
+        require_not_paused(&env)?;
+        require_attester(&env, &attester)?;
+        let key = DataKey::FoodToken(union, token_id.clone());
+        let mut ft: FoodToken = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::NoFoodToken)?;
+        if ft.loan.drawn() {
+            return Err(Error::FoodTokenUsed);
+        }
+        let (crop, sos) = crop_and_sos(&token_id);
+        let (open, _) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::CropCalendar)
+            .and_then(|c| CropCalendarClient::new(&env, &c).window(&crop, &sos))
+            .ok_or(Error::BadDates)?;
+        if from_date > open || from_date + EARLY_OPEN < open {
+            return Err(Error::BadDates);
+        }
+        ft.from_date = from_date;
+        env.storage().persistent().set(&key, &ft);
+        bump_key(&env, &key);
         Ok(())
     }
 

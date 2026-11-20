@@ -3816,6 +3816,47 @@ fn a_crop_share_is_usable_only_in_its_attested_window() {
     assert!(draw().is_ok());
 }
 
+/// A green manure before the crop (executive decision 20 Nov: part of the crop's agreement): the attester opens the
+/// share from the green manure's sowing, at most EARLY_OPEN before its own window, only while nothing is drawn.
+#[test]
+fn a_share_with_a_green_manure_opens_from_its_sowing() {
+    let fx = setup();
+    let c = fx.core();
+    fx.invest(&fx.borrower, 3_000 * NIN);
+    let id = loan_id(&fx.env, 1);
+    let (open, last) = (T0 + 100 * DAY, T0 + 160 * DAY);
+    fx.window(Some((open, last)));
+    c.attest_food_token(&fx.attester, &fx.union, &id, &fx.borrower, &(100 * NIN), &0);
+    let early = open - 50 * DAY;
+    // Only the attester, never later than its own opening nor further back than EARLY_OPEN.
+    assert!(c
+        .try_open_early(&fx.borrower, &fx.union, &id, &early)
+        .is_err());
+    assert_eq!(
+        c.try_open_early(&fx.attester, &fx.union, &id, &(open + DAY))
+            .unwrap_err(),
+        Ok(Error::BadDates)
+    );
+    assert_eq!(
+        c.try_open_early(&fx.attester, &fx.union, &id, &(open - EARLY_OPEN - DAY))
+            .unwrap_err(),
+        Ok(Error::BadDates)
+    );
+    c.open_early(&fx.attester, &fx.union, &id, &early);
+    assert_eq!(c.food_token(&fx.union, &id).unwrap().from_date, early);
+    let draw = || c.try_draw_loan(&fx.union, &fx.borrower, &id, &(100 * NIN), &0);
+    fx.at(early - 1);
+    assert_eq!(draw().unwrap_err(), Ok(Error::NotOpenYet));
+    fx.at(early);
+    assert!(draw().is_ok());
+    // Drawn: no more changes.
+    assert_eq!(
+        c.try_open_early(&fx.attester, &fx.union, &id, &early)
+            .unwrap_err(),
+        Ok(Error::FoodTokenUsed)
+    );
+}
+
 /// The real crop calendar and a packed Polygon token id (25 Oct): maize (family 6) sown 20 Jun
 /// 2027 opens 25 May, a week before its Jun–Jul window, and closes at the end of 31 July.
 #[test]
