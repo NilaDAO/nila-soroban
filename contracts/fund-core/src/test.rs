@@ -3688,15 +3688,15 @@ fn a_revoked_unions_machines_claim_no_more() {
     );
 }
 
-/// Executive decision 23 Nov: senior is a guarantee pool only. A voucher's interest is junior income less the
-/// guarantee fee, which fund_core sets aside; a leader and a member LP turn it into USDC at the office, paid into
-/// the senior contract, whose index rises. Only the senior contract takes the fee, never more than is waiting.
+/// Executive decision 23 Nov: senior is a guarantee pool only and earns the voucher interest, all of it by default.
+/// fund_core sets it aside in rupees; whenever an LP collects the union's cash, senior's part comes first: the LP's
+/// quote (one total, what the anchor signs) includes the USDC for it at the fix less the LP's fee, the leader can see
+/// the part (`offer_senior`), and at the confirm that USDC goes to the senior contract, whose index rises.
 #[test]
-fn the_guarantee_fee_reaches_senior_in_usdc_through_an_lp() {
+fn senior_fee_rides_first_on_every_collect() {
     let v = vsetup();
     let (fx, c, s) = (&v.fx, v.fx.core(), v.fx.senior());
     let (_anchor, lp) = fx.lp_ready();
-    // A senior investor: 1,000 USDC in, one share per USDC stroop at the start.
     let inv = Address::generate(&fx.env);
     StellarAssetClient::new(&fx.env, &fx.usdc).mint(&inv, &(1_000 * NIN));
     s.set_investor(
@@ -3706,9 +3706,7 @@ fn the_guarantee_fee_reaches_senior_in_usdc_through_an_lp() {
         &nila_senior::Tag::Offshore,
     );
     s.deposit(&inv, &(1_000 * NIN));
-    // The trust sets the fee: a quarter of every voucher's interest.
     assert!(c.try_set_guarantee_fee(&10_001).is_err());
-    c.set_guarantee_fee(&2_500);
     let id = loan_id(&fx.env, 1);
     c.attest_food_token(
         &fx.attester,
@@ -3719,29 +3717,24 @@ fn the_guarantee_fee_reaches_senior_in_usdc_through_an_lp() {
         &600,
     );
     c.draw_loan(&fx.union, &fx.borrower, &id, &(400 * NIN), &600);
-    // Half a year on she repays everything.
     fx.at(T0 + YEAR / 2);
     let v_int = 6 * HOUR * 1250 / 10_000 / 2;
     StellarAssetClient::new(&fx.env, &fx.nin).mint(&fx.fx_id, &(20_000 * NIN));
     assert!(c.repay_loan(&fx.union, &id, &(20_000 * NIN)));
-    let fee = v_int * 2_500 / 10_000;
-    assert_eq!(c.guarantee_fee(&fx.union), (fee, 2_500));
+    assert_eq!(c.guarantee_fee(&fx.union), (v_int, 10_000));
     v.assert_conserved();
-    // An LP converts it at the office at the day's rate: the rupees out of fund_core, the USDC into senior.
+    // A Collect of ₹950 at ₹95: the first whole rupees of it are senior's fee.
     fx.fx()
         .override_rate(&(95 * NIN), &(T0 + YEAR / 2 + 86_400));
     StellarAssetClient::new(&fx.env, &fx.usdc).mint(&lp, &(50 * NIN));
-    let usdc = fee * NIN / (95 * NIN);
-    // Not more than is waiting; not below the rate less the LP's fee; only the senior contract asks fund_core.
-    assert!(s
-        .try_pay_fee(&fx.union, &fx.leader, &lp, &(fee + 1), &(usdc + NIN))
-        .is_err());
-    assert_eq!(
-        s.try_pay_fee(&fx.union, &fx.leader, &lp, &fee, &(usdc / 2)),
-        Err(Ok(nila_senior::Error::BelowFix))
-    );
-    // Senior's fee first (23 Nov): the LP cannot collect the union's cash while it waits.
-    let (s24, q) = fx.ids();
+    let sen_inr = (v_int / NIN * NIN).min(950 * NIN);
+    let sen_usdc = sen_inr * NIN / (95 * NIN) * 99 / 100;
+    let q = fx
+        .fx()
+        .lp_quote(&fx.union, &lp, &OfferKind::Collect, &(950 * NIN));
+    assert_eq!((q.senior_inr, q.senior_usdc), (sen_inr, sen_usdc));
+    assert_eq!(q.usdc, q.close_usdc + q.open_usdc + sen_usdc);
+    let (s24, qid) = fx.ids();
     let collect = fx.fx().post_offer(
         &fx.leader,
         &fx.union,
@@ -3749,21 +3742,19 @@ fn the_guarantee_fee_reaches_senior_in_usdc_through_an_lp() {
         &(950 * NIN),
         &(T0 + YEAR / 2 + 3_600),
     );
-    fx.acc(&lp, &collect, &s24, &q);
-    assert_eq!(
-        fx.fx().try_confirm(&fx.leader, &collect),
-        Err(Ok(FxError::SeniorFeeFirst))
-    );
+    assert_eq!(fx.acc(&lp, &collect, &s24, &qid), q.usdc);
+    // The leader is told senior's part.
+    assert_eq!(fx.fx().offer_senior(&collect), Some((sen_inr, sen_usdc)));
     let before = s.holding(&inv).1;
-    s.pay_fee(&fx.union, &fx.leader, &lp, &fee, &usdc);
     fx.fx().confirm(&fx.leader, &collect);
-    assert_eq!(c.guarantee_fee(&fx.union).0, 0);
-    assert_eq!(s.total(), 1_000 * NIN + usdc);
-    assert!(s.holding(&inv).1 - before >= usdc - 1);
+    assert_eq!(c.guarantee_fee(&fx.union).0, v_int - sen_inr);
+    assert_eq!(fx.fx().offer_senior(&collect), None);
+    assert_eq!(s.total(), 1_000 * NIN + sen_usdc);
+    assert!(s.holding(&inv).1 - before >= sen_usdc - 1);
     assert!(s.index() > nila_math::RAY);
     assert_eq!(
         TokenClient::new(&fx.env, &fx.usdc).balance(&s.address),
-        1_000 * NIN + usdc
+        1_000 * NIN + sen_usdc
     );
     v.assert_conserved();
 }

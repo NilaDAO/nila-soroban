@@ -27,17 +27,10 @@ impl MockFx {
             set_by: env.current_contract_address(),
         })
     }
-    pub fn lp_member(env: Env, _union: Address, _lp: Address) -> Option<LpOf> {
-        Some(LpOf {
-            accepted: true,
-            kyc_ref: BytesN::from_array(&env, &[1; 32]),
-        })
-    }
-    pub fn id_checked(_env: Env, _account: Address) -> bool {
-        true
-    }
-    pub fn lp_fee(_env: Env) -> u32 {
-        100
+    /// A Collect's confirm: the LP's USDC for senior's part has arrived (the test sends it), then fee_in.
+    pub fn collect_fee(env: Env, union: Address, inr: i128, usdc: i128) {
+        let senior: Address = env.storage().instance().get(&1u32).unwrap();
+        SeniorContractClient::new(&env, &senior).fee_in(&union, &inr, &usdc);
     }
     /// fx_pool pulls the cover's USDC from senior (it then pays nIN into fund_core; not modelled here).
     pub fn cover_from_senior(env: Env, _union: Address, usdc: i128) -> i128 {
@@ -52,40 +45,13 @@ impl MockFx {
     }
 }
 
-/// fund_core: 1,800 rupees of guarantee fee waiting; a voucher loss of ₹9,990 (111 USDC at ₹90) booked.
+/// fund_core: a voucher loss of ₹9,990 (111 USDC at ₹90) booked.
 #[contract]
 struct MockCore;
 #[contractimpl]
 impl MockCore {
-    pub fn take_guarantee_fee(_env: Env, _union: Address, amount: i128) -> i128 {
-        assert!(amount <= 1_800 * ONE);
-        amount
-    }
     pub fn voucher_loss(_env: Env, _union: Address) -> i128 {
         9_990 * ONE
-    }
-}
-
-#[contract]
-struct MockRoles;
-#[contractimpl]
-impl MockRoles {
-    pub fn is_leader(_env: Env, _union: Address, _account: Address) -> bool {
-        true
-    }
-}
-
-/// An LP's account that pays from its own USDC.
-#[contract]
-struct MockLp;
-#[contractimpl]
-impl MockLp {
-    pub fn init(env: Env, usdc: Address) {
-        env.storage().instance().set(&0u32, &usdc);
-    }
-    pub fn send_usdc(env: Env, to: Address, amount: i128) {
-        let usdc: Address = env.storage().instance().get(&0u32).unwrap();
-        TokenClient::new(&env, &usdc).transfer(&env.current_contract_address(), &to, &amount);
     }
 }
 
@@ -93,7 +59,6 @@ struct S {
     env: Env,
     s: SeniorContractClient<'static>,
     usdc: Address,
-    lp: Address,
     fx: Address,
 }
 
@@ -107,9 +72,7 @@ fn setup() -> S {
         .address();
     let fx = env.register(MockFx, ());
     let core = env.register(MockCore, ());
-    let roles = env.register(MockRoles, ());
-    let lp = env.register(MockLp, ());
-    MockLpClient::new(&env, &lp).init(&usdc);
+    let roles = Address::generate(&env);
     let id = env.register(
         SeniorContract,
         (admin, usdc.clone(), core, fx.clone(), roles),
@@ -119,7 +82,6 @@ fn setup() -> S {
         env: env.clone(),
         s: SeniorContractClient::new(&env, &id),
         usdc,
-        lp,
         fx,
     }
 }
@@ -171,23 +133,12 @@ fn the_fee_raises_the_index_and_a_cover_lowers_it() {
     let a = t.investor(1_000 * ONE);
     s.deposit(&a, &(1_000 * ONE));
     let union = Address::generate(&t.env);
-    let leader = Address::generate(&t.env);
-    // No fee into an empty pool.
-    let empty = setup();
-    let (eu, el) = (Address::generate(&empty.env), Address::generate(&empty.env));
-    assert_eq!(
-        empty
-            .s
-            .try_pay_fee(&eu, &el, &empty.lp, &(900 * ONE), &(10 * ONE)),
-        Err(Ok(Error::NoShares))
-    );
-    // ₹900 at ₹90 = 10 USDC, less the LP's 1%: 9.9 USDC at least.
-    StellarAssetClient::new(&t.env, &t.usdc).mint(&t.lp, &(100 * ONE));
-    assert_eq!(
-        s.try_pay_fee(&union, &leader, &t.lp, &(900 * ONE), &(98_000_000)),
-        Err(Ok(Error::BelowFix))
-    );
-    s.pay_fee(&union, &leader, &t.lp, &(900 * ONE), &(10 * ONE));
+    // Only fx_pool brings a fee (at a Collect's confirm): 10 USDC for ₹900.
+    t.env.set_auths(&[]);
+    assert!(s.try_fee_in(&union, &(900 * ONE), &(10 * ONE)).is_err());
+    t.env.mock_all_auths();
+    StellarAssetClient::new(&t.env, &t.usdc).mint(&s.address, &(10 * ONE));
+    MockFxClient::new(&t.env, &t.fx).collect_fee(&union, &(900 * ONE), &(10 * ONE));
     assert_eq!(s.total(), 1_010 * ONE);
     // Shares are valued rounded down, a stroop at most, in the pool's favour.
     assert!(1_010 * ONE - s.holding(&a).1 <= 1);

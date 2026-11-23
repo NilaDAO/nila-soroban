@@ -263,7 +263,7 @@ mainnet predates 25 Oct. Kept for a testnet set that does.
 - In this release (Nov 7): USDC through the senior route and the LP offers (C5b, C9); the anchor
   (SEP-1/10/12/24/38) is the trust's own, in nila-anchor.
 - Senior (23 Nov, supersedes the 2 Nov payouts): a guarantee pool only. USDC stays in the senior contract, grows by
-  the vouchers' guarantee fee (`fund_core.set_guarantee_fee`, an LP pays it in with `senior.pay_fee`) and leaves
+  the voucher interest (all of it by default; senior first on every LP Collect, its USDC to senior at the confirm) and leaves
   only by a loss cover (48 h) or an exit (14 days, daily cap). Vouchers are lent from junior money. Reflector (R77)
   prices fx_pool's rate in the lane-B upgrade.
 

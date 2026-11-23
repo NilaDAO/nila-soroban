@@ -139,9 +139,9 @@ pub trait FundCoreTrait {
         postpaid: i128,
         to_union: i128,
     ) -> (i128, i128, i128);
-    // The senior contract only (its `pay_fee`, 23 Nov: senior is a guarantee pool): the union's guarantee fee an
-    // LP paid in USDC; burned and booked off cash at hand. Returns what cash at hand covered.
-    fn take_guarantee_fee(union: Address, amount: i128) -> i128;
+    // fx_pool only (a Collect's confirm, 23 Nov): an LP took `amount` rupees of the union's guarantee fee and paid
+    // senior its USDC; burned.
+    fn fee_collected(union: Address, amount: i128);
     // (fee waiting in nIN, fee share in bp).
     fn guarantee_fee(union: Address) -> (i128, u32);
     // fx_pool only (23 Nov): senior's cover of a voucher loss, as nIN, into the junior pool. Returns what was covered.

@@ -78,36 +78,36 @@ Source: `contracts/fx-pool/`.
 
 | Event (`name`) | Topics after the name | Data fields | Meaning |
 |---|---|---|---|
-| `activated` | — | `fund_core`: Address |  [src](../contracts/fx-pool/src/lib.rs#L337) |
-| `anchor_set` | — | `anchor`: Address |  [src](../contracts/fx-pool/src/lp.rs#L173) |
-| `cash_out_signed` | `union`: Address<br>`member`: Address | `leader`: Address<br>`amount`: i128 | A signed cash-out at the desk (24 Oct): her nIN burned, the rupees counted out to her. [src](../contracts/fx-pool/src/lib.rs#L322) |
-| `cash_scanned` | `union`: Address<br>`member`: Address | `purpose`: Purpose<br>`amount`: i128 — Rupees taken in and nIN minted (after any repay change was handed back).<br>`scan_hash`: BytesN<32><br>`escrow_id`: u64<br>`collect_offer`: u64 — The Collect offer this scan opened for its cash above the treasury (24 Oct); 0 for none. |  [src](../contracts/fx-pool/src/lib.rs#L288) |
-| `cash_settled` | `union`: Address | `amount`: i128<br>`cash_at_hand`: i128 |  [src](../contracts/fx-pool/src/lib.rs#L303) |
-| `daily_cap_set` | — | `daily_cap`: i128 |  [src](../contracts/fx-pool/src/lib.rs#L332) |
-| `dispute_resolved` | `union`: Address<br>`offer_id`: u64 | `handed`: bool |  [src](../contracts/fx-pool/src/lp.rs#L260) |
-| `escrow_expired` | `union`: Address<br>`escrow_id`: u64 | `remaining`: i128<br>`covered`: i128 |  [src](../contracts/fx-pool/src/lib.rs#L311) |
-| `fund_core_set` | — | `fund_core`: Address |  [src](../contracts/fx-pool/src/lib.rs#L278) |
-| `id_checked_set` | `account`: Address | `checked`: bool | The anchor checked (or withdrew) an account's identity (K1, 22 Oct). [src](../contracts/fx-pool/src/lp.rs#L188) |
-| `leader_swap` | `union`: Address<br>`leader`: Address | `to_nin`: bool<br>`usdc`: i128<br>`nin`: i128<br>`inr_per_usd`: i128 | A leader's own swap (22 Oct): USDC → nIN in her wallet (`to_nin`), or back. [src](../contracts/fx-pool/src/lib.rs#L377) |
-| `lp_fee_set` | — | `fee_bp`: u32 |  [src](../contracts/fx-pool/src/lp.rs#L195) |
-| `lp_member_set` | `union`: Address<br>`lp`: Address | `accepted`: bool |  [src](../contracts/fx-pool/src/lp.rs#L178) |
-| `max_scan_set` | — | `max_scan`: i128 |  [src](../contracts/fx-pool/src/lib.rs#L283) |
-| `offer_accepted` | `union`: Address<br>`offer_id`: u64 | `lp`: Address<br>`usdc`: i128<br>`inr_per_usd`: i128<br>`sep24_id`: String<br>`quote_id`: String |  [src](../contracts/fx-pool/src/lp.rs#L223) |
-| `offer_closed` | `union`: Address<br>`offer_id`: u64 | `state`: OfferState |  [src](../contracts/fx-pool/src/lp.rs#L269) |
-| `offer_confirmed` | `union`: Address<br>`offer_id`: u64 | `kind`: OfferKind<br>`lp`: Address<br>`inr`: i128<br>`usdc`: i128<br>`from_lp`: i128<br>`from_domestic`: i128<br>`from_offshore`: i128 |  [src](../contracts/fx-pool/src/lp.rs#L236) |
-| `offer_disputed` | `union`: Address<br>`offer_id`: u64 | `by`: Address |  [src](../contracts/fx-pool/src/lp.rs#L251) |
-| `offer_merged` | `union`: Address<br>`offer_id`: u64 | `added`: i128<br>`inr`: i128<br>`expires`: u64 | Rupees added to an open offer no LP has accepted yet (25 Oct): one offer grows instead of a new one each time. [src](../contracts/fx-pool/src/lp.rs#L201) |
-| `offer_posted` | `union`: Address<br>`offer_id`: u64 | `kind`: OfferKind<br>`inr`: i128<br>`expires`: u64 |  [src](../contracts/fx-pool/src/lp.rs#L212) |
-| `paused` | — | `paused`: bool |  [src](../contracts/fx-pool/src/lib.rs#L400) |
-| `position_changed` | `union`: Address<br>`lp`: Address | `kind`: OfferKind<br>`usdc`: i128<br>`inr`: i128 |  [src](../contracts/fx-pool/src/lp.rs#L143) |
-| `position_settled` | `union`: Address<br>`lp`: Address | `kind`: OfferKind<br>`usdc`: i128<br>`inr`: i128<br>`inr_per_usd`: i128 | A position settled past the margin (31 Oct): its USDC went to the union (Collect) or unlocked for the LP (Bring). [src](../contracts/fx-pool/src/lp.rs#L156) |
-| `rate_band_set` | — | `band_bp`: u32 |  [src](../contracts/fx-pool/src/lib.rs#L356) |
-| `rate_set` | — | `inr_per_usd`: i128<br>`valid_until`: u64<br>`set_by`: Address | Senior nIN minted for the senior contract (2 Nov): into the union's senior pool in `investor`'s name. [src](../contracts/fx-pool/src/lib.rs#L349) |
-| `reflector_set` | — | `oracle`: Option<Address> |  [src](../contracts/fx-pool/src/lib.rs#L361) |
-| `senior_cover` | `union`: Address | `usdc`: i128<br>`nin`: i128 |  [src](../contracts/fx-pool/src/lib.rs#L367) |
-| `senior_set` | — | `senior`: Address | The senior contract set (2 Nov). [src](../contracts/fx-pool/src/lib.rs#L343) |
-| `swap_key_set` | — | `key`: BytesN<32> |  [src](../contracts/fx-pool/src/lp.rs#L168) |
-| `treasury_usdc_in` | `union`: Address<br>`leader`: Address | `usdc`: i128<br>`nin`: i128<br>`inr_per_usd`: i128 |  [src](../contracts/fx-pool/src/lib.rs#L389) |
+| `activated` | — | `fund_core`: Address |  [src](../contracts/fx-pool/src/lib.rs#L341) |
+| `anchor_set` | — | `anchor`: Address |  [src](../contracts/fx-pool/src/lp.rs#L181) |
+| `cash_out_signed` | `union`: Address<br>`member`: Address | `leader`: Address<br>`amount`: i128 | A signed cash-out at the desk (24 Oct): her nIN burned, the rupees counted out to her. [src](../contracts/fx-pool/src/lib.rs#L326) |
+| `cash_scanned` | `union`: Address<br>`member`: Address | `purpose`: Purpose<br>`amount`: i128 — Rupees taken in and nIN minted (after any repay change was handed back).<br>`scan_hash`: BytesN<32><br>`escrow_id`: u64<br>`collect_offer`: u64 — The Collect offer this scan opened for its cash above the treasury (24 Oct); 0 for none. |  [src](../contracts/fx-pool/src/lib.rs#L292) |
+| `cash_settled` | `union`: Address | `amount`: i128<br>`cash_at_hand`: i128 |  [src](../contracts/fx-pool/src/lib.rs#L307) |
+| `daily_cap_set` | — | `daily_cap`: i128 |  [src](../contracts/fx-pool/src/lib.rs#L336) |
+| `dispute_resolved` | `union`: Address<br>`offer_id`: u64 | `handed`: bool |  [src](../contracts/fx-pool/src/lp.rs#L268) |
+| `escrow_expired` | `union`: Address<br>`escrow_id`: u64 | `remaining`: i128<br>`covered`: i128 |  [src](../contracts/fx-pool/src/lib.rs#L315) |
+| `fund_core_set` | — | `fund_core`: Address |  [src](../contracts/fx-pool/src/lib.rs#L282) |
+| `id_checked_set` | `account`: Address | `checked`: bool | The anchor checked (or withdrew) an account's identity (K1, 22 Oct). [src](../contracts/fx-pool/src/lp.rs#L196) |
+| `leader_swap` | `union`: Address<br>`leader`: Address | `to_nin`: bool<br>`usdc`: i128<br>`nin`: i128<br>`inr_per_usd`: i128 | A leader's own swap (22 Oct): USDC → nIN in her wallet (`to_nin`), or back. [src](../contracts/fx-pool/src/lib.rs#L381) |
+| `lp_fee_set` | — | `fee_bp`: u32 |  [src](../contracts/fx-pool/src/lp.rs#L203) |
+| `lp_member_set` | `union`: Address<br>`lp`: Address | `accepted`: bool |  [src](../contracts/fx-pool/src/lp.rs#L186) |
+| `max_scan_set` | — | `max_scan`: i128 |  [src](../contracts/fx-pool/src/lib.rs#L287) |
+| `offer_accepted` | `union`: Address<br>`offer_id`: u64 | `lp`: Address<br>`usdc`: i128<br>`inr_per_usd`: i128<br>`sep24_id`: String<br>`quote_id`: String |  [src](../contracts/fx-pool/src/lp.rs#L231) |
+| `offer_closed` | `union`: Address<br>`offer_id`: u64 | `state`: OfferState |  [src](../contracts/fx-pool/src/lp.rs#L277) |
+| `offer_confirmed` | `union`: Address<br>`offer_id`: u64 | `kind`: OfferKind<br>`lp`: Address<br>`inr`: i128<br>`usdc`: i128<br>`from_lp`: i128<br>`from_domestic`: i128<br>`from_offshore`: i128 |  [src](../contracts/fx-pool/src/lp.rs#L244) |
+| `offer_disputed` | `union`: Address<br>`offer_id`: u64 | `by`: Address |  [src](../contracts/fx-pool/src/lp.rs#L259) |
+| `offer_merged` | `union`: Address<br>`offer_id`: u64 | `added`: i128<br>`inr`: i128<br>`expires`: u64 | Rupees added to an open offer no LP has accepted yet (25 Oct): one offer grows instead of a new one each time. [src](../contracts/fx-pool/src/lp.rs#L209) |
+| `offer_posted` | `union`: Address<br>`offer_id`: u64 | `kind`: OfferKind<br>`inr`: i128<br>`expires`: u64 |  [src](../contracts/fx-pool/src/lp.rs#L220) |
+| `paused` | — | `paused`: bool |  [src](../contracts/fx-pool/src/lib.rs#L404) |
+| `position_changed` | `union`: Address<br>`lp`: Address | `kind`: OfferKind<br>`usdc`: i128<br>`inr`: i128 |  [src](../contracts/fx-pool/src/lp.rs#L151) |
+| `position_settled` | `union`: Address<br>`lp`: Address | `kind`: OfferKind<br>`usdc`: i128<br>`inr`: i128<br>`inr_per_usd`: i128 | A position settled past the margin (31 Oct): its USDC went to the union (Collect) or unlocked for the LP (Bring). [src](../contracts/fx-pool/src/lp.rs#L164) |
+| `rate_band_set` | — | `band_bp`: u32 |  [src](../contracts/fx-pool/src/lib.rs#L360) |
+| `rate_set` | — | `inr_per_usd`: i128<br>`valid_until`: u64<br>`set_by`: Address | Senior nIN minted for the senior contract (2 Nov): into the union's senior pool in `investor`'s name. [src](../contracts/fx-pool/src/lib.rs#L353) |
+| `reflector_set` | — | `oracle`: Option<Address> |  [src](../contracts/fx-pool/src/lib.rs#L365) |
+| `senior_cover` | `union`: Address | `usdc`: i128<br>`nin`: i128 |  [src](../contracts/fx-pool/src/lib.rs#L371) |
+| `senior_set` | — | `senior`: Address | The senior contract set (2 Nov). [src](../contracts/fx-pool/src/lib.rs#L347) |
+| `swap_key_set` | — | `key`: BytesN<32> |  [src](../contracts/fx-pool/src/lp.rs#L176) |
+| `treasury_usdc_in` | `union`: Address<br>`leader`: Address | `usdc`: i128<br>`nin`: i128<br>`inr_per_usd`: i128 |  [src](../contracts/fx-pool/src/lib.rs#L393) |
 
 ## machinery
 
@@ -142,18 +142,18 @@ Source: `contracts/senior/`.
 
 | Event (`name`) | Topics after the name | Data fields | Meaning |
 |---|---|---|---|
-| `admin_set` | — | `admin`: Address |  [src](../contracts/senior/src/lib.rs#L190) |
-| `cap_set` | — | `usdc`: i128 |  [src](../contracts/senior/src/lib.rs#L200) |
-| `cover_cancelled` | `union`: Address | `usdc`: i128 |  [src](../contracts/senior/src/lib.rs#L272) |
-| `cover_paid` | `union`: Address | `usdc`: i128<br>`nin`: i128<br>`index`: i128 |  [src](../contracts/senior/src/lib.rs#L263) |
-| `cover_proposed` | `union`: Address | `usdc`: i128<br>`eta`: u64 |  [src](../contracts/senior/src/lib.rs#L255) |
-| `daily_cap_set` | — | `usdc`: i128 |  [src](../contracts/senior/src/lib.rs#L205) |
-| `deposited` | `investor`: Address | `tag`: Tag<br>`usdc`: i128<br>`shares`: i128 |  [src](../contracts/senior/src/lib.rs#L219) |
-| `fee_paid` | `union`: Address | `leader`: Address<br>`lp`: Address<br>`inr`: i128<br>`usdc`: i128<br>`cash_settled`: i128<br>`index`: i128 |  [src](../contracts/senior/src/lib.rs#L243) |
-| `investor_set` | `investor`: Address | `accepted`: bool<br>`kyc_ref`: BytesN<32><br>`tag`: Tag |  [src](../contracts/senior/src/lib.rs#L210) |
-| `paused_set` | — | `paused`: bool |  [src](../contracts/senior/src/lib.rs#L195) |
-| `redeem_requested` | `investor`: Address | `shares`: i128 |  [src](../contracts/senior/src/lib.rs#L228) |
-| `redeemed` | `investor`: Address | `shares`: i128<br>`usdc`: i128 |  [src](../contracts/senior/src/lib.rs#L235) |
+| `admin_set` | — | `admin`: Address |  [src](../contracts/senior/src/lib.rs#L167) |
+| `cap_set` | — | `usdc`: i128 |  [src](../contracts/senior/src/lib.rs#L177) |
+| `cover_cancelled` | `union`: Address | `usdc`: i128 |  [src](../contracts/senior/src/lib.rs#L246) |
+| `cover_paid` | `union`: Address | `usdc`: i128<br>`nin`: i128<br>`index`: i128 |  [src](../contracts/senior/src/lib.rs#L237) |
+| `cover_proposed` | `union`: Address | `usdc`: i128<br>`eta`: u64 |  [src](../contracts/senior/src/lib.rs#L229) |
+| `daily_cap_set` | — | `usdc`: i128 |  [src](../contracts/senior/src/lib.rs#L182) |
+| `deposited` | `investor`: Address | `tag`: Tag<br>`usdc`: i128<br>`shares`: i128 |  [src](../contracts/senior/src/lib.rs#L196) |
+| `fee_paid` | `union`: Address | `inr`: i128<br>`usdc`: i128<br>`index`: i128 |  [src](../contracts/senior/src/lib.rs#L220) |
+| `investor_set` | `investor`: Address | `accepted`: bool<br>`kyc_ref`: BytesN<32><br>`tag`: Tag |  [src](../contracts/senior/src/lib.rs#L187) |
+| `paused_set` | — | `paused`: bool |  [src](../contracts/senior/src/lib.rs#L172) |
+| `redeem_requested` | `investor`: Address | `shares`: i128 |  [src](../contracts/senior/src/lib.rs#L205) |
+| `redeemed` | `investor`: Address | `shares`: i128<br>`usdc`: i128 |  [src](../contracts/senior/src/lib.rs#L212) |
 
 ## account_deployer
 

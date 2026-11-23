@@ -106,7 +106,7 @@ pub enum DataKey {
     Dues(Address, BytesN<32>),
     // The guarantee fee the union's vouchers paid and senior has not yet taken (executive decision 23 Nov:
     // senior is a guarantee pool only): nIN held in fund_core outside every pool until an LP turns it into
-    // USDC for the senior contract (`take_guarantee_fee`). Replaces the senior lending pool's income.
+    // USDC for the senior contract (`fee_collected`, at a Collect's confirm). Replaces the senior lending pool's income.
     GuaranteeFee(Address),
     // Voucher value lost at defaults and not yet covered by senior (executive decision 23 Nov: junior carries a
     // default's cash part, senior its voucher part). The junior pool lent it and keeps its value; senior's cover
@@ -411,12 +411,6 @@ fn require_admin(env: &Env) -> Result<Config, Error> {
     let c = cfg(env);
     c.admin.require_auth();
     Ok(c)
-}
-
-// All money into fund_core comes through fx_pool's cash scan (executive decision, 9 Oct).
-fn require_senior(env: &Env) -> Result<(), Error> {
-    cfg(env).senior.ok_or(Error::NotSenior)?.require_auth();
-    Ok(())
 }
 
 fn require_fx_pool(env: &Env) -> Result<Address, Error> {
@@ -1381,27 +1375,27 @@ impl FundCore {
         Ok(())
     }
 
-    // The senior contract only (its `pay_fee`): an LP took `amount` rupees of the union's guarantee fee at the
-    // office and paid the senior contract USDC; the nIN is burned here and the rupees are booked off cash at
-    // hand (`fx_pool.settle_cash`), as `claim_junior_cash` does. Returns what cash at hand covered.
-    pub fn take_guarantee_fee(env: Env, union: Address, amount: i128) -> Result<i128, Error> {
+    // fx_pool only (a Collect's confirm, senior first, 23 Nov): an LP took `amount` rupees of the union's guarantee
+    // fee at the office and its USDC went to the senior contract; fx_pool settled the cash at hand, the nIN is burned
+    // here. Never more than is waiting.
+    pub fn fee_collected(env: Env, union: Address, amount: i128) -> Result<(), Error> {
         require_not_paused(&env)?;
-        require_senior(&env)?;
+        require_fx_pool(&env)?;
         require_positive(amount)?;
         let k = DataKey::GuaranteeFee(union.clone());
         if amount > p_i128(&env, &k) {
             return Err(Error::AboveOwed);
         }
         p_add(&env, &k, -amount)?;
-        let settled = pay_out_cash(&env, &union, amount)?;
+        nin(&env).burn(&env.current_contract_address(), &amount);
         GuaranteeFeeTaken {
             union,
             amount,
-            cash_settled: settled,
+            cash_settled: amount,
         }
         .publish(&env);
         bump_instance(&env);
-        Ok(settled)
+        Ok(())
     }
 
     // fx_pool only (`cover_from_senior`): the senior contract's USDC cover of a voucher loss, as nIN at the day's

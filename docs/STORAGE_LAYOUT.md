@@ -86,7 +86,7 @@ Revoke keeps the union's `Leader`, `UnionRole` and `UnionSettings` entries; whil
 | `ShareCash(union, week)` | persistent | i128 cash parts of the union's undrawn food tokens whose window closes that week (31 Oct; read by `cash_room`) |
 | `Dues(union, token_id)` | persistent | `Dues{owners: Vec<OwnerDue{owner, amount}>, credit, union_due}` (1 Nov, owner split): owners' postpaid parts still owed on a voucher, oldest claim first (max 8 owners), her repayment of the voucher's value not yet paid on, and (2 Nov) the union's parts of the price, into its treasury after the owners, back to the junior pool at a default (23 Nov) |
 | `CropCalendar` | instance | Address of the crop_calendar contract (25 Oct) |
-| `GuaranteeFee(union)` | persistent | i128 the guarantee fee the union's vouchers paid and senior has not yet taken (23 Nov): nIN in fund_core outside every pool until an LP turns it into USDC for the senior contract (`take_guarantee_fee`); counted in the conservation check and `cash_room` |
+| `GuaranteeFee(union)` | persistent | i128 the guarantee fee the union's vouchers paid and senior has not yet taken (23 Nov): nIN in fund_core outside every pool until a Collect takes it first for the senior contract (`fee_collected`, from fx_pool's confirm); counted in the conservation check and `cash_room` |
 | `VoucherLoss(union)` | persistent | i128 voucher value lost at defaults, not yet covered by senior (23 Nov: junior carries a default's cash part, senior its voucher part); `cover_voucher_loss` (from fx_pool, senior's USDC as nIN) refills junior cash |
 | `GuaranteeFeeBp` | instance | u32 the fee: this share of every voucher's interest, in bp (unset = 10,000, all of it: senior earns the voucher interest; `set_guarantee_fee` can lower it) |
 | `ExpiredCash(union)` | persistent | i128 expired cash the treasury paid for (`cover_expired_escrow`) and still in the drawer; a cash payout above the open batches takes it and its nIN goes back to the treasury (review 5 Nov) |
@@ -137,6 +137,8 @@ Revoke keeps the union's `Leader`, `UnionRole` and `UnionSettings` entries; whil
 | `RateBandBp` | instance | u32 how far the attester's fix may move (default 500 = 5%) |
 | `SwapKey` | instance | BytesN<32> the anchor's ed25519 swap key; `accept` needs its signature (C9b) |
 | `LeaderSwapUsdc(union)` | persistent | i128 USDC behind the union's swapped nIN (`swap_usdc_to_nin` less `swap_nin_to_usdc`) |
+| `OfferSenior(id)` | persistent | (i128, i128) senior's part of an accepted Collect: rupees of the union's guarantee fee and the USDC the LP pays for them (23 Nov, senior first); removed at the confirm or close |
+| `FeeHeld(union)` | persistent | i128 the union's guarantee fee held by accepted Collects, not yet confirmed |
 | `SwapUsdc(union, account)` | persistent | i128 USDC that account swapped in and has not swapped back; caps its `swap_nin_to_usdc` (review 5 Nov) |
 
 ## senior (executive decision 23 Nov): a guarantee pool only
@@ -144,7 +146,7 @@ Revoke keeps the union's `Leader`, `UnionRole` and `UnionSettings` entries; whil
 | Key | Tier | Value |
 |---|---|---|
 | `Admin`, `Usdc`, `FundCore`, `FxPool`, `Roles` | instance | Address |
-| `Paused` | instance | bool (stops deposit, request_redeem, redeem, pay_fee, execute_cover) |
+| `Paused` | instance | bool (stops deposit, request_redeem, redeem, execute_cover; a fee from fx_pool still comes in) |
 | `Cap` | instance | i128 the most senior USDC held in all (0 until the trust sets it: no deposits) |
 | `Total` | instance | i128 USDC the pool holds for its investors: deposits and fees, less covers and exits |
 | `Investor(investor)` | persistent | `Investor{accepted, kyc_ref, tag}`: accepted by the trust; `tag` (Offshore 0, Domestic 1) set once |

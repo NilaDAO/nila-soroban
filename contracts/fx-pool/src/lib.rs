@@ -138,9 +138,7 @@ pub enum Error {
     SeniorAlreadySet = 37,
     /// The LP's account `pay` did not bring fx_pool the USDC asked (review 5 Nov).
     NotPaid = 38,
-    /// Voucher interest for senior is waiting in the union: an LP converts it first (`senior.pay_fee`), then
-    /// collects cash (executive decision 23 Nov).
-    SeniorFeeFirst = 39,
+    // 39 (SeniorFeeFirst) removed 23 Nov: senior's fee rides on the Collect instead.
 }
 
 /// INR per USD, 7 decimals (nIN per USDC), set by the attester from the FBIL fix (R77).
@@ -225,6 +223,11 @@ pub enum DataKey {
     AttesterFixAt,
     /// Reflector's forex oracle and its price decimals (23 Nov). Instance; none = the fixes only.
     Reflector,
+    /// Senior's part of an accepted Collect (offer id): (rupees of the union's guarantee fee, USDC the LP pays for
+    /// them), executive decision 23 Nov.
+    OfferSenior(u64),
+    /// The union's guarantee fee held by accepted Collects, not yet confirmed (rupees).
+    FeeHeld(Address),
 }
 
 /// Reflector's forex oracle (SEP-40): its asset and price types, as its contract defines them.
@@ -242,10 +245,11 @@ pub struct ReflectorPrice {
     pub timestamp: u64,
 }
 
-/// The senior contract's one read fx_pool needs (23 Nov): whether it has investors to pay a fee to.
+/// What fx_pool calls on the senior contract (23 Nov): whether it has investors, and the fee a Collect brought it.
 #[soroban_sdk::contractclient(name = "SeniorViewClient")]
 pub trait SeniorView {
     fn total_shares(env: Env) -> i128;
+    fn fee_in(env: Env, union: Address, inr: i128, usdc: i128);
 }
 
 #[soroban_sdk::contractclient(name = "ReflectorClient")]

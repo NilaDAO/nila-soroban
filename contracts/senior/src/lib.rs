@@ -3,9 +3,9 @@
 //!
 //! - Investors the trust accepted deposit USDC and hold shares, valued by one USDC index (ray math, as
 //!   fund_core's pools): value = shares × index. One pool, one index for every investor.
-//! - The USDC stays in this contract. It grows by the guarantee fee: fund_core sets a share of every
-//!   voucher's interest aside (in rupees); a member LP of the union takes those rupees at the office and pays
-//!   the USDC in here (`pay_fee`, with a leader): the index rises.
+//! - The USDC stays in this contract. It grows by the guarantee fee: fund_core sets every voucher's interest aside
+//!   for senior (in rupees); whenever a member LP collects the union's cash, that part comes first (fx_pool's
+//!   Collect): the LP's USDC for it comes here at the leader's confirm (`fee_in`) and the index rises.
 //! - It leaves only to cover a loss (`propose_cover`, 48 hours, then `execute_cover`: the index falls) or to
 //!   an investor who exits (`request_redeem`, 14 days, then `redeem`: shares × index at that moment, within the
 //!   daily cap). There is no other way out and no admin withdrawal; but a 48-hour upgrade (trust,
@@ -18,7 +18,7 @@
 //! - Unaudited: deposits stop at the trust's cap (0 until set).
 //! - Error codes start at 101, apart from fund_core's and fx_pool's; removed codes are not reused.
 
-use nila_common::{bump_instance, upgrade, FundCoreClient, RolesClient, TTL_BUMP, TTL_THRESHOLD};
+use nila_common::{bump_instance, upgrade, FundCoreClient, TTL_BUMP, TTL_THRESHOLD};
 use nila_math::{haircut_index, index_bump, to_shares, to_underlying, RAY};
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
@@ -70,23 +70,15 @@ pub enum Error {
     AboveCap = 105,
     /// No rate in force (fx_pool), or it ran out.
     StaleRate = 106,
-    /// The LP pays less than the rate less its fee.
-    BelowFix = 107,
-    NotLeader = 108,
-    /// Not an accepted LP of the union, or its identity is not checked (K1).
-    NotLp = 109,
-    // 110 (VaultAlreadySet), 111 (NoVault), 116 (UnknownUnion), 117 (AboveGuaranteeCap) removed 23 Nov.
+    // 107 (BelowFix), 108 (NotLeader), 109 (NotLp), 110 (VaultAlreadySet), 111 (NoVault), 116 (UnknownUnion),
+    // 117 (AboveGuaranteeCap), 118 (NotPaid) and 120 (NoShares) removed 23 Nov.
     /// An investor's residency is set once.
     TagFixed = 112,
     UpgradeNotReady = 113,
     BadDelay = 114,
     Overflow = 115,
-    /// The LP's account did not pay the USDC it signed for (re-review, 3 Nov).
-    NotPaid = 118,
     /// Today's senior USDC out would pass the daily cap: the rest waits for the next day (UTC).
     AboveDailyCap = 119,
-    /// No shares yet: a guarantee fee has no one to grow for and stays in rupees in fund_core.
-    NoShares = 120,
     /// The exit's 14 days, or the cover's 48 hours, have not passed.
     NotReady = 121,
     /// No cover proposed, or the pool does not hold it.
@@ -139,25 +131,10 @@ pub struct Fix {
     pub set_by: Address,
 }
 
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LpOf {
-    pub accepted: bool,
-    pub kyc_ref: BytesN<32>,
-}
-
 #[contractclient(name = "FxClient")]
 pub trait FxTrait {
     fn rate() -> Option<Fix>;
-    fn lp_member(union: Address, lp: Address) -> Option<LpOf>;
-    fn id_checked(account: Address) -> bool;
-    fn lp_fee() -> u32;
     fn cover_from_senior(union: Address, usdc: i128) -> i128;
-}
-
-#[contractclient(name = "LpAccountClient")]
-pub trait LpAccountTrait {
-    fn send_usdc(to: Address, amount: i128);
 }
 
 #[contracttype]
@@ -244,11 +221,8 @@ pub struct Redeemed {
 pub struct FeePaid {
     #[topic]
     pub union: Address,
-    pub leader: Address,
-    pub lp: Address,
     pub inr: i128,
     pub usdc: i128,
-    pub cash_settled: i128,
     pub index: i128,
 }
 
@@ -412,7 +386,7 @@ impl SeniorContract {
         Ok(())
     }
 
-    /// Stops deposits, exits, fees and covers.
+    /// Stops deposits, exits and covers.
     pub fn set_paused(env: Env, paused: bool) -> Result<(), Error> {
         require_admin(&env)?;
         env.storage().instance().set(&DataKey::Paused, &paused);
@@ -581,52 +555,19 @@ impl SeniorContract {
 
     // ---------- the guarantee fee ----------
 
-    /// A leader of the union and an accepted member LP turn `inr` of the union's guarantee fee into USDC at the
-    /// office: the LP takes the rupees and pays `usdc_in` (at least the rate less its fee) into this contract;
-    /// the index rises for every share. Returns what cash at hand covered.
-    pub fn pay_fee(
-        env: Env,
-        union: Address,
-        leader: Address,
-        lp: Address,
-        inr: i128,
-        usdc_in: i128,
-    ) -> Result<i128, Error> {
-        require_not_paused(&env)?;
-        leader.require_auth();
-        if !RolesClient::new(&env, &get(&env, &DataKey::Roles)).is_leader(&union, &leader) {
-            return Err(Error::NotLeader);
-        }
-        lp.require_auth();
-        let fx = fx(&env);
-        if !fx.lp_member(&union, &lp).is_some_and(|m| m.accepted) || !fx.id_checked(&lp) {
-            return Err(Error::NotLp);
-        }
-        if inr <= 0 || usdc_in <= 0 {
+    /// fx_pool only, at a Collect's confirm (senior first, 23 Nov): an LP took `inr` rupees of the union's voucher
+    /// interest and `usdc` came here; the index rises for every share.
+    pub fn fee_in(env: Env, union: Address, inr: i128, usdc_in: i128) -> Result<(), Error> {
+        get(&env, &DataKey::FxPool).require_auth();
+        if usdc_in <= 0 {
             return Err(Error::AmountZero);
         }
         let shares = i_get(&env, &DataKey::TotalShares);
-        if shares <= 0 {
-            return Err(Error::NoShares);
+        let mut idx = index(&env);
+        if shares > 0 {
+            idx = index_bump(&env, idx, shares, usdc_in).ok_or(Error::Overflow)?;
+            env.storage().instance().set(&DataKey::Index, &idx);
         }
-        let f = fresh_fix(&env)?;
-        let fair = inr.checked_mul(RATE_ONE).ok_or(Error::Overflow)? / f.inr_per_usd;
-        if usdc_in < fair * i128::from(10_000 - fx.lp_fee().min(10_000)) / 10_000 {
-            return Err(Error::BelowFix);
-        }
-        let settled = FundCoreClient::new(&env, &get(&env, &DataKey::FundCore))
-            .take_guarantee_fee(&union, &inr);
-        // The payment goes through the LP's own account code, so it is checked on this contract's balance, not
-        // trusted (re-review, 3 Nov): a fake account that pays nothing is refused.
-        let me = env.current_contract_address();
-        let token = usdc_token(&env);
-        let before = token.balance(&me);
-        LpAccountClient::new(&env, &lp).send_usdc(&me, &usdc_in);
-        if token.balance(&me) - before < usdc_in {
-            return Err(Error::NotPaid);
-        }
-        let idx = index_bump(&env, index(&env), shares, usdc_in).ok_or(Error::Overflow)?;
-        env.storage().instance().set(&DataKey::Index, &idx);
         i_set(
             &env,
             &DataKey::Total,
@@ -634,16 +575,13 @@ impl SeniorContract {
         );
         FeePaid {
             union,
-            leader,
-            lp,
             inr,
             usdc: usdc_in,
-            cash_settled: settled,
             index: idx,
         }
         .publish(&env);
         bump_instance(&env);
-        Ok(settled)
+        Ok(())
     }
 
     // ---------- loss cover ----------
