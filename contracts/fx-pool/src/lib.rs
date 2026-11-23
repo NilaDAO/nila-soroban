@@ -138,6 +138,9 @@ pub enum Error {
     SeniorAlreadySet = 37,
     /// The LP's account `pay` did not bring fx_pool the USDC asked (review 5 Nov).
     NotPaid = 38,
+    /// Voucher interest for senior is waiting in the union: an LP converts it first (`senior.pay_fee`), then
+    /// collects cash (executive decision 23 Nov).
+    SeniorFeeFirst = 39,
 }
 
 /// INR per USD, 7 decimals (nIN per USDC), set by the attester from the FBIL fix (R77).
@@ -237,6 +240,12 @@ pub enum ReflectorAsset {
 pub struct ReflectorPrice {
     pub price: i128,
     pub timestamp: u64,
+}
+
+/// The senior contract's one read fx_pool needs (23 Nov): whether it has investors to pay a fee to.
+#[soroban_sdk::contractclient(name = "SeniorViewClient")]
+pub trait SeniorView {
+    fn total_shares(env: Env) -> i128;
 }
 
 #[soroban_sdk::contractclient(name = "ReflectorClient")]

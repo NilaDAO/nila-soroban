@@ -314,6 +314,25 @@ fn drop_open(env: &Env, union: &Address, id: u64) {
     bump(env, &k);
 }
 
+/// Senior's fee first (executive decision 23 Nov): no LP collects the union's cash while voucher interest for senior
+/// is waiting in fund_core and senior has investors to pay it to; the LP converts it first (`senior.pay_fee`).
+fn senior_fee_first(env: &Env, union: &Address) -> Result<(), Error> {
+    let Some(senior) = env.storage().instance().get::<_, Address>(&DataKey::Senior) else {
+        return Ok(());
+    };
+    if SeniorViewClient::new(env, &senior).total_shares() <= 0 {
+        return Ok(());
+    }
+    if FundCoreClient::new(env, &core_addr(env)?)
+        .guarantee_fee(union)
+        .0
+        > 0
+    {
+        return Err(Error::SeniorFeeFirst);
+    }
+    Ok(())
+}
+
 /// Completes an accepted offer at the leader's scan or the board's decision: the USDC moves (within the
 /// day's cap), the position changes, the rupees join the cash at hand or leave it.
 fn finish(env: &Env, offer_id: u64, mut o: Offer) -> Result<i128, Error> {
@@ -836,6 +855,9 @@ impl FxPoolContract {
         require_leader(&env, &o.union, &leader)?;
         if o.state != OfferState::Accepted || env.ledger().timestamp() >= o.expires {
             return Err(Error::OfferState);
+        }
+        if o.kind == OfferKind::Collect {
+            senior_fee_first(&env, &o.union)?;
         }
         finish(&env, offer_id, o)
     }

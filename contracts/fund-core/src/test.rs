@@ -3740,8 +3740,23 @@ fn the_guarantee_fee_reaches_senior_in_usdc_through_an_lp() {
         s.try_pay_fee(&fx.union, &fx.leader, &lp, &fee, &(usdc / 2)),
         Err(Ok(nila_senior::Error::BelowFix))
     );
+    // Senior's fee first (23 Nov): the LP cannot collect the union's cash while it waits.
+    let (s24, q) = fx.ids();
+    let collect = fx.fx().post_offer(
+        &fx.leader,
+        &fx.union,
+        &OfferKind::Collect,
+        &(950 * NIN),
+        &(T0 + YEAR / 2 + 3_600),
+    );
+    fx.acc(&lp, &collect, &s24, &q);
+    assert_eq!(
+        fx.fx().try_confirm(&fx.leader, &collect),
+        Err(Ok(FxError::SeniorFeeFirst))
+    );
     let before = s.holding(&inv).1;
     s.pay_fee(&fx.union, &fx.leader, &lp, &fee, &usdc);
+    fx.fx().confirm(&fx.leader, &collect);
     assert_eq!(c.guarantee_fee(&fx.union).0, 0);
     assert_eq!(s.total(), 1_000 * NIN + usdc);
     assert!(s.holding(&inv).1 - before >= usdc - 1);
