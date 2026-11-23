@@ -2206,11 +2206,10 @@ fn voucher_is_debt_from_the_draw_and_its_hours_stay_hers() {
     let total = v_int + value + j_int + 400 * NIN;
     StellarAssetClient::new(&fx.env, &fx.nin).mint(&fx.fx_id, &(total + 50 * NIN));
     assert!(c.repay_loan(&fx.union, &id, &(total + 50 * NIN)));
-    // All back in the junior pool, the voucher's interest with it (no guarantee fee set here).
+    // The voucher's value back in the junior pool; its interest, all of it, set aside for senior (23 Nov).
     let jm = c.get_junior_market(&fx.union);
     assert_eq!(jm.total_borrows, jm0.total_borrows);
-    assert!(jm.cash - jm0.cash >= v_int);
-    assert_eq!(c.guarantee_fee(&fx.union), (0, 0));
+    assert_eq!(c.guarantee_fee(&fx.union), (v_int, 10_000));
     // Her repayment settled the owner's postpaid part into the owner's balance; she collects it.
     assert!(c.owner_dues(&fx.union, &id).owners.is_empty());
     assert_eq!(c.owner_balance(&fx.union, &v.owner), 4 * PEND);

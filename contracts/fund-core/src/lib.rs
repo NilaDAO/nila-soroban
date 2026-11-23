@@ -108,7 +108,7 @@ pub enum DataKey {
     // senior is a guarantee pool only): nIN held in fund_core outside every pool until an LP turns it into
     // USDC for the senior contract (`take_guarantee_fee`). Replaces the senior lending pool's income.
     GuaranteeFee(Address),
-    // The guarantee fee: this share of every voucher's interest, in bp (instance; 0 until the trust sets it).
+    // The guarantee fee: this share of every voucher's interest, in bp (instance; unset = `GUARANTEE_FEE_BP`, all).
     GuaranteeFeeBp,
     // Expired cash the treasury paid for and still in the union's drawer (review 5 Nov): a payout
     // above the open cash batches takes it, and its nIN goes back to the treasury.
@@ -768,8 +768,13 @@ fn voucher_repaid(jm: &mut Market, pay: i128) {
     jm.total_borrows -= core::cmp::min(jm.total_borrows, pay);
 }
 
-// A voucher's interest, paid into the junior pool: the guarantee fee (`GuaranteeFeeBp` of it) is set aside for
-// senior, the rest is junior income (the union's treasury when the pool has no shareholders).
+// Senior earns a voucher's interest, all of it (executive decision 23 Nov): its guarantee covers 100% of every
+// voucher's value, and the rupee's fall on that interest is senior's. `GuaranteeFeeBp` can lower the share later.
+const GUARANTEE_FEE_BP: u32 = 10_000;
+
+// A voucher's interest, paid into the junior pool: the guarantee fee (`GuaranteeFeeBp` of it, all by default) is set
+// aside for senior, the rest (none by default) is junior income (the union's treasury when the pool has no
+// shareholders).
 fn voucher_interest(
     env: &Env,
     union: &Address,
@@ -783,7 +788,7 @@ fn voucher_interest(
         .storage()
         .instance()
         .get(&DataKey::GuaranteeFeeBp)
-        .unwrap_or(0);
+        .unwrap_or(GUARANTEE_FEE_BP);
     let fee = interest * i128::from(bp) / 10_000;
     p_add(env, &DataKey::GuaranteeFee(union.clone()), fee)?;
     let rest = interest - fee;
@@ -2386,7 +2391,7 @@ impl FundCore {
             env.storage()
                 .instance()
                 .get(&DataKey::GuaranteeFeeBp)
-                .unwrap_or(0),
+                .unwrap_or(GUARANTEE_FEE_BP),
         )
     }
 
