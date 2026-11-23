@@ -27,12 +27,14 @@ A rule fires once per event, or once per state change for `state` and `http` rul
 | A17 | Escrow near expiry | state `fx_pool.open_escrows(union)`, `offers_of(union)` + `offer(id)` (open or accepted) | expires within 24 h | warn |
 | A18 | Escrow expired | event `escrow_expired`, `offer_closed` (state expired) | any | warn |
 | A19 | Anchor down | http `anchor.nila.land/.well-known/stellar.toml`, the anchor's health | not 200 twice in a row | page |
-| A20 | Much USDC out in a day | events `redeemed` (senior exits) and `offer_confirmed` (LP offers), `usdc`, since 00:00 UTC; the daily cap on senior USDC is not in the contract yet (decided 19 Nov) | > 80 % of 2,500 USDC | warn |
+| A20 | Much USDC out in a day | events `redeemed` (senior exits), `cover_paid` (senior loss covers, 23 Nov) and `offer_confirmed` (LP offers), `usdc`, since 00:00 UTC; senior and fx_pool enforce their own daily caps after the lane-B upgrade | > 80 % of 2,500 USDC | warn |
 | A21 | Pause | event `paused`, `paused_set`; state `is_paused` / `paused` | any contract paused | page |
-| A22 | Cap changed | event `max_scan_set`, `daily_cap_set`, `cap_set`, `guarantee_cap_set`, `union_config_set` | any | warn |
-| A23 | fund_core does not add up | state: fund_core's nIN balance vs Σ unions (junior cash + senior cash + treasury + rainy reserve + senior earmark + owed to senior), as the tests' `assert_conserved` | difference > 1 nIN; or fx_pool holds nIN | page |
+| A22 | Cap changed | event `max_scan_set`, `daily_cap_set`, `cap_set`, `guarantee_fee_set` (23 Nov), `union_config_set` | any | warn |
+| A23 | fund_core does not add up | state: fund_core's nIN balance vs Σ unions (junior cash + senior cash + treasury + rainy reserve + voucher reserve + guarantee fee waiting, 23 Nov), as the tests' `assert_conserved` | difference > 1 nIN; or fx_pool holds nIN | page |
 | A24 | Indexer behind | http `indexer.nila.land/health` | `ok` false, or a new gap in `/coverage` | warn |
 | A25 | Wiring changed | event `fx_pool_set`, `fund_core_set`, `machinery_set`, `senior_set`, `anchor_set`, `swap_key_set`, `activated` | any (each is set once at deploy) | page |
+| A26 | Senior loss cover | event `cover_proposed`, `cover_paid`, `cover_cancelled` (senior, 23 Nov): USDC leaves the guarantee pool for a union's voucher loss 48 h after the proposal | any | page |
+| A27 | Voucher loss waiting for senior | state `fund_core.voucher_loss(union)` (23 Nov: a default's voucher part, booked for senior's cover) | > 0 | warn |
 
 ## Status (19 Nov)
 
