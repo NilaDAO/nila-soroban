@@ -24,6 +24,12 @@
 //! - Each accepted offer stores the anchor's SEP-24 transaction id and the SEP-38 quote id;
 //!   `accept` needs the anchor's signature over them (C9b), so the anchor records every change.
 //! - A no-show costs nothing: the offer expires and what accept reserved goes back.
+//! - **Dispute (T2 row 16, 23 Nov):** when the LP and the leader disagree whether the rupees changed hands,
+//!   either freezes the accepted offer (`dispute_offer`): no confirm, cancel or expiry. The union's board (its
+//!   2-of-3 account) decides (`resolve_dispute`): handed → it completes as a confirm; not → it closes and
+//!   what accept reserved goes back.
+//! - **Daily cap (R76, executive decision 19 Nov):** the USDC LP confirms move in one UTC day stays within
+//!   `daily_cap`; beyond, the confirm waits for the next day.
 
 use super::*;
 use soroban_sdk::{xdr::ToXdr, String};
@@ -50,6 +56,8 @@ pub enum OfferState {
     Done = 2,
     Cancelled = 3,
     Expired = 4,
+    /// Accepted, then disputed: waits for the union board (23 Nov).
+    Disputed = 5,
 }
 
 /// The anchor's acceptance of a member as LP of one union (R20). KYC stays at the anchor.
@@ -241,6 +249,24 @@ pub struct OfferConfirmed {
 }
 
 #[contractevent]
+pub struct OfferDisputed {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub offer_id: u64,
+    pub by: Address,
+}
+
+#[contractevent]
+pub struct DisputeResolved {
+    #[topic]
+    pub union: Address,
+    #[topic]
+    pub offer_id: u64,
+    pub handed: bool,
+}
+
+#[contractevent]
 pub struct OfferClosed {
     #[topic]
     pub union: Address,
@@ -288,6 +314,77 @@ fn drop_open(env: &Env, union: &Address, id: u64) {
     bump(env, &k);
 }
 
+/// Completes an accepted offer at the leader's scan or the board's decision: the USDC moves (within the
+/// day's cap), the position changes, the rupees join the cash at hand or leave it.
+fn finish(env: &Env, offer_id: u64, mut o: Offer) -> Result<i128, Error> {
+    let lp = o.lp.clone().ok_or(Error::OfferState)?;
+    take_day_out(env, o.usdc)?;
+    let (close, open, fee) = (o.from_lp, o.from_domestic, o.from_offshore);
+    let me = env.current_contract_address();
+    let usdc = TokenClient::new(env, &get::<Address>(env, &DataKey::Usdc));
+    let held = DataKey::LpLocked(o.union.clone());
+    match o.kind {
+        OfferKind::Collect => {
+            settle(env, &o.union, o.inr);
+            if close + open > 0 {
+                // Booked only as far as the USDC actually arrived (review 5 Nov).
+                let before = usdc.balance(&me);
+                LienClient::new(env, &lp).pay(&(close + open));
+                if usdc.balance(&me) - before < close + open {
+                    return Err(Error::NotPaid);
+                }
+            }
+            add_usdc(env, &DataKey::TreasuryUsdc(o.union.clone()), close);
+            add_usdc(env, &held, open);
+        }
+        OfferKind::Bring => {
+            let cash = o.inr - fee;
+            check_room(env, &o.union, cash)?;
+            open_escrow(env, &o.union, &lp, Purpose::Bring, cash);
+            if fee > 0 {
+                FundCoreClient::new(env, &core_addr(env)?).cover_expired_escrow(&o.union, &fee);
+            }
+            if close + open > 0 {
+                usdc.transfer(&me, &lp, &(close + open));
+            }
+            add_usdc(env, &held, -close);
+            if open > 0 {
+                LienClient::new(env, &lp).lock(&open);
+            }
+        }
+    }
+    // The opened rupees at the accept's fix: the position's opening rate.
+    move_position(
+        env,
+        &o.union,
+        &lp,
+        o.kind,
+        close,
+        open,
+        open * o.inr_per_usd / RATE_ONE,
+    );
+    env.storage()
+        .persistent()
+        .remove(&DataKey::Busy(o.union.clone(), lp.clone()));
+    o.state = OfferState::Done;
+    save_offer(env, offer_id, &o);
+    drop_open(env, &o.union, offer_id);
+    OfferConfirmed {
+        union: o.union.clone(),
+        offer_id,
+        kind: o.kind,
+        lp,
+        inr: o.inr,
+        usdc: o.usdc,
+        from_lp: close,
+        from_domestic: open,
+        from_offshore: fee,
+    }
+    .publish(env);
+    bump_instance(env);
+    Ok(o.usdc)
+}
+
 fn close(env: &Env, id: u64, o: &mut Offer, state: OfferState) {
     // Accepted, not scanned: a Collect's new lock goes, a Bring's reserved union USDC comes back.
     if o.state == OfferState::Accepted && o.from_domestic > 0 {
@@ -325,15 +422,28 @@ fn add_usdc(env: &Env, k: &DataKey, d: i128) {
 }
 
 fn fresh_rate(env: &Env) -> Result<RateFix, Error> {
-    let rate: RateFix = env
+    current_rate(env)
+}
+
+/// The USDC LP confirms move today (UTC) stays within `daily_cap` (R76, 19 Nov).
+fn take_day_out(env: &Env, usdc: i128) -> Result<(), Error> {
+    if usdc <= 0 {
+        return Ok(());
+    }
+    let cap: i128 = env
         .storage()
         .instance()
-        .get(&DataKey::Rate)
-        .ok_or(Error::StaleOracle)?;
-    if env.ledger().timestamp() > rate.valid_until {
-        return Err(Error::StaleOracle);
+        .get(&DataKey::DailyCap)
+        .unwrap_or(0);
+    let k = DataKey::DayOut(env.ledger().timestamp() / DAY);
+    let t = env.storage().temporary();
+    let used: i128 = t.get(&k).unwrap_or(0);
+    if used + usdc > cap {
+        return Err(Error::CapExceeded);
     }
-    Ok(rate)
+    t.set(&k, &(used + usdc));
+    t.extend_ttl(&k, 2 * 17_280, 2 * 17_280);
+    Ok(())
 }
 
 /// Whole rupees, rounded down: cash is notes.
@@ -722,77 +832,64 @@ impl FxPoolContract {
     /// back to the LP free, the reserved union USDC to the LP's account, locked.
     pub fn confirm(env: Env, leader: Address, offer_id: u64) -> Result<i128, Error> {
         require_not_paused(&env)?;
-        let mut o = load_offer(&env, offer_id)?;
+        let o = load_offer(&env, offer_id)?;
         require_leader(&env, &o.union, &leader)?;
         if o.state != OfferState::Accepted || env.ledger().timestamp() >= o.expires {
             return Err(Error::OfferState);
         }
-        let lp = o.lp.clone().ok_or(Error::OfferState)?;
-        let (close, open, fee) = (o.from_lp, o.from_domestic, o.from_offshore);
-        let me = env.current_contract_address();
-        let usdc = TokenClient::new(&env, &get::<Address>(&env, &DataKey::Usdc));
-        let held = DataKey::LpLocked(o.union.clone());
-        match o.kind {
-            OfferKind::Collect => {
-                settle(&env, &o.union, o.inr);
-                if close + open > 0 {
-                    // Booked only as far as the USDC actually arrived (review 5 Nov).
-                    let before = usdc.balance(&me);
-                    LienClient::new(&env, &lp).pay(&(close + open));
-                    if usdc.balance(&me) - before < close + open {
-                        return Err(Error::NotPaid);
-                    }
-                }
-                add_usdc(&env, &DataKey::TreasuryUsdc(o.union.clone()), close);
-                add_usdc(&env, &held, open);
-            }
-            OfferKind::Bring => {
-                let cash = o.inr - fee;
-                check_room(&env, &o.union, cash)?;
-                open_escrow(&env, &o.union, &lp, Purpose::Bring, cash);
-                if fee > 0 {
-                    FundCoreClient::new(&env, &core_addr(&env)?)
-                        .cover_expired_escrow(&o.union, &fee);
-                }
-                if close + open > 0 {
-                    usdc.transfer(&me, &lp, &(close + open));
-                }
-                add_usdc(&env, &held, -close);
-                if open > 0 {
-                    LienClient::new(&env, &lp).lock(&open);
-                }
-            }
+        finish(&env, offer_id, o)
+    }
+
+    /// The LP or a leader of the union freezes an accepted offer: they disagree whether the rupees changed
+    /// hands (T2 row 16). Also after its expiry, until someone expires it. The union board decides.
+    pub fn dispute_offer(env: Env, by: Address, offer_id: u64) -> Result<(), Error> {
+        let mut o = load_offer(&env, offer_id)?;
+        if o.state != OfferState::Accepted {
+            return Err(Error::OfferState);
         }
-        // The opened rupees at the accept's fix: the position's opening rate.
-        move_position(
-            &env,
-            &o.union,
-            &lp,
-            o.kind,
-            close,
-            open,
-            open * o.inr_per_usd / RATE_ONE,
-        );
-        env.storage()
-            .persistent()
-            .remove(&DataKey::Busy(o.union.clone(), lp.clone()));
-        o.state = OfferState::Done;
+        if o.lp.as_ref() == Some(&by) {
+            by.require_auth();
+        } else {
+            require_leader(&env, &o.union, &by)?;
+        }
+        o.state = OfferState::Disputed;
         save_offer(&env, offer_id, &o);
-        drop_open(&env, &o.union, offer_id);
-        OfferConfirmed {
+        OfferDisputed {
             union: o.union.clone(),
             offer_id,
-            kind: o.kind,
-            lp,
-            inr: o.inr,
-            usdc: o.usdc,
-            from_lp: close,
-            from_domestic: open,
-            from_offshore: fee,
+            by,
         }
         .publish(&env);
         bump_instance(&env);
-        Ok(o.usdc)
+        Ok(())
+    }
+
+    /// The union's board (its own 2-of-3 account) decides a disputed offer: `handed` = the rupees changed
+    /// hands, so it completes as a confirm (whatever its expiry); else it closes and what accept reserved
+    /// goes back. Returns the USDC moved.
+    pub fn resolve_dispute(env: Env, offer_id: u64, handed: bool) -> Result<i128, Error> {
+        require_not_paused(&env)?;
+        let mut o = load_offer(&env, offer_id)?;
+        if o.state != OfferState::Disputed {
+            return Err(Error::OfferState);
+        }
+        o.union.require_auth();
+        let union = o.union.clone();
+        o.state = OfferState::Accepted;
+        let moved = if handed {
+            finish(&env, offer_id, o)?
+        } else {
+            close(&env, offer_id, &mut o, OfferState::Cancelled);
+            0
+        };
+        DisputeResolved {
+            union,
+            offer_id,
+            handed,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(moved)
     }
 
     /// The leader withdraws an open or accepted offer; what accept reserved goes back.

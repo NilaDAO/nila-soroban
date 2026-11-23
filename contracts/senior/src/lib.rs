@@ -21,7 +21,7 @@ use soroban_sdk::{
     contracttype, token::TokenClient, Address, BytesN, Env,
 };
 
-contractmeta!(key = "binver", val = "0.1.0");
+contractmeta!(key = "binver", val = "0.2.0");
 
 // Demo builds only (feature `demo-upgrade-delay`): the upgrade timelock is 60 seconds, so a demo deployment can be
 // upgraded in place and keep its state. Never for mainnet: the wasm carries this marker, which deploys refuse.
@@ -42,6 +42,9 @@ pub const UPGRADE_DELAY: u64 = 60;
 
 /// nIN per USDC at 7 decimals, as fx_pool's fix.
 pub const RATE_ONE: i128 = 10_000_000;
+/// Senior USDC out a day (UTC) at launch: 2,500 USDC (executive decision 19 Nov); `set_daily_cap` changes it.
+pub const DEFAULT_DAILY_CAP: i128 = 2_500 * 10_000_000;
+const DAY: u64 = 86_400;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -74,6 +77,8 @@ pub enum Error {
     AboveGuaranteeCap = 117,
     /// The LP's account did not pay the investor the USDC it signed for (re-review, 3 Nov).
     NotPaid = 118,
+    /// Today's senior USDC out would pass the daily cap: the rest waits for the next day (UTC).
+    AboveDailyCap = 119,
 }
 
 /// Where a senior investor's USDC comes from (R24, decision 005): set by the trust at acceptance.
@@ -163,6 +168,10 @@ pub enum DataKey {
     /// USDC of a union's investors left here after a haircut (2 Nov): out of `Total`, kept for the loss
     /// cover that comes with nUSD; no call moves it yet.
     HaircutUsdc(Address),
+    /// Senior USDC out a day (19 Nov); unset = `DEFAULT_DAILY_CAP`. Instance.
+    DailyCap,
+    /// USDC `redeem` paid out on a day (day index). Temporary.
+    DayOut(u64),
 }
 
 #[contractevent]
@@ -177,6 +186,11 @@ pub struct PausedSet {
 
 #[contractevent]
 pub struct CapSet {
+    pub usdc: i128,
+}
+
+#[contractevent]
+pub struct DailyCapSet {
     pub usdc: i128,
 }
 
@@ -291,6 +305,26 @@ fn require_not_paused(env: &Env) -> Result<(), Error> {
     Ok(())
 }
 
+fn daily_cap(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&DataKey::DailyCap)
+        .unwrap_or(DEFAULT_DAILY_CAP)
+}
+
+/// Senior USDC out today (UTC) stays within the daily cap (19 Nov).
+fn take_day_out(env: &Env, usdc: i128) -> Result<(), Error> {
+    let k = DataKey::DayOut(env.ledger().timestamp() / DAY);
+    let t = env.storage().temporary();
+    let used: i128 = t.get(&k).unwrap_or(0);
+    if used + usdc > daily_cap(env) {
+        return Err(Error::AboveDailyCap);
+    }
+    t.set(&k, &(used + usdc));
+    t.extend_ttl(&k, 2 * 17_280, 2 * 17_280);
+    Ok(())
+}
+
 fn fx(env: &Env) -> FxClient<'_> {
     FxClient::new(env, &get(env, &DataKey::FxPool))
 }
@@ -379,6 +413,18 @@ impl SeniorContract {
     }
 
     /// The most guarantee the vault may assign, in USDC (0 = none until the trust sets it, after nUSD's audit).
+    /// The trust sets the senior USDC out a day (executive decision 19 Nov), evented.
+    pub fn set_daily_cap(env: Env, usdc: i128) -> Result<(), Error> {
+        require_admin(&env)?;
+        if usdc < 0 {
+            return Err(Error::AmountZero);
+        }
+        env.storage().instance().set(&DataKey::DailyCap, &usdc);
+        DailyCapSet { usdc }.publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
     pub fn set_guarantee_cap(env: Env, usdc: i128) -> Result<(), Error> {
         require_admin(&env)?;
         if usdc < 0 {
@@ -532,6 +578,7 @@ impl SeniorContract {
             env.storage().instance().set(&DataKey::Total, &total);
         }
         if usdc > 0 {
+            take_day_out(&env, usdc)?;
             TokenClient::new(&env, &get(&env, &DataKey::Usdc)).transfer(
                 &env.current_contract_address(),
                 &investor,
@@ -670,6 +717,18 @@ impl SeniorContract {
 
     pub fn total(env: Env) -> i128 {
         i_get(&env, &DataKey::Total)
+    }
+
+    pub fn daily_cap(env: Env) -> i128 {
+        daily_cap(&env)
+    }
+
+    /// Senior USDC paid out today (UTC).
+    pub fn paid_today(env: Env) -> i128 {
+        env.storage()
+            .temporary()
+            .get(&DataKey::DayOut(env.ledger().timestamp() / DAY))
+            .unwrap_or(0)
     }
 
     pub fn cap(env: Env) -> i128 {

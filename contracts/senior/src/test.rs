@@ -124,3 +124,25 @@ fn storage_layout_is_frozen() {
         "senior storage layout changed"
     );
 }
+
+/// Senior USDC out a day (19 Nov): 2,500 USDC until the trust changes it; beyond it, the rest waits a day.
+#[test]
+fn the_daily_cap_holds_senior_usdc_out_per_day() {
+    use soroban_sdk::testutils::Ledger;
+    let (env, s, _) = setup();
+    env.ledger().set_timestamp(1_700_000_000);
+    assert_eq!(s.daily_cap(), DEFAULT_DAILY_CAP);
+    s.set_daily_cap(&(100 * RATE_ONE));
+    assert_eq!(s.daily_cap(), 100 * RATE_ONE);
+    assert_eq!(s.try_set_daily_cap(&-1), Err(Ok(Error::AmountZero)));
+    let take = |usdc: i128| env.as_contract(&s.address, || take_day_out(&env, usdc));
+    assert_eq!(take(60 * RATE_ONE), Ok(()));
+    assert_eq!(take(41 * RATE_ONE), Err(Error::AboveDailyCap));
+    assert_eq!(take(40 * RATE_ONE), Ok(()));
+    assert_eq!(s.paid_today(), 100 * RATE_ONE);
+    env.ledger().set_timestamp(1_700_000_000 + 86_400);
+    assert_eq!(s.paid_today(), 0);
+    assert_eq!(take(100 * RATE_ONE), Ok(()));
+    env.set_auths(&[]);
+    assert!(s.try_set_daily_cap(&1).is_err());
+}

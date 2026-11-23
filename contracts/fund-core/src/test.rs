@@ -2055,6 +2055,95 @@ fn an_accept_not_scanned_gives_back_what_it_reserved() {
     assert_eq!(f.position(&fx.union, &lp), None);
 }
 
+/// T2 row 16: the LP or a leader freezes an accepted offer they disagree on; no confirm, cancel or expiry;
+/// the union board (its own account) decides: handed completes it, not handed gives back what accept reserved.
+#[test]
+fn a_disputed_offer_waits_for_the_union_board() {
+    let fx = setup();
+    let f = fx.fx();
+    let (_anchor, lp) = fx.lp_ready();
+    let (s24, q) = fx.ids();
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&lp, &(50 * NIN));
+    // A Bring accepted: the LP says it brought the rupees, the leader does not confirm.
+    let own = f.treasury_usdc(&fx.union);
+    let b = fx.offer_of(OfferKind::Bring, 95 * NIN);
+    fx.acc(&lp, &b, &s24, &q);
+    assert_eq!(
+        f.try_dispute_offer(&Address::generate(&fx.env), &b),
+        Err(Ok(FxError::NotLeader))
+    );
+    f.dispute_offer(&lp, &b);
+    assert_eq!(f.offer(&b).unwrap().state, OfferState::Disputed);
+    assert_eq!(f.try_confirm(&fx.leader, &b), Err(Ok(FxError::OfferState)));
+    assert_eq!(
+        f.try_cancel_offer(&fx.leader, &b),
+        Err(Ok(FxError::OfferState))
+    );
+    fx.at(T0 + 3_600);
+    assert_eq!(f.try_expire_offer(&b), Err(Ok(FxError::OfferState)));
+    assert_eq!(f.try_dispute_offer(&lp, &b), Err(Ok(FxError::OfferState)));
+    // Only the union's own account decides.
+    fx.env.set_auths(&[]);
+    assert!(f.try_resolve_dispute(&b, &true).is_err());
+    fx.env.mock_all_auths();
+    let hand = f.cash_at_hand(&fx.union);
+    assert_eq!(f.resolve_dispute(&b, &true), NIN);
+    assert_eq!(f.offer(&b).unwrap().state, OfferState::Done);
+    assert_eq!(f.cash_at_hand(&fx.union), hand + 95 * NIN);
+    assert_eq!(f.treasury_usdc(&fx.union), own - NIN);
+    assert_eq!(fx.acct(&lp).lien(), NIN);
+    // A Collect accepted, the leader disputes, the board finds no rupees changed hands: the lock goes.
+    fx.at(T0 + 3_601);
+    fx.fx().override_rate(&(95 * NIN), &(T0 + 86_400));
+    let c = fx.fx().post_offer(
+        &fx.leader,
+        &fx.union,
+        &OfferKind::Collect,
+        &(950 * NIN),
+        &(T0 + 7_200),
+    );
+    fx.acc(&lp, &c, &s24, &q);
+    f.dispute_offer(&fx.leader, &c);
+    assert_eq!(f.resolve_dispute(&c, &false), 0);
+    assert_eq!(f.offer(&c).unwrap().state, OfferState::Cancelled);
+    assert_eq!(fx.acct(&lp).lien(), NIN);
+    assert_eq!(
+        f.try_resolve_dispute(&c, &true),
+        Err(Ok(FxError::OfferState))
+    );
+}
+
+/// R76 (19 Nov): the USDC LP confirms move in one UTC day stays within `daily_cap`; the rest waits a day.
+#[test]
+fn lp_confirms_stay_within_the_daily_cap() {
+    let fx = setup();
+    let f = fx.fx();
+    let (_anchor, lp) = fx.lp_ready();
+    let (s24, q) = fx.ids();
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&lp, &(50 * NIN));
+    f.set_daily_cap(&(10 * NIN));
+    let c = fx.offer_of(OfferKind::Collect, 950 * NIN);
+    fx.acc(&lp, &c, &s24, &q);
+    f.confirm(&fx.leader, &c);
+    let b = fx.offer_of(OfferKind::Bring, 95 * NIN);
+    fx.acc(&lp, &b, &s24, &q);
+    assert_eq!(f.try_confirm(&fx.leader, &b), Err(Ok(FxError::CapExceeded)));
+    // The next UTC day.
+    let next = (T0 / 86_400 + 1) * 86_400;
+    fx.at(next);
+    f.override_rate(&(95 * NIN), &(next + 86_400));
+    let b2 = fx.fx().post_offer(
+        &fx.leader,
+        &fx.union,
+        &OfferKind::Bring,
+        &(95 * NIN),
+        &(next + 3_600),
+    );
+    f.expire_offer(&b);
+    fx.acc(&lp, &b2, &s24, &q);
+    assert_eq!(f.confirm(&fx.leader, &b2), NIN);
+}
+
 #[test]
 fn only_member_lps_accepted_by_the_anchor() {
     let fx = setup();
