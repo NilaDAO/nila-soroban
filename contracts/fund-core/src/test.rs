@@ -139,10 +139,9 @@ impl Fx {
     fn assert_conserved(&self) {
         let c = self.core();
         let books = c.get_junior_market(&self.union).cash
-            + c.get_senior_market(&self.union).cash
             + c.union_treasury(&self.union)
             + c.union_book(&self.union).rainy
-            + c.senior_owed_total(&self.union);
+            + c.guarantee_fee(&self.union).0;
         assert_eq!(self.token().balance(&self.core_id), books);
     }
 }
@@ -399,11 +398,6 @@ fn deposits_need_a_title_and_senior_rejects_members() {
         c.try_deposit_junior(&fx.union, &stranger, &NIN)
             .unwrap_err(),
         Ok(Error::NftRequired)
-    );
-    assert_eq!(
-        c.try_deposit_senior(&fx.union, &fx.borrower, &NIN)
-            .unwrap_err(),
-        Ok(Error::NftForbidden)
     );
 }
 
@@ -723,19 +717,6 @@ fn union_config_is_admin_only_and_checked() {
     );
     c.set_union_config(&union, &union_cfg());
     assert_eq!(c.get_union_config(&union), Some(union_cfg()));
-}
-
-#[test]
-fn a_senior_unbond_does_not_hold_back_junior_lending() {
-    let fx = setup();
-    let c = fx.core();
-    let lp = Address::generate(&fx.env);
-    StellarAssetClient::new(&fx.env, &fx.nin).mint(&fx.fx_id, &(1_000 * NIN));
-    c.deposit_senior(&fx.union, &lp, &(1_000 * NIN));
-    c.request_unbond(&fx.union, &lp, &(1_000 * NIN), &true);
-    fx.invest(&fx.borrower, 1_000 * NIN);
-    // The senior queue's reserve is senior's own (I3): all junior cash can still lend.
-    fx.draw(&loan_id(&fx.env, 1), 1_000 * NIN);
 }
 
 #[test]
@@ -1367,9 +1348,8 @@ fn storage_layout_is_frozen() {
         DataKey::CropCalendar,
         DataKey::ShareCash(a.clone(), 1),
         DataKey::Dues(a.clone(), h.clone()),
-        DataKey::SeniorOwed(a.clone(), a.clone()),
-        DataKey::SeniorIncome(a.clone()),
-        DataKey::SeniorOwedTotal(a.clone()),
+        DataKey::GuaranteeFee(a.clone()),
+        DataKey::GuaranteeFeeBp,
         DataKey::ExpiredCash(a.clone()),
     ] {
         v.push_back(k.into_val(&env));
@@ -1504,7 +1484,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "993cea76fe3913665e3090f520d33b5f19d6089b2c3c93fa55c5c59645ba5ecf",
+        hex, "939ff71f231a80d71624e1ab09d02583b3c03e76934e06db7ef8843bac3514d7",
         "fund_core storage layout changed"
     );
 }
@@ -1529,164 +1509,12 @@ fn the_rate_never_exceeds_the_cap_in_code() {
 
 // ---------- C5a: senior route (2 Nov: the senior contract holds the USDC; nIN into the senior pool) ----------
 
-use nila_senior::{Error as SError, SeniorContractClient, Tag};
+use nila_senior::SeniorContractClient;
 
 impl Fx {
     fn senior(&self) -> SeniorContractClient<'_> {
         SeniorContractClient::new(&self.env, &self.senior_id)
     }
-}
-
-#[test]
-fn senior_route_usdc_in_nin_into_the_senior_pool() {
-    let fx = setup();
-    let c = fx.core();
-    let f = fx.fx();
-    let s = fx.senior();
-    let investor = Address::generate(&fx.env);
-    let usdc = StellarAssetClient::new(&fx.env, &fx.usdc);
-    usdc.mint(&investor, &(1_000 * NIN));
-    let kyc = loan_id(&fx.env, 0x4B);
-
-    // Not accepted yet; no rate yet.
-    assert_eq!(
-        s.try_deposit(&investor, &fx.union, &(100 * NIN)),
-        Err(Ok(SError::NotAccepted))
-    );
-    s.set_investor(&investor, &true, &kyc, &Tag::Offshore);
-    assert_eq!(
-        s.try_deposit(&investor, &fx.union, &(100 * NIN)),
-        Err(Ok(SError::StaleRate))
-    );
-    // The trust sets the first fix; the attester then follows the market within 5%, valid at
-    // most 2 days. A bigger move is the trust's again.
-    let rate = 95 * NIN; // ₹95 per USD
-    assert_eq!(
-        f.try_set_rate(&fx.attester, &rate, &(T0 + 86_400)),
-        Err(Ok(FxError::BadRate))
-    );
-    f.override_rate(&(94 * NIN), &(T0 + 86_400));
-    assert_eq!(
-        f.try_set_rate(&fx.oracle, &rate, &(T0 + 86_400)),
-        Err(Ok(FxError::Unauthorized))
-    );
-    assert_eq!(
-        f.try_set_rate(&fx.attester, &rate, &(T0 + 3 * 86_400)),
-        Err(Ok(FxError::BadRate))
-    );
-    assert_eq!(
-        f.try_set_rate(&fx.attester, &(50 * NIN), &(T0 + 86_400)),
-        Err(Ok(FxError::BadRate))
-    );
-    f.set_rate(&fx.attester, &rate, &(T0 + 86_400));
-    // At most one attester fix per 12 hours (2 Nov); the trust's override is not limited.
-    assert_eq!(
-        f.try_set_rate(&fx.attester, &rate, &(T0 + 86_400)),
-        Err(Ok(FxError::RateTooSoon))
-    );
-
-    // Only the investor signs: the USDC transfer into the senior contract; the senior contract's call to
-    // fx_pool and fx_pool's pull into fund_core are their own.
-    let args = (investor.clone(), fx.union.clone(), 100 * NIN);
-    fx.env.mock_auths(&[MockAuth {
-        address: &investor,
-        invoke: &MockAuthInvoke {
-            contract: &fx.senior_id,
-            fn_name: "deposit",
-            args: args.into_val(&fx.env),
-            sub_invokes: &[MockAuthInvoke {
-                contract: &fx.usdc,
-                fn_name: "transfer",
-                args: (investor.clone(), fx.senior_id.clone(), 100 * NIN).into_val(&fx.env),
-                sub_invokes: &[],
-            }],
-        },
-    }]);
-    assert_eq!(s.deposit(&investor, &fx.union, &(100 * NIN)), 9_500 * NIN);
-    fx.env.mock_all_auths();
-    assert_eq!(c.get_senior_market(&fx.union).cash, 9_500 * NIN);
-    let tok = TokenClient::new(&fx.env, &fx.usdc);
-    assert_eq!(tok.balance(&fx.senior_id), 100 * NIN);
-    assert_eq!(tok.balance(&fx.fx_id), 0);
-    assert_eq!(s.union_usdc(&fx.union, &Tag::Offshore), 100 * NIN);
-    assert_eq!(s.union_usdc(&fx.union, &Tag::Domestic), 0);
-    assert_eq!(s.total(), 100 * NIN);
-    // The senior investor never holds nIN.
-    assert_eq!(fx.token().balance(&investor), 0);
-    fx.assert_fx_empty();
-    fx.assert_conserved();
-    // Only the senior contract mints senior nIN.
-    let stranger = Address::generate(&fx.env);
-    fx.env.mock_auths(&[MockAuth {
-        address: &stranger,
-        invoke: &MockAuthInvoke {
-            contract: &fx.fx_id,
-            fn_name: "mint_senior_nin",
-            args: (fx.union.clone(), investor.clone(), NIN).into_val(&fx.env),
-            sub_invokes: &[],
-        },
-    }]);
-    assert!(f.try_mint_senior_nin(&fx.union, &investor, &NIN).is_err());
-    fx.env.mock_all_auths();
-    assert_eq!(
-        f.try_set_senior(&stranger),
-        Err(Ok(FxError::SeniorAlreadySet))
-    );
-    assert_eq!(
-        c.try_set_senior(&stranger),
-        Err(Ok(Error::SeniorAlreadySet))
-    );
-    // A senior exit goes through the senior contract only.
-    assert_eq!(
-        c.try_claim(&fx.union, &investor, &0, &true),
-        Err(Ok(Error::UseSeniorContract))
-    );
-
-    // A member cannot be a senior investor: fund_core refuses title holders, nothing moves.
-    s.set_investor(&fx.borrower, &true, &kyc, &Tag::Domestic);
-    usdc.mint(&fx.borrower, &(10 * NIN));
-    assert!(s.try_deposit(&fx.borrower, &fx.union, &(10 * NIN)).is_err());
-    assert_eq!(usdc.balance(&fx.borrower), 10 * NIN);
-    // A union fund_core does not know: refused before any USDC moves.
-    let nowhere = Address::generate(&fx.env);
-    assert_eq!(
-        s.try_deposit(&investor, &nowhere, &NIN),
-        Err(Ok(SError::UnknownUnion))
-    );
-    assert_eq!(s.total(), 100 * NIN);
-    // The cap (the contract is unaudited): above it, refused.
-    s.set_cap(&(150 * NIN));
-    assert_eq!(
-        s.try_deposit(&investor, &fx.union, &(60 * NIN)),
-        Err(Ok(SError::AboveCap))
-    );
-    // A dropped investor, a stale fix, a paused senior contract.
-    s.set_investor(&investor, &false, &kyc, &Tag::Offshore);
-    assert_eq!(
-        s.try_deposit(&investor, &fx.union, &NIN),
-        Err(Ok(SError::NotAccepted))
-    );
-    s.set_investor(&investor, &true, &kyc, &Tag::Offshore);
-    fx.at(T0 + 86_400 + 1);
-    assert_eq!(
-        s.try_deposit(&investor, &fx.union, &NIN),
-        Err(Ok(SError::StaleRate))
-    );
-    f.set_rate(&fx.attester, &rate, &(T0 + 2 * 86_400));
-    s.set_paused(&true);
-    assert_eq!(
-        s.try_deposit(&investor, &fx.union, &NIN),
-        Err(Ok(SError::Paused))
-    );
-    s.set_paused(&false);
-    // fx_pool paused: no fix and no settle either (2 Nov).
-    f.pause();
-    assert!(s.try_deposit(&investor, &fx.union, &NIN).is_err());
-    fx.at(T0 + 2 * 86_400);
-    assert_eq!(
-        f.try_set_rate(&fx.attester, &rate, &(T0 + 3 * 86_400)),
-        Err(Ok(FxError::Paused))
-    );
 }
 
 // ---------- LP positions (executive decision 31 Oct; was the 30 Oct pledge) ----------
@@ -2261,8 +2089,6 @@ struct Vx {
     m: Address,
     owner: Address,
     machine: u64,
-    // The senior investor: 200 USDC at ₹50 = 10,000 nIN in the senior pool.
-    investor: Address,
 }
 
 impl Vx {
@@ -2275,17 +2101,16 @@ impl Vx {
         let c = self.fx.core();
         let u = &self.fx.union;
         let books = c.get_junior_market(u).cash
-            + c.get_senior_market(u).cash
             + c.union_treasury(u)
             + c.union_book(u).rainy
             + c.senior_earmark(u)
-            + c.senior_owed_total(u);
+            + c.guarantee_fee(u).0;
         assert_eq!(self.fx.token().balance(&self.fx.core_id), books);
     }
 }
 
 /// Machinery wired in, a ₹1,450/h tractor rate, a machine owned by the neighbour (available from its registration),
-/// 10,000 nIN of senior money, and the borrower invested past the gate.
+/// 10,000 nIN of junior money from a title holder, and the borrower invested past the gate.
 fn vsetup() -> Vx {
     let fx = setup();
     let env = &fx.env;
@@ -2303,21 +2128,18 @@ fn vsetup() -> Vx {
     let machine = mc.register_machine(&fx.leader, &fx.union, &owner, &1, &40, &loan_id(env, 0x50));
     // No owner confirmation (3 Nov): available at once.
     assert!(mc.machine(&machine).unwrap().confirmed);
-    // Senior money for the prepay (N4).
-    let f = fx.fx();
+    // Junior money for the vouchers (executive decision 23 Nov: senior only guarantees): a title holder of the
+    // union invests 10,000, as Nila does during the development period.
     let investor = Address::generate(env);
-    StellarAssetClient::new(env, &fx.usdc).mint(&investor, &(200 * NIN));
-    fx.senior()
-        .set_investor(&investor, &true, &loan_id(env, 0x49), &Tag::Offshore);
-    f.override_rate(&(50 * NIN), &(T0 + 86_400));
-    fx.senior().deposit(&investor, &fx.union, &(200 * NIN));
+    fx.give_title(&investor);
+    fx.invest(&investor, 10_000 * NIN);
+    fx.fx().override_rate(&(50 * NIN), &(T0 + 86_400));
     fx.invest(&fx.borrower, 2_000 * NIN);
     Vx {
         fx,
         m,
         owner,
         machine,
-        investor,
     }
 }
 
@@ -2336,12 +2158,16 @@ fn voucher_is_debt_from_the_draw_and_its_hours_stay_hers() {
         &(400 * NIN),
         &600,
     );
+    let jm0 = c.get_junior_market(&fx.union);
     c.draw_loan(&fx.union, &fx.borrower, &id, &(400 * NIN), &600);
-    // 6 tractor hours lent by senior at the draw: out of senior cash into the reserve, owed by her.
+    // 6 tractor hours lent at the draw from junior cash (23 Nov), with the ₹400: into the reserve, owed by her.
     let value = 6 * HOUR;
     assert_eq!(c.senior_earmark(&fx.union), value);
-    let sm = c.get_senior_market(&fx.union);
-    assert_eq!((sm.cash, sm.total_borrows), (10_000 * NIN - value, value));
+    let jm = c.get_junior_market(&fx.union);
+    assert_eq!(
+        (jm0.cash - jm.cash, jm.total_borrows - jm0.total_borrows),
+        (value + 400 * NIN, value + 400 * NIN)
+    );
     assert_eq!(mc.voucher(&fx.union, &id).unwrap().units, 600);
     // Her lock counts the voucher's value too (R27): she owes more than her 2,000.
     let p = c.position(&fx.union, &fx.borrower);
@@ -2366,7 +2192,10 @@ fn voucher_is_debt_from_the_draw_and_its_hours_stay_hers() {
     );
     assert_eq!(c.voucher_book(&fx.union, &id).unwrap().reserve, 2 * HOUR);
     // The claim changes nothing in what she owes or what senior lent.
-    assert_eq!(c.get_senior_market(&fx.union).total_borrows, value);
+    assert_eq!(
+        c.get_junior_market(&fx.union).total_borrows - jm0.total_borrows,
+        value + 400 * NIN
+    );
     v.assert_conserved();
 
     // Half a year on she repays everything: the voucher's interest and value to senior, then
@@ -2377,8 +2206,11 @@ fn voucher_is_debt_from_the_draw_and_its_hours_stay_hers() {
     let total = v_int + value + j_int + 400 * NIN;
     StellarAssetClient::new(&fx.env, &fx.nin).mint(&fx.fx_id, &(total + 50 * NIN));
     assert!(c.repay_loan(&fx.union, &id, &(total + 50 * NIN)));
-    let sm = c.get_senior_market(&fx.union);
-    assert_eq!((sm.cash, sm.total_borrows), (10_000 * NIN + v_int, 0));
+    // All back in the junior pool, the voucher's interest with it (no guarantee fee set here).
+    let jm = c.get_junior_market(&fx.union);
+    assert_eq!(jm.total_borrows, jm0.total_borrows);
+    assert!(jm.cash - jm0.cash >= v_int);
+    assert_eq!(c.guarantee_fee(&fx.union), (0, 0));
     // Her repayment settled the owner's postpaid part into the owner's balance; she collects it.
     assert!(c.owner_dues(&fx.union, &id).owners.is_empty());
     assert_eq!(c.owner_balance(&fx.union, &v.owner), 4 * PEND);
@@ -2420,6 +2252,7 @@ fn hours_can_be_added_to_a_share_taken_up() {
     assert!(c
         .try_draw_loan(&fx.union, &fx.borrower, &id, &0, &0)
         .is_err());
+    let jm0 = c.get_junior_market(&fx.union);
     c.draw_loan(&fx.union, &fx.borrower, &id, &0, &300);
     assert_eq!(mc.voucher(&fx.union, &id).unwrap().units, 300);
     assert_eq!(c.senior_earmark(&fx.union), 3 * HOUR);
@@ -2432,10 +2265,10 @@ fn hours_can_be_added_to_a_share_taken_up() {
     assert_eq!((b.hours, b.value, b.reserve), (500, 5 * HOUR, 5 * HOUR));
     assert!(b.interest_accrued > 0);
     assert_eq!(c.senior_earmark(&fx.union), 5 * HOUR);
-    let sm = c.get_senior_market(&fx.union);
+    let jm = c.get_junior_market(&fx.union);
     assert_eq!(
-        (sm.cash, sm.total_borrows),
-        (10_000 * NIN - 5 * HOUR, 5 * HOUR)
+        (jm0.cash - jm.cash, jm.total_borrows - jm0.total_borrows),
+        (5 * HOUR, 5 * HOUR)
     );
     v.assert_conserved();
 }
@@ -2587,18 +2420,21 @@ fn default_takes_the_voucher_value_from_her_investment_first() {
         &(300 * NIN),
         &200,
     );
+    let jm0 = c.get_junior_market(&fx.union);
     c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &200);
     mc.claim(&v.owner, &v.machine, &fx.union, &id, &200, &200);
     c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
     fx.at(T0 + 111 * 86_400 + 1);
     c.mark_default(&fx.union, &id);
-    // The owner's postpaid part was settled by the default (the guarantee); she collects it.
+    // The owner's postpaid part was settled by the default; she collects it.
     c.collect(&fx.union, &v.owner);
-    // Her investment covers it all: the voucher's value and interest to senior, junior in full.
+    // Her investment covers it all, the voucher's value and interest and her cash part: nothing left to the
+    // junior pool, nothing for the senior guarantee.
     assert_eq!(fx.token().balance(&v.owner), 2 * HOUR);
-    let sm = c.get_senior_market(&fx.union);
-    assert_eq!(sm.total_borrows, 0);
-    assert!(sm.cash > 10_000 * NIN);
+    assert_eq!(
+        c.get_junior_market(&fx.union).total_borrows,
+        jm0.total_borrows
+    );
     assert!(mc.voucher(&fx.union, &id).unwrap().void);
     assert_eq!(c.senior_earmark(&fx.union), 0);
     v.assert_conserved();
@@ -2637,12 +2473,6 @@ fn union_parts_run(mask: u32, default: bool) -> (i128, i128, i128, i128) {
     }
     let d = c.owner_dues(&fx.union, &id);
     assert_eq!((d.owners.len(), d.union_due), (0, 0));
-    // Every nIN senior holds or lent is its investor's (the union's parts are not counted twice).
-    let sm = c.get_senior_market(&fx.union);
-    assert_eq!(
-        c.senior_position(&fx.union, &v.investor).value,
-        sm.cash + sm.total_borrows
-    );
     if c.owner_balance(&fx.union, &v.owner) > 0 {
         c.collect(&fx.union, &v.owner);
     }
@@ -2651,7 +2481,7 @@ fn union_parts_run(mask: u32, default: bool) -> (i128, i128, i128, i128) {
     (
         c.union_treasury(&fx.union) - t0,
         fx.token().balance(&v.owner),
-        c.get_senior_market(&fx.union).cash,
+        c.get_junior_market(&fx.union).cash,
         due,
     )
 }
@@ -2700,7 +2530,7 @@ fn union_parts_go_to_the_treasury_as_she_repays_and_to_senior_at_a_default() {
 }
 
 #[test]
-fn default_unused_hours_go_back_to_senior_and_it_takes_the_rest() {
+fn default_unused_hours_go_back_to_junior_and_it_takes_the_rest() {
     let v = vsetup();
     let (fx, c, mc) = (&v.fx, v.fx.core(), v.mach());
     let id = loan_id(&fx.env, 1);
@@ -2712,257 +2542,24 @@ fn default_unused_hours_go_back_to_senior_and_it_takes_the_rest() {
         &(300 * NIN),
         &400,
     );
+    let jm0 = c.get_junior_market(&fx.union);
     c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &400);
     mc.claim(&v.owner, &v.machine, &fx.union, &id, &200, &200);
     c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
     fx.at(T0 + 111 * 86_400 + 1);
     c.mark_default(&fx.union, &id);
-    // Her 2 unused hours lapse and their reserve takes ₹2,900 off the ₹5,800 she owed senior. Her
-    // 2,000 invested goes to senior first, as far as the junior pool holds cash (₹1,700 after the
-    // ₹300 draw), then to her junior principal; senior loses the rest. The owner's postpaid part was
-    // settled by the default; she collects it.
+    // Her 2 unused hours lapse and their reserve takes ₹2,900 off the ₹5,800 she owed. Her 2,000 invested
+    // goes to the voucher's value first, then to her junior principal; the junior pool, which lent both
+    // (23 Nov), takes the rest. The owner's postpaid part was settled by the default; she collects it.
     c.collect(&fx.union, &v.owner);
     assert_eq!(fx.token().balance(&v.owner), 2 * HOUR);
     assert!(mc.voucher(&fx.union, &id).unwrap().void);
     assert_eq!(c.senior_earmark(&fx.union), 0);
-    let sm = c.get_senior_market(&fx.union);
-    assert_eq!(sm.total_borrows, 0);
-    assert_eq!(sm.cash, 10_000 * NIN - 2 * HOUR + 1_700 * NIN);
+    let jm = c.get_junior_market(&fx.union);
+    assert_eq!(jm.total_borrows, jm0.total_borrows);
+    // Nothing moved out of the pool's cash at the default: the reserve came back, the owners were paid.
+    assert_eq!(jm0.cash - jm.cash, 300 * NIN + 2 * PRE + 2 * PEND);
     assert_eq!(c.position(&fx.union, &fx.borrower).invested, 0);
-    v.assert_conserved();
-}
-
-/// Senior exit (executive decision 2 Nov): seniors hold USD. Principal back at par in USDC from the senior
-/// contract after the 14-day unbond; the voucher interest senior earned stays owed in fund_core until a
-/// member LP takes those rupees at the office and pays the investor USDC. No USDC of the senior contract
-/// moves except at the exit.
-#[test]
-fn senior_exits_at_par_and_its_interest_comes_in_usdc_through_an_lp() {
-    let v = vsetup();
-    let (fx, c, s) = (&v.fx, v.fx.core(), v.fx.senior());
-    let (_, lp) = fx.lp_ready();
-    let tok = TokenClient::new(&fx.env, &fx.usdc);
-    assert_eq!(tok.balance(&fx.senior_id), 200 * NIN);
-    assert_eq!(s.principal(&fx.union, &v.investor).usdc, 200 * NIN);
-    // A voucher loan repaid half a year on: its interest goes to senior and is counted as senior income.
-    let id = loan_id(&fx.env, 1);
-    fx.invest(&fx.borrower, 3_000 * NIN);
-    c.attest_food_token(
-        &fx.attester,
-        &fx.union,
-        &id,
-        &fx.borrower,
-        &(300 * NIN),
-        &400,
-    );
-    c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &400);
-    fx.at(T0 + YEAR / 2);
-    StellarAssetClient::new(&fx.env, &fx.nin).mint(&fx.fx_id, &(20_000 * NIN));
-    assert!(c.repay_loan(&fx.union, &id, &(20_000 * NIN)));
-    let v_int = 4 * HOUR * 1250 / 10_000 / 2;
-    assert_eq!(c.senior_income(&fx.union), v_int);
-    let p = c.senior_position(&fx.union, &v.investor);
-    assert_eq!((p.cost, p.value), (10_000 * NIN, 10_000 * NIN + v_int));
-    // The exit: unbond, then 14 days; not before. fund_core's error is its own, never read as one of
-    // the senior contract's (their codes start at 101).
-    c.request_unbond(&fx.union, &v.investor, &p.shares, &true);
-    assert!(matches!(
-        s.try_redeem(&v.investor, &fx.union, &0),
-        Err(Err(_))
-    ));
-    fx.at(T0 + YEAR / 2 + 14 * 86_400);
-    let room = c.cash_room(&fx.union);
-    assert_eq!(s.redeem(&v.investor, &fx.union, &0), 200 * NIN);
-    // The interest now owed waits at the office for an LP: it counts in the cash room (review 5 Nov).
-    assert_eq!(c.cash_room(&fx.union), room + v_int);
-    assert_eq!(tok.balance(&v.investor), 200 * NIN);
-    assert_eq!((tok.balance(&fx.senior_id), s.total()), (0, 0));
-    assert_eq!(s.union_usdc(&fx.union, &Tag::Offshore), 0);
-    assert_eq!(s.principal(&fx.union, &v.investor).nin, 0);
-    // The interest stays owed in rupees; it no longer counts as income still in the pool.
-    let owed = c.senior_position(&fx.union, &v.investor).owed;
-    assert_eq!((owed, c.senior_income(&fx.union)), (v_int, 0));
-    assert_eq!(c.senior_owed_total(&fx.union), v_int);
-    assert_eq!(fx.token().balance(&v.investor), 0);
-    v.assert_conserved();
-
-    // An LP of the union takes the rupees and pays USDC at the fix less its fee; a leader co-signs.
-    fx.fx()
-        .override_rate(&(95 * NIN), &(T0 + YEAR / 2 + 15 * 86_400));
-    let fair = owed * 10_000_000 / (95 * NIN);
-    let pay = fair * i128::from(10_000 - fx.fx().lp_fee()) / 10_000;
-    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&lp, &(pay + 50 * NIN));
-    // The LP has an open lien (a Bring position): it pays from the free part through its account.
-    fx.acct(&lp).lock(&(50 * NIN));
-    let lp_usdc = tok.balance(&lp);
-    assert_eq!(
-        s.try_pay_income(&fx.union, &v.investor, &fx.leader, &lp, &owed, &(pay - 1)),
-        Err(Ok(SError::BelowFix))
-    );
-    assert_eq!(
-        s.try_pay_income(&fx.union, &v.investor, &fx.borrower, &lp, &owed, &pay),
-        Err(Ok(SError::NotLeader))
-    );
-    let stranger = Address::generate(&fx.env);
-    assert_eq!(
-        s.try_pay_income(&fx.union, &v.investor, &fx.leader, &stranger, &owed, &pay),
-        Err(Ok(SError::NotLp))
-    );
-    // Never more than owed.
-    assert!(s
-        .try_pay_income(
-            &fx.union,
-            &v.investor,
-            &fx.leader,
-            &lp,
-            &(owed + 1),
-            &(pay + 1)
-        )
-        .is_err());
-    // Its own key signs: the account allows paying through `send_usdc` while the lien stands, and still
-    // refuses a direct USDC transfer.
-    {
-        use ed25519_dalek::Signer as _;
-        use nila_account::{Error as AcctError, Signature as AcctSig};
-        use soroban_sdk::auth::{Context, ContractContext};
-        let payload = [3u8; 32];
-        let sig = AcctSig::Ed25519(BytesN::from_array(
-            &fx.env,
-            &lp_key().sign(&payload).to_bytes(),
-        ));
-        let ctx = |contract: &Address, f: &str| {
-            soroban_sdk::vec![
-                &fx.env,
-                Context::Contract(ContractContext {
-                    contract: contract.clone(),
-                    fn_name: soroban_sdk::Symbol::new(&fx.env, f),
-                    args: soroban_sdk::vec![&fx.env],
-                })
-            ]
-        };
-        let mut paying = ctx(&fx.senior_id, "pay_income");
-        paying.append(&ctx(&lp, "send_usdc"));
-        let check = |c: &soroban_sdk::Vec<Context>| {
-            fx.env.try_invoke_contract_check_auth::<AcctError>(
-                &lp,
-                &BytesN::from_array(&fx.env, &payload),
-                sig.clone().into_val(&fx.env),
-                c,
-            )
-        };
-        assert_eq!(check(&paying), Ok(()));
-        assert_eq!(
-            check(&ctx(&fx.usdc, "transfer")),
-            Err(Ok(AcctError::Locked))
-        );
-    }
-    // A fake LP account that pays nothing is refused on the investor's balance (re-review, 3 Nov).
-    let fake = fx.env.register(fake_lp::FakeLp, ());
-    fx.give_title(&fake);
-    fx.fx()
-        .set_id_checked(&fake, &true, &loan_id(&fx.env, 0x51));
-    fx.fx()
-        .set_lp(&fx.union, &fake, &true, &loan_id(&fx.env, 0x52));
-    assert_eq!(
-        s.try_pay_income(&fx.union, &v.investor, &fx.leader, &fake, &owed, &pay),
-        Err(Ok(SError::NotPaid))
-    );
-    assert_eq!(c.senior_position(&fx.union, &v.investor).owed, owed);
-    s.pay_income(&fx.union, &v.investor, &fx.leader, &lp, &owed, &pay);
-    assert_eq!(c.senior_position(&fx.union, &v.investor).owed, 0);
-    assert_eq!(c.senior_owed_total(&fx.union), 0);
-    assert_eq!(tok.balance(&v.investor), 200 * NIN + pay);
-    assert_eq!(tok.balance(&lp), lp_usdc - pay);
-    assert_eq!(tok.balance(&fx.senior_id), 0);
-    v.assert_conserved();
-    // fund_core's own senior exit is closed: only the senior contract pays it.
-    assert_eq!(
-        c.try_claim(&fx.union, &v.investor, &0, &true),
-        Err(Ok(Error::UseSeniorContract))
-    );
-}
-
-/// A senior loss (a default the junior side could not cover) is a haircut: the exit pays the USDC pro rata
-/// to the principal fund_core still holds; the rest stays in the senior contract.
-#[test]
-fn a_senior_haircut_pays_less_and_the_rest_stays_in_the_senior_contract() {
-    let v = vsetup();
-    let (fx, c, mc, s) = (&v.fx, v.fx.core(), v.mach(), v.fx.senior());
-    let id = loan_id(&fx.env, 1);
-    c.attest_food_token(
-        &fx.attester,
-        &fx.union,
-        &id,
-        &fx.borrower,
-        &(300 * NIN),
-        &400,
-    );
-    c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &400);
-    mc.claim(&v.owner, &v.machine, &fx.union, &id, &200, &200);
-    c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
-    fx.at(T0 + 111 * 86_400 + 1);
-    c.mark_default(&fx.union, &id);
-    // Senior lost ₹1,200 of its ₹10,000 (see the default test above).
-    let p = c.senior_position(&fx.union, &v.investor);
-    assert_eq!(p.value, 8_800 * NIN);
-    c.request_unbond(&fx.union, &v.investor, &p.shares, &true);
-    fx.at(T0 + 125 * 86_400 + 1);
-    let tok = TokenClient::new(&fx.env, &fx.usdc);
-    assert_eq!(s.redeem(&v.investor, &fx.union, &0), 176 * NIN);
-    assert_eq!(tok.balance(&v.investor), 176 * NIN);
-    // The 24 USDC left stays here, counted apart: out of the total (the cap), into the union's haircut.
-    assert_eq!(tok.balance(&fx.senior_id), 24 * NIN);
-    assert_eq!(s.total(), 0);
-    assert_eq!(s.haircut_usdc(&fx.union), 24 * NIN);
-    assert_eq!(s.union_usdc(&fx.union, &Tag::Offshore), 0);
-    assert_eq!(s.principal(&fx.union, &v.investor).usdc, 0);
-    assert_eq!(c.senior_position(&fx.union, &v.investor).owed, 0);
-    // Nothing else takes it out: a second exit has nothing to claim.
-    assert!(s.try_redeem(&v.investor, &fx.union, &0).is_err());
-    assert_eq!(tok.balance(&fx.senior_id), 24 * NIN);
-}
-
-/// The vault (nUSD, later) assigns guarantee with USDC it holds itself: senior nIN in its name, no USDC
-/// moves in the senior contract; only the vault may.
-#[test]
-fn only_the_vault_mints_guaranteed_senior_nin_and_no_usdc_moves() {
-    let v = vsetup();
-    let (fx, c, s) = (&v.fx, v.fx.core(), v.fx.senior());
-    let vault = Address::generate(&fx.env);
-    s.set_vault(&vault);
-    let tok = TokenClient::new(&fx.env, &fx.usdc);
-    let before = (
-        tok.balance(&fx.senior_id),
-        c.get_senior_market(&fx.union).cash,
-    );
-    let stranger = Address::generate(&fx.env);
-    fx.env.mock_auths(&[MockAuth {
-        address: &stranger,
-        invoke: &MockAuthInvoke {
-            contract: &fx.senior_id,
-            fn_name: "mint_guaranteed",
-            args: (fx.union.clone(), 10 * NIN).into_val(&fx.env),
-            sub_invokes: &[],
-        },
-    }]);
-    assert!(s.try_mint_guaranteed(&fx.union, &(10 * NIN)).is_err());
-    fx.env.mock_all_auths();
-    // Capped by the trust (0 until nUSD is audited).
-    assert_eq!(
-        s.try_mint_guaranteed(&fx.union, &(10 * NIN)),
-        Err(Ok(SError::AboveGuaranteeCap))
-    );
-    s.set_guarantee_cap(&(15 * NIN));
-    assert_eq!(s.mint_guaranteed(&fx.union, &(10 * NIN)), 500 * NIN);
-    assert!(fx.env.auths().iter().any(|(a, _)| *a == vault));
-    assert_eq!(tok.balance(&fx.senior_id), before.0);
-    assert_eq!(c.get_senior_market(&fx.union).cash, before.1 + 500 * NIN);
-    assert_eq!(c.senior_position(&fx.union, &vault).cost, 500 * NIN);
-    assert_eq!(s.guaranteed(), 10 * NIN);
-    assert_eq!(
-        s.try_mint_guaranteed(&fx.union, &(6 * NIN)),
-        Err(Ok(SError::AboveGuaranteeCap))
-    );
     v.assert_conserved();
 }
 
@@ -3130,14 +2727,14 @@ fn self_claim_rate_rise_and_handing_hours_back() {
     assert_eq!(c.senior_earmark(&fx.union), 2 * HOUR + 1_600 * NIN);
     mc.set_rate(&fx.union, &1, &tractor(NIN));
 
-    // She hands back 1 of her 2 unused hours on loan 2: ₹1,450 off what she owes senior, its
-    // reserve back to senior cash, and 5% (₹72.5) owed to the union treasury.
-    let sm0 = c.get_senior_market(&fx.union);
+    // She hands back 1 of her 2 unused hours on loan 2: ₹1,450 off what she owes, its reserve back to junior
+    // cash (23 Nov), and 5% (₹72.5) owed to the union treasury.
+    let sm0 = c.get_junior_market(&fx.union);
     assert_eq!(
         c.return_voucher(&fx.borrower, &fx.union, &id2, &100),
         HOUR * 95 / 100
     );
-    let sm1 = c.get_senior_market(&fx.union);
+    let sm1 = c.get_junior_market(&fx.union);
     assert_eq!(
         (sm1.cash - sm0.cash, sm0.total_borrows - sm1.total_borrows),
         (HOUR, HOUR)
@@ -3181,14 +2778,14 @@ fn a_title_in_any_union_makes_her_junior_never_senior() {
         &BytesN::from_array(&fx.env, &[1; 32]),
         &BytesN::from_array(&fx.env, &[2; 32]),
     );
-    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&her, &(10 * NIN));
-    fx.senior()
-        .set_investor(&her, &true, &loan_id(&fx.env, 1), &Tag::Domestic);
+    // Junior only where she holds a title (senior acceptance is the trust's, 23 Nov).
+    assert_eq!(
+        fx.core()
+            .try_deposit_junior(&fx.union, &her, &NIN)
+            .unwrap_err(),
+        Ok(Error::NftRequired)
+    );
     f.override_rate(&(95 * NIN), &(T0 + 86_400));
-    assert!(fx
-        .senior()
-        .try_deposit(&her, &fx.union, &(10 * NIN))
-        .is_err());
     // The attester's band is adjustable by the trust.
     f.set_rate_band(&1_000);
     f.set_rate(&fx.attester, &(104 * NIN), &(T0 + 86_400));
@@ -4035,48 +3632,6 @@ fn a_collect_is_booked_only_for_usdc_that_arrived() {
     assert_eq!(f.treasury_usdc(&fx.union), own);
 }
 
-/// Review 5 Nov (finding 11): with no senior shareholders left, the voucher interest her investment covers at
-/// a default goes to the union treasury, as `senior_interest` does at a repayment; it is not left in senior
-/// cash that no one can claim.
-#[test]
-fn default_voucher_interest_goes_to_the_treasury_when_senior_has_no_shares() {
-    let v = vsetup();
-    let (fx, c, s) = (&v.fx, v.fx.core(), v.fx.senior());
-    let id = loan_id(&fx.env, 1);
-    fx.invest(&fx.borrower, 3_000 * NIN);
-    c.attest_food_token(
-        &fx.attester,
-        &fx.union,
-        &id,
-        &fx.borrower,
-        &(300 * NIN),
-        &200,
-    );
-    c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &200);
-    // A month on she gives every hour back: the voucher value is repaid to senior, its interest is not.
-    fx.at(T0 + 30 * 86_400);
-    c.return_voucher(&fx.borrower, &fx.union, &id, &200);
-    // Every senior investor leaves before the default.
-    let p = c.senior_position(&fx.union, &v.investor);
-    c.request_unbond(&fx.union, &v.investor, &p.shares, &true);
-    fx.at(T0 + 44 * 86_400 + 1);
-    s.redeem(&v.investor, &fx.union, &0);
-    assert_eq!(c.get_senior_market(&fx.union).total_shares, 0);
-    c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
-    fx.at(T0 + 111 * 86_400 + 1);
-    let treasury = c.union_treasury(&fx.union);
-    let senior_cash = c.get_senior_market(&fx.union).cash;
-    c.mark_default(&fx.union, &id);
-    let gained = c.union_treasury(&fx.union) - treasury;
-    assert!(gained > 0);
-    assert_eq!(c.senior_income(&fx.union), 0);
-    // Senior cash takes back the voucher value only, never the interest.
-    let sm = c.get_senior_market(&fx.union);
-    assert_eq!(sm.total_borrows, 0);
-    assert!(sm.cash >= senior_cash);
-    v.assert_conserved();
-}
-
 /// Review 5 Nov (finding 8): rupees paid out of the drawer above the open cash batches came from expired cash
 /// the treasury already paid for, so that much nIN goes back to the treasury instead of being burned.
 #[test]
@@ -4127,4 +3682,69 @@ fn a_revoked_unions_machines_claim_no_more() {
         mc.try_claim(&v.owner, &v.machine, &fx.union, &id, &400, &100),
         Err(Ok(ME::Unavailable))
     );
+}
+
+/// Executive decision 23 Nov: senior is a guarantee pool only. A voucher's interest is junior income less the
+/// guarantee fee, which fund_core sets aside; a leader and a member LP turn it into USDC at the office, paid into
+/// the senior contract, whose index rises. Only the senior contract takes the fee, never more than is waiting.
+#[test]
+fn the_guarantee_fee_reaches_senior_in_usdc_through_an_lp() {
+    let v = vsetup();
+    let (fx, c, s) = (&v.fx, v.fx.core(), v.fx.senior());
+    let (_anchor, lp) = fx.lp_ready();
+    // A senior investor: 1,000 USDC in, one share per USDC stroop at the start.
+    let inv = Address::generate(&fx.env);
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&inv, &(1_000 * NIN));
+    s.set_investor(
+        &inv,
+        &true,
+        &loan_id(&fx.env, 0x70),
+        &nila_senior::Tag::Offshore,
+    );
+    s.deposit(&inv, &(1_000 * NIN));
+    // The trust sets the fee: a quarter of every voucher's interest.
+    assert!(c.try_set_guarantee_fee(&10_001).is_err());
+    c.set_guarantee_fee(&2_500);
+    let id = loan_id(&fx.env, 1);
+    c.attest_food_token(
+        &fx.attester,
+        &fx.union,
+        &id,
+        &fx.borrower,
+        &(400 * NIN),
+        &600,
+    );
+    c.draw_loan(&fx.union, &fx.borrower, &id, &(400 * NIN), &600);
+    // Half a year on she repays everything.
+    fx.at(T0 + YEAR / 2);
+    let v_int = 6 * HOUR * 1250 / 10_000 / 2;
+    StellarAssetClient::new(&fx.env, &fx.nin).mint(&fx.fx_id, &(20_000 * NIN));
+    assert!(c.repay_loan(&fx.union, &id, &(20_000 * NIN)));
+    let fee = v_int * 2_500 / 10_000;
+    assert_eq!(c.guarantee_fee(&fx.union), (fee, 2_500));
+    v.assert_conserved();
+    // An LP converts it at the office at the day's rate: the rupees out of fund_core, the USDC into senior.
+    fx.fx()
+        .override_rate(&(95 * NIN), &(T0 + YEAR / 2 + 86_400));
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&lp, &(50 * NIN));
+    let usdc = fee * NIN / (95 * NIN);
+    // Not more than is waiting; not below the rate less the LP's fee; only the senior contract asks fund_core.
+    assert!(s
+        .try_pay_fee(&fx.union, &fx.leader, &lp, &(fee + 1), &(usdc + NIN))
+        .is_err());
+    assert_eq!(
+        s.try_pay_fee(&fx.union, &fx.leader, &lp, &fee, &(usdc / 2)),
+        Err(Ok(nila_senior::Error::BelowFix))
+    );
+    let before = s.holding(&inv).1;
+    s.pay_fee(&fx.union, &fx.leader, &lp, &fee, &usdc);
+    assert_eq!(c.guarantee_fee(&fx.union).0, 0);
+    assert_eq!(s.total(), 1_000 * NIN + usdc);
+    assert!(s.holding(&inv).1 - before >= usdc - 1);
+    assert!(s.index() > nila_math::RAY);
+    assert_eq!(
+        TokenClient::new(&fx.env, &fx.usdc).balance(&s.address),
+        1_000 * NIN + usdc
+    );
+    v.assert_conserved();
 }

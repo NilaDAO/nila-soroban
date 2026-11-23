@@ -19,7 +19,7 @@ use types::{LoanState, Market, UnionBook, FLAG_CLOSED, FLAG_DEFAULTED, FLAG_DRAW
 
 pub use types::{
     Config, Dues, Error, FoodToken, FoodTokenFinal, FoodTokenView, Investor, OwnerDue, Position,
-    SeniorPosition, UnionConfig, VoucherBook,
+    UnionConfig, VoucherBook,
 };
 
 contractmeta!(key = "binver", val = "0.2.0");
@@ -104,13 +104,12 @@ pub enum DataKey {
     // What a voucher's owners are still owed, and her repayment not yet paid on to them (union, token id;
     // owner split, 1 Nov).
     Dues(Address, BytesN<32>),
-    // Senior interest taken out of the pool at an exit, owed to the investor until an LP pays it in USDC
-    // (union, investor; executive decision 2 Nov). Held in fund_core, outside senior cash.
-    SeniorOwed(Address, Address),
-    // Voucher interest senior earned in a union and has not yet taken out (2 Nov; nUSD's harvest reads it).
-    SeniorIncome(Address),
-    // All `SeniorOwed` of a union: nIN held in fund_core outside every pool (2 Nov).
-    SeniorOwedTotal(Address),
+    // The guarantee fee the union's vouchers paid and senior has not yet taken (executive decision 23 Nov:
+    // senior is a guarantee pool only): nIN held in fund_core outside every pool until an LP turns it into
+    // USDC for the senior contract (`take_guarantee_fee`). Replaces the senior lending pool's income.
+    GuaranteeFee(Address),
+    // The guarantee fee: this share of every voucher's interest, in bp (instance; 0 until the trust sets it).
+    GuaranteeFeeBp,
     // Expired cash the treasury paid for and still in the union's drawer (review 5 Nov): a payout
     // above the open cash batches takes it, and its nIN goes back to the treasury.
     ExpiredCash(Address),
@@ -762,30 +761,38 @@ fn voucher_owed(b: &VoucherBook) -> i128 {
     b.value - b.repaid + b.interest_accrued - b.interest_paid + b.fee_due
 }
 
-// Senior is repaid `pay` of the voucher's value (cash in, the loan's borrow out).
-fn senior_repaid(env: &Env, union: &Address, pay: i128) {
-    let mut sm = load_market(env, false, union);
-    sm.cash += pay;
-    sm.total_borrows -= core::cmp::min(sm.total_borrows, pay);
-    save_market(env, false, union, &sm);
+// Vouchers are lent from junior money (executive decision 23 Nov: senior is a guarantee pool only, never a
+// lender): `pay` of a voucher's value comes back to the junior pool (cash in, the borrow out).
+fn voucher_repaid(jm: &mut Market, pay: i128) {
+    jm.cash += pay;
+    jm.total_borrows -= core::cmp::min(jm.total_borrows, pay);
 }
 
-// The voucher's interest is senior's income.
-fn senior_interest(env: &Env, union: &Address, interest: i128) -> Result<(), Error> {
+// A voucher's interest, paid into the junior pool: the guarantee fee (`GuaranteeFeeBp` of it) is set aside for
+// senior, the rest is junior income (the union's treasury when the pool has no shareholders).
+fn voucher_interest(
+    env: &Env,
+    union: &Address,
+    jm: &mut Market,
+    interest: i128,
+) -> Result<(), Error> {
     if interest <= 0 {
         return Ok(());
     }
-    let mut sm = load_market(env, false, union);
-    sm.cash += interest;
-    if sm.total_shares > 0 {
-        sm.index = index_bump(env, sm.index, sm.total_shares, interest).ok_or(Error::Overflow)?;
-        p_add(env, &DataKey::SeniorIncome(union.clone()), interest)?;
+    let bp: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::GuaranteeFeeBp)
+        .unwrap_or(0);
+    let fee = interest * i128::from(bp) / 10_000;
+    p_add(env, &DataKey::GuaranteeFee(union.clone()), fee)?;
+    let rest = interest - fee;
+    if jm.total_shares > 0 {
+        jm.cash += rest;
+        jm.index = index_bump(env, jm.index, jm.total_shares, rest).ok_or(Error::Overflow)?;
     } else {
-        // No senior shareholders to earn it: it stays with the union.
-        sm.cash -= interest;
-        i_add(env, &Counter::Treasury(union.clone()), interest)?;
+        i_add(env, &Counter::Treasury(union.clone()), rest)?;
     }
-    save_market(env, false, union, &sm);
     Ok(())
 }
 
@@ -808,19 +815,18 @@ fn pay_out_cash(env: &Env, union: &Address, amount: i128) -> Result<i128, Error>
     Ok(settled)
 }
 
-// At a default: her unclaimed hours lapse and their reserve goes back to senior cash. Returns it.
+// At a default: her unclaimed hours lapse and their reserve goes back to junior cash. Returns it.
 fn void_vouchers(
     env: &Env,
     union: &Address,
     token_id: &BytesN<32>,
     b: &mut VoucherBook,
+    jm: &mut Market,
 ) -> Result<i128, Error> {
     let back = b.reserve;
     if back > 0 {
         i_add(env, &Counter::Earmark(union.clone()), -back)?;
-        let mut sm = load_market(env, false, union);
-        sm.cash += back;
-        save_market(env, false, union, &sm);
+        jm.cash += back;
         b.reserve = 0;
     }
     if let Some(m) = cfg(env).machinery {
@@ -908,7 +914,8 @@ fn settle_dues(
     }
     d.owners = left;
     // The union's parts come after the owners (2 Nov): into its treasury from what is left of her
-    // repayment, all of it at the close; at a default senior keeps them (the union's own loss).
+    // repayment, all of it at the close; at a default they go back to the junior pool, which lent them (the
+    // union's own loss), booked by the caller.
     let pay = if all {
         d.union_due
     } else {
@@ -922,9 +929,6 @@ fn settle_dues(
         d.union_due -= pay;
         i_add(env, &Counter::Earmark(union.clone()), -pay)?;
         if default {
-            let mut sm = load_market(env, false, union);
-            sm.cash += pay;
-            save_market(env, false, union, &sm);
             back = pay;
         } else {
             i_add(env, &Counter::Treasury(union.clone()), pay)?;
@@ -941,10 +945,12 @@ fn settle_dues(
 }
 
 // The voucher part of a crop share, at the draw or added later (27 Oct): `hours` (centi tractor hours) at the
-// tractor hour's value, lent by senior (which must back it), set aside in the reserve and owed from `now` with
-// interest; the hours go onto her voucher. Returns the value.
+// tractor hour's value, lent from junior cash (23 Nov; senior only guarantees), set aside in the reserve and
+// owed from `now` with interest; the hours go onto her voucher. Returns the value.
+#[allow(clippy::too_many_arguments)]
 fn lend_vouchers(
     env: &Env,
+    jm: &mut Market,
     union: &Address,
     member: &Address,
     token_id: &BytesN<32>,
@@ -960,13 +966,12 @@ fn lend_vouchers(
         .checked_add(99)
         .ok_or(Error::Overflow)?
         / 100;
-    let mut sm = load_market(env, false, union);
-    if sm.cash < value {
+    // Error name kept for its number: junior cash does not cover the voucher.
+    if jm.cash < value {
         return Err(Error::NoSeniorBacking);
     }
-    sm.cash -= value;
-    sm.total_borrows += value;
-    save_market(env, false, union, &sm);
+    jm.cash -= value;
+    jm.total_borrows += value;
     i_add(env, &Counter::Earmark(union.clone()), value)?;
     let mut b = load_book(env, union, token_id).unwrap_or(VoucherBook {
         hours: 0,
@@ -1349,103 +1354,41 @@ impl FundCore {
         Ok(())
     }
 
-    // ---------- senior (investors who are not members; their USDC is in the senior contract, 2 Nov) ----------
+    // ---------- senior: a guarantee pool only (executive decision 23 Nov) ----------
 
-    // The senior contract only (`redeem`): a senior exit (executive decision 2 Nov: principal back at par in
-    // USDC, interest at the fix). After the 14 days, the claimed shares are burned; their principal (what was
-    // paid in for them, less any haircut) is burned too, and the senior contract pays that USDC; the interest
-    // stays here as owed to the investor (`SeniorOwed`) until an LP turns the rupees into USDC
-    // (`take_senior_income`). The investor signs the senior call. Returns (principal, interest, cost) in nIN.
-    pub fn claim_senior(
-        env: Env,
-        union: Address,
-        investor: Address,
-        max_shares: i128,
-    ) -> Result<(i128, i128, i128), Error> {
-        require_not_paused(&env)?;
-        require_senior(&env)?;
-        let before = load_inv(&env, false, &union, &investor).shares;
-        let (amount, cost) = claim(&env, false, &union, &investor, max_shares, false)?;
-        let shares = before - load_inv(&env, false, &union, &investor).shares;
-        let principal = core::cmp::min(cost, amount);
-        let interest = amount - principal;
-        nin(&env).burn(&env.current_contract_address(), &principal);
-        if interest > 0 {
-            p_add(
-                &env,
-                &DataKey::SeniorOwed(union.clone(), investor.clone()),
-                interest,
-            )?;
-            p_add(&env, &DataKey::SeniorOwedTotal(union.clone()), interest)?;
-            let k = DataKey::SeniorIncome(union.clone());
-            let take = core::cmp::min(interest, p_i128(&env, &k));
-            p_add(&env, &k, -take)?;
+    // The trust sets the guarantee fee: this share of every voucher's interest, in bp, set aside for senior.
+    pub fn set_guarantee_fee(env: Env, bp: u32) -> Result<(), Error> {
+        require_admin(&env)?;
+        if bp > 10_000 {
+            return Err(Error::BadArg);
         }
-        SeniorRedeemed {
-            union,
-            investor,
-            shares,
-            principal,
-            interest,
-        }
-        .publish(&env);
+        env.storage().instance().set(&DataKey::GuaranteeFeeBp, &bp);
+        GuaranteeFeeSet { bp }.publish(&env);
         bump_instance(&env);
-        Ok((principal, interest, cost))
+        Ok(())
     }
 
-    // The senior contract only (`pay_income`, 2 Nov): an LP took `amount` rupees of the investor's owed
-    // interest at the union office and paid the USDC; the nIN is burned here and the rupees are booked off
-    // cash at hand (`fx_pool.settle_cash`), as `claim_junior_cash` does. Returns what cash at hand covered.
-    pub fn take_senior_income(
-        env: Env,
-        union: Address,
-        investor: Address,
-        amount: i128,
-    ) -> Result<i128, Error> {
+    // The senior contract only (its `pay_fee`): an LP took `amount` rupees of the union's guarantee fee at the
+    // office and paid the senior contract USDC; the nIN is burned here and the rupees are booked off cash at
+    // hand (`fx_pool.settle_cash`), as `claim_junior_cash` does. Returns what cash at hand covered.
+    pub fn take_guarantee_fee(env: Env, union: Address, amount: i128) -> Result<i128, Error> {
         require_not_paused(&env)?;
         require_senior(&env)?;
         require_positive(amount)?;
-        let k = DataKey::SeniorOwed(union.clone(), investor.clone());
+        let k = DataKey::GuaranteeFee(union.clone());
         if amount > p_i128(&env, &k) {
             return Err(Error::AboveOwed);
         }
         p_add(&env, &k, -amount)?;
-        p_add(&env, &DataKey::SeniorOwedTotal(union.clone()), -amount)?;
         let settled = pay_out_cash(&env, &union, amount)?;
-        SeniorIncomeTaken {
+        GuaranteeFeeTaken {
             union,
-            investor,
             amount,
             cash_settled: settled,
         }
         .publish(&env);
         bump_instance(&env);
         Ok(settled)
-    }
-
-    // fx_pool only (mint_senior_nin, for the senior contract): a senior investor holds no land title in any union (executive decision,
-    // 12 Oct: junior vs senior is simply holding a title or not; R46).
-    pub fn deposit_senior(
-        env: Env,
-        union: Address,
-        investor: Address,
-        amount: i128,
-    ) -> Result<(), Error> {
-        require_not_paused(&env)?;
-        if LandTitleClient::new(&env, &cfg(&env).land_title).holds_any_title(&investor) {
-            return Err(Error::NftForbidden);
-        }
-        let shares = deposit(&env, false, &union, &investor, amount)?;
-        Deposit {
-            investor,
-            union,
-            tranche: Tranche::Senior,
-            amount,
-            shares_out: shares,
-        }
-        .publish(&env);
-        bump_instance(&env);
-        Ok(())
     }
 
     // ---------- loans ----------
@@ -1628,8 +1571,10 @@ impl FundCore {
         }
         if more {
             // The added hours show in machinery's VoucherGranted; their value in voucher_book.
+            let mut jm = load_market(&env, true, &union);
             lend_vouchers(
                 &env,
+                &mut jm,
                 &union,
                 &member,
                 &token_id,
@@ -1637,6 +1582,7 @@ impl FundCore {
                 ft.loan.rate_bp,
                 env.ledger().timestamp(),
             )?;
+            save_market(&env, true, &union, &jm);
             bump_instance(&env);
             return Ok(());
         }
@@ -1658,19 +1604,14 @@ impl FundCore {
         let mut jm = load_market(&env, true, &union);
         require_live(&jm)?;
         let req = reserve_for(&env, &uc, jm.claimable_principal)?;
-        if jm.cash < cash {
-            return Err(Error::InsufficientCash);
-        }
-        if cash > 0 && jm.cash < cash.checked_add(req).ok_or(Error::Overflow)? {
-            return Err(Error::ReserveStop);
-        }
         // The voucher part, in centi tractor hours (executive decision 26 Oct): its value (the
-        // tractor hour's whole rate) is lent by senior and owed from now, with interest; senior
-        // sets the money aside in the reserve, which pays the owners whenever she uses the hours.
+        // tractor hour's whole rate) is lent from junior cash (23 Nov) and owed from now, with interest;
+        // it is set aside in the reserve, which pays the owners whenever she uses the hours.
         let mut voucher = 0;
         if hours > 0 {
             voucher = lend_vouchers(
                 &env,
+                &mut jm,
                 &union,
                 &member,
                 &token_id,
@@ -1678,6 +1619,13 @@ impl FundCore {
                 uc.rate_bp,
                 env.ledger().timestamp(),
             )?;
+        }
+        // The cash part after the voucher's: both come out of junior cash, above its reserve.
+        if jm.cash < cash {
+            return Err(Error::InsufficientCash);
+        }
+        if jm.cash < cash.checked_add(req).ok_or(Error::Overflow)? {
+            return Err(Error::ReserveStop);
         }
         jm.cash -= cash;
         jm.total_borrows += cash;
@@ -1810,19 +1758,19 @@ impl FundCore {
         let mut pay_s = pay_v;
         if let Some(b) = book.as_mut() {
             b.interest_paid += pay_vi;
-            senior_interest(&env, &union, pay_vi)?;
-            // Closing inside dust: the voucher value's last fraction is written off by senior.
+            let mut jm = load_market(&env, true, &union);
+            voucher_interest(&env, &union, &mut jm, pay_vi)?;
+            // Closing inside dust: the voucher value's last fraction is written off by junior, which lent it.
             let off_v = if closed { owed_v - pay_v } else { 0 };
-            senior_repaid(&env, &union, pay_v);
+            voucher_repaid(&mut jm, pay_v);
             if off_v > 0 {
-                let mut sm = load_market(&env, false, &union);
-                sm.total_borrows -= core::cmp::min(sm.total_borrows, off_v);
-                let under = to_underlying(&env, sm.total_shares, sm.index).unwrap_or(0);
-                sm.index = haircut_index(&env, sm.index, under, off_v)
+                jm.total_borrows -= core::cmp::min(jm.total_borrows, off_v);
+                let under = to_underlying(&env, jm.total_shares, jm.index).unwrap_or(0);
+                jm.index = haircut_index(&env, jm.index, under, off_v)
                     .ok_or(Error::Overflow)?
                     .1;
-                save_market(&env, false, &union, &sm);
             }
+            save_market(&env, true, &union, &jm);
             b.repaid += pay_v + off_v;
             pay_s += off_v;
             b.fee_due -= pay_f;
@@ -1901,7 +1849,9 @@ impl FundCore {
             .take_back(&union, &token_id, &units);
         b.reserve -= value;
         i_add(&env, &Counter::Earmark(union.clone()), -value)?;
-        senior_repaid(&env, &union, value);
+        let mut jm = load_market(&env, true, &union);
+        voucher_repaid(&mut jm, value);
+        save_market(&env, true, &union, &jm);
         b.repaid += value;
         let fee = value * 5 / 100;
         b.fee_due += fee;
@@ -2119,31 +2069,27 @@ impl FundCore {
         accrue(&env, &mut ln, now)?;
         let mut book = load_book(&env, &union, &token_id);
         let mut jm = load_market(&env, true, &union);
-        let mut sm = load_market(&env, false, &union);
         let (mut v_rest, mut v_int) = (0, 0);
         if let Some(b) = book.as_mut() {
             accrue_voucher(&env, b, ln.rate_bp, now)?;
-            save_market(&env, true, &union, &jm);
-            // The guarantee (owner split, 1 Nov): owners are paid what they are still owed, from senior
-            // money already set aside, so they carry no default risk.
+            // The owners (owner split, 1 Nov) are paid what they are still owed from the money already set
+            // aside, so they carry no default risk.
             let mut d = load_dues(&env, &union, &token_id);
-            // The union's parts go back to senior cash (the union's loss) and, like unclaimed hours, come
-            // off the voucher value she owed senior, so senior is not haircut for them as well (2 Nov).
+            // The union's parts and her unclaimed hours go back to junior cash, which lent them (23 Nov), and
+            // come off the voucher value she owed.
             let union_back = settle_dues(&env, &union, &token_id, &mut d, true, true)?;
             d.credit = 0;
             save_dues(&env, &union, &token_id, &d);
-            let back = void_vouchers(&env, &union, &token_id, b)? + union_back;
-            sm = load_market(&env, false, &union);
+            jm.cash += union_back;
+            let back = void_vouchers(&env, &union, &token_id, b, &mut jm)? + union_back;
             let v_out = b.value - b.repaid;
             let cover = core::cmp::min(back, v_out);
-            sm.total_borrows -= core::cmp::min(sm.total_borrows, cover);
+            jm.total_borrows -= core::cmp::min(jm.total_borrows, cover);
             b.repaid += cover;
             // Hours she had paid for and never used: their reserve pays her junior principal.
             let surplus = back - cover;
             if surplus > 0 {
                 let to_p = core::cmp::min(surplus, ln.principal - ln.principal_paid);
-                sm.cash -= to_p;
-                jm.cash += to_p;
                 jm.total_borrows -= core::cmp::min(jm.total_borrows, to_p);
                 ln.principal_paid += to_p;
                 let ub = Counter::Borrows(union.clone());
@@ -2155,18 +2101,18 @@ impl FundCore {
         let loss = ln.principal - ln.principal_paid;
         let interest = ln.interest_accrued - ln.interest_paid;
 
-        // 1. Her investment pays first (R27, D10): the voucher's value to senior (in cash, so capped
-        //    by the junior pool's idle cash), then junior principal and interest, then the voucher's
-        //    interest. What cannot move stays her investment.
+        // 1. Her investment pays first (R27, D10): the voucher's value, then junior principal and interest,
+        //    then the voucher's interest. What cannot move stays her investment. All of it stays in the
+        //    junior pool, which lent both parts (23 Nov).
         let mut inv = load_inv(&env, true, &union, &ln.borrower);
         let avail = active_shares(&inv);
         let avail_value = to_underlying(&env, avail, jm.index).ok_or(Error::Overflow)?;
-        let m_s = core::cmp::min(core::cmp::min(avail_value, v_rest), jm.cash);
+        let m_s = core::cmp::min(avail_value, v_rest);
         let m_p = core::cmp::min(avail_value - m_s, loss);
         let m_i = core::cmp::min(avail_value - m_s - m_p, interest);
         let m_vi = core::cmp::min(
             core::cmp::min(avail_value - m_s - m_p - m_i, v_int),
-            jm.cash - m_s,
+            jm.cash,
         );
         let member_applied = m_s + m_p + m_i + m_vi;
         let burn = if member_applied >= avail_value {
@@ -2185,7 +2131,7 @@ impl FundCore {
             jm.total_shares -= burn;
             save_inv(&env, true, &union, &ln.borrower, &inv);
         }
-        jm.total_borrows -= core::cmp::min(jm.total_borrows, loss);
+        jm.total_borrows -= core::cmp::min(jm.total_borrows, loss + v_rest);
         // What her shares cover of the interest is pool income.
         if m_i > 0 {
             if jm.total_shares > 0 {
@@ -2196,25 +2142,14 @@ impl FundCore {
                 i_add(&env, &Counter::Treasury(union.clone()), m_i)?;
             }
         }
-        // Her investment's cash to senior for the voucher value and interest she owed. With no senior
-        // shareholders to earn the interest it stays with the union, as in `senior_interest`.
-        jm.cash -= m_s + m_vi;
-        sm.cash += m_s;
-        sm.total_borrows -= core::cmp::min(sm.total_borrows, v_rest);
-        if m_vi > 0 {
-            if sm.total_shares > 0 {
-                sm.cash += m_vi;
-                sm.index =
-                    index_bump(&env, sm.index, sm.total_shares, m_vi).ok_or(Error::Overflow)?;
-                p_add(&env, &DataKey::SeniorIncome(union.clone()), m_vi)?;
-            } else {
-                i_add(&env, &Counter::Treasury(union.clone()), m_vi)?;
-            }
-        }
+        // The voucher interest her shares cover: the guarantee fee set aside, the rest junior income.
+        jm.cash -= m_vi;
+        voucher_interest(&env, &union, &mut jm, m_vi)?;
 
-        // 2. Unpaid principal: junior pool, then senior (index haircuts). Unpaid interest
-        //    beyond her investment was never booked and is written off.
-        let rest = loss - m_p;
+        // 2. Unpaid principal and voucher value: the junior pool (index haircut). Beyond what it holds is the
+        //    loss the guarantee is for (`senior_applied`: the senior contract covers it in USDC, 23 Nov). Unpaid
+        //    interest beyond her investment was never booked and is written off.
+        let rest = loss - m_p + v_rest - m_s;
         let (junior_applied, idx) = haircut_index(
             &env,
             jm.index,
@@ -2224,27 +2159,8 @@ impl FundCore {
         .ok_or(Error::Overflow)?;
         jm.index = idx;
         save_market(&env, true, &union, &jm);
-        let mut senior_applied = 0;
-        if rest > junior_applied {
-            let (sa, sidx) = haircut_index(
-                &env,
-                sm.index,
-                to_underlying(&env, sm.total_shares, sm.index).unwrap_or(0),
-                rest - junior_applied,
-            )
-            .ok_or(Error::Overflow)?;
-            senior_applied = sa;
-            sm.index = sidx;
-        }
-        // 3. The voucher value she could not cover is senior's loss (senior guaranteed it).
+        let senior_applied = rest - junior_applied;
         let senior_prepay_lost = v_rest - m_s;
-        if senior_prepay_lost > 0 {
-            let sunder = to_underlying(&env, sm.total_shares, sm.index).unwrap_or(0);
-            sm.index = haircut_index(&env, sm.index, sunder, senior_prepay_lost)
-                .ok_or(Error::Overflow)?
-                .1;
-        }
-        save_market(&env, false, &union, &sm);
         if let Some(b) = book.as_mut() {
             b.repaid = b.value;
             b.interest_paid = b.interest_accrued;
@@ -2459,29 +2375,15 @@ impl FundCore {
         load_union(&env, &union)
     }
 
-    // A senior investor's shares, their value, any exit under way and the interest owed (2 Nov).
-    pub fn senior_position(env: Env, union: Address, investor: Address) -> SeniorPosition {
-        let inv = load_inv(&env, false, &union, &investor);
-        let m = load_market(&env, false, &union);
-        SeniorPosition {
-            shares: inv.shares,
-            value: to_underlying(&env, inv.shares, m.index).unwrap_or(0),
-            pending_shares: inv.pending,
-            claimable_shares: inv.claimable,
-            request_ts: inv.request_ts,
-            cost: inv.cost,
-            owed: p_i128(&env, &DataKey::SeniorOwed(union, investor)),
-        }
-    }
-
-    // Voucher interest senior earned in the union and has not yet taken out (2 Nov).
-    pub fn senior_income(env: Env, union: Address) -> i128 {
-        p_i128(&env, &DataKey::SeniorIncome(union))
-    }
-
-    // All senior interest owed in the union, held in fund_core outside the pools (2 Nov).
-    pub fn senior_owed_total(env: Env, union: Address) -> i128 {
-        p_i128(&env, &DataKey::SeniorOwedTotal(union))
+    // The guarantee fee the union's vouchers paid and senior has not yet taken (23 Nov), and the fee's share in bp.
+    pub fn guarantee_fee(env: Env, union: Address) -> (i128, u32) {
+        (
+            p_i128(&env, &DataKey::GuaranteeFee(union)),
+            env.storage()
+                .instance()
+                .get(&DataKey::GuaranteeFeeBp)
+                .unwrap_or(0),
+        )
     }
 
     // Whether fund_core knows the union (2 Nov): the senior contract takes no USDC for any other.
@@ -2494,14 +2396,14 @@ impl FundCore {
     }
 
     // How much cash the union's office may hold (executive decision 30 Oct, on-chain 31 Oct): the treasury, the
-    // withdrawals started and not collected (junior claimable principal), senior interest owed and waiting for an
+    // withdrawals started and not collected (junior claimable principal), the guarantee fee waiting for an
     // LP (review 5 Nov), and the cash parts of undrawn food tokens whose window closes in this week or the next
     // `ROOM_WEEKS`: cash members are due to take out again. fx_pool refuses a cash scan above it.
     pub fn cash_room(env: Env, union: Address) -> i128 {
         let w = env.ledger().timestamp() / (7 * DAY);
         let mut room = i_get(&env, &Counter::Treasury(union.clone()))
             + load_market(&env, true, &union).claimable_principal
-            + p_i128(&env, &DataKey::SeniorOwedTotal(union.clone()));
+            + p_i128(&env, &DataKey::GuaranteeFee(union.clone()));
         for i in w..=w + ROOM_WEEKS {
             room += env
                 .storage()

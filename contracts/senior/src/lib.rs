@@ -1,27 +1,28 @@
 #![no_std]
-//! Senior investors (executive decision 2 Nov): seniors hold USD. Their USDC is the guarantee behind
-//! vouchers and stays in this contract; fx_pool mints the same value in nIN at the attester's fix into
-//! fund_core's senior pool in their name (`fx_pool.mint_senior_nin`).
-//! - Principal comes back at par in USDC (`redeem`, after fund_core's 14-day unbond), pro rata to the
-//!   principal fund_core burns; a haircut pays less and the rest stays here.
-//! - Interest is earned in rupees and crosses the exchange rate: at an exit it stays owed in fund_core
-//!   until a member LP of the union takes those rupees at the office and pays the investor USDC
-//!   (`pay_income`). Rupees never leave India.
-//! - The vault (nUSD, later) assigns guarantee with USDC it holds itself (`mint_guaranteed`).
-//! - Unaudited: deposits stop at the trust's cap (0 until set), the vault's guarantee at its own cap (0
-//!   until set), and no call moves USDC out except `redeem` (to the investor, at par). There is no admin
-//!   withdrawal; but a 48-hour upgrade (trust, `nila_common::upgrade`) can change anything, so every
-//!   `UpgradeProposed` here is watched.
-//! - Error codes start at 101, apart from fund_core's and fx_pool's, so an error from a contract it calls
-//!   never reads as one of its own.
+//! Senior (executive decision 23 Nov): a guarantee pool only, from day 0. Senior never lends.
+//!
+//! - Investors the trust accepted deposit USDC and hold shares, valued by one USDC index (ray math, as
+//!   fund_core's pools): value = shares × index. One pool, one index for every investor.
+//! - The USDC stays in this contract. It grows by the guarantee fee: fund_core sets a share of every
+//!   voucher's interest aside (in rupees); a member LP of the union takes those rupees at the office and pays
+//!   the USDC in here (`pay_fee`, with a leader): the index rises.
+//! - It leaves only to cover a loss (`propose_cover`, 48 hours, then `execute_cover`: the index falls) or to
+//!   an investor who exits (`request_redeem`, 14 days, then `redeem`: shares × index at that moment, within the
+//!   daily cap). There is no other way out and no admin withdrawal; but a 48-hour upgrade (trust,
+//!   `nila_common::upgrade`) can change anything, so every `UpgradeProposed` here is watched.
+//! - The machine prepay and the cash of a crop agreement come from junior money (members, sold agreements, and
+//!   during the development period Nila itself as a junior investor), never from here.
+//! - Unaudited: deposits stop at the trust's cap (0 until set).
+//! - Error codes start at 101, apart from fund_core's and fx_pool's; removed codes are not reused.
 
 use nila_common::{bump_instance, upgrade, FundCoreClient, RolesClient, TTL_BUMP, TTL_THRESHOLD};
+use nila_math::{haircut_index, index_bump, to_shares, to_underlying, RAY};
 use soroban_sdk::{
     contract, contractclient, contracterror, contractevent, contractimpl, contractmeta,
     contracttype, token::TokenClient, Address, BytesN, Env,
 };
 
-contractmeta!(key = "binver", val = "0.2.0");
+contractmeta!(key = "binver", val = "0.3.0");
 
 // Demo builds only (feature `demo-upgrade-delay`): the upgrade timelock is 60 seconds, so a demo deployment can be
 // upgraded in place and keep its state. Never for mainnet: the wasm carries this marker, which deploys refuse.
@@ -32,7 +33,7 @@ soroban_sdk::contractmeta!(
 );
 contractmeta!(
     key = "desc",
-    val = "Nila senior: senior USDC, deposits at the fix, exits at par, interest via a union LP"
+    val = "Nila senior: a guarantee pool only; USDC grows by the vouchers' guarantee fee, pays only loss cover"
 );
 
 #[cfg(not(feature = "demo-upgrade-delay"))]
@@ -40,11 +41,15 @@ pub const UPGRADE_DELAY: u64 = upgrade::DEFAULT_DELAY;
 #[cfg(feature = "demo-upgrade-delay")]
 pub const UPGRADE_DELAY: u64 = 60;
 
-/// nIN per USDC at 7 decimals, as fx_pool's fix.
+/// nIN per USDC at 7 decimals, as fx_pool's rate.
 pub const RATE_ONE: i128 = 10_000_000;
 /// Senior USDC out a day (UTC) at launch: 2,500 USDC (executive decision 19 Nov); `set_daily_cap` changes it.
 pub const DEFAULT_DAILY_CAP: i128 = 2_500 * 10_000_000;
 const DAY: u64 = 86_400;
+/// An exit waits 14 days, so no investor leaves just ahead of a loss it knows of.
+pub const UNBOND: u64 = 14 * DAY;
+/// A loss cover waits 48 hours after the trust proposes it, so it can be seen and stopped.
+pub const COVER_DELAY: u64 = 2 * DAY;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -57,31 +62,34 @@ pub enum Error {
     NotAccepted = 104,
     /// The deposit would take the senior USDC above the trust's cap.
     AboveCap = 105,
-    /// No fix, or it ran out.
+    /// No rate in force (fx_pool), or it ran out.
     StaleRate = 106,
-    /// The LP pays less than the fix less its fee.
+    /// The LP pays less than the rate less its fee.
     BelowFix = 107,
     NotLeader = 108,
     /// Not an accepted LP of the union, or its identity is not checked (K1).
     NotLp = 109,
-    VaultAlreadySet = 110,
-    NoVault = 111,
+    // 110 (VaultAlreadySet), 111 (NoVault), 116 (UnknownUnion), 117 (AboveGuaranteeCap) removed 23 Nov.
     /// An investor's residency is set once.
     TagFixed = 112,
     UpgradeNotReady = 113,
     BadDelay = 114,
     Overflow = 115,
-    /// fund_core does not know the union: no USDC is taken for it.
-    UnknownUnion = 116,
-    /// The vault's guarantee would pass its cap.
-    AboveGuaranteeCap = 117,
-    /// The LP's account did not pay the investor the USDC it signed for (re-review, 3 Nov).
+    /// The LP's account did not pay the USDC it signed for (re-review, 3 Nov).
     NotPaid = 118,
     /// Today's senior USDC out would pass the daily cap: the rest waits for the next day (UTC).
     AboveDailyCap = 119,
+    /// No shares yet: a guarantee fee has no one to grow for and stays in rupees in fund_core.
+    NoShares = 120,
+    /// The exit's 14 days, or the cover's 48 hours, have not passed.
+    NotReady = 121,
+    /// No cover proposed, or the pool does not hold it.
+    NoCover = 122,
+    /// More shares than the investor holds free.
+    AboveShares = 123,
 }
 
-/// Where a senior investor's USDC comes from (R24, decision 005): set by the trust at acceptance.
+/// Residency (R24), fixed at acceptance.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -90,8 +98,6 @@ pub enum Tag {
     Domestic = 1,
 }
 
-/// The trust's acceptance of a senior investor: never a member. `kyc_ref` points at the KYC record kept
-/// off-chain; no personal data on-chain (C17).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Investor {
@@ -100,15 +106,26 @@ pub struct Investor {
     pub tag: Tag,
 }
 
-/// What an investor paid in for a union's senior shares still held: the USDC and the nIN it minted.
+/// An investor's shares: free, and asked out (`pending`, since `request_ts`).
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Principal {
-    pub usdc: i128,
-    pub nin: i128,
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Holding {
+    pub shares: i128,
+    pub pending: i128,
+    pub request_ts: u64,
 }
 
-/// fx_pool's INR/USD fix (the same fields as its `RateFix`).
+/// A loss cover the trust proposed: `usdc` to `to` (an LP who brings the rupees, or the union) for `union`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Cover {
+    pub union: Address,
+    pub to: Address,
+    pub usdc: i128,
+    pub eta: u64,
+}
+
+/// fx_pool's rate in force (INR per USD, 7 decimals).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Fix {
@@ -117,7 +134,6 @@ pub struct Fix {
     pub set_by: Address,
 }
 
-/// fx_pool's acceptance of a member LP (the same fields as its `LpMember`).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LpOf {
@@ -131,11 +147,8 @@ pub trait FxTrait {
     fn lp_member(union: Address, lp: Address) -> Option<LpOf>;
     fn id_checked(account: Address) -> bool;
     fn lp_fee() -> u32;
-    fn mint_senior_nin(union: Address, investor: Address, nin: i128);
 }
 
-/// The LP's Nila account (contracts/account): it pays from its free USDC, so an LP with an open lien
-/// (a Bring position) can still pay.
 #[contractclient(name = "LpAccountClient")]
 pub trait LpAccountTrait {
     fn send_usdc(to: Address, amount: i128);
@@ -152,26 +165,20 @@ pub enum DataKey {
     Paused,
     /// The most senior USDC this contract takes in, in all (the trust; 0 until set).
     Cap,
-    /// Senior USDC held here for investors' principal: deposits less what `redeem` paid out or wrote off.
+    /// USDC the pool holds for its investors: deposits and fees, less covers and exits.
     Total,
-    /// The vault (nUSD, later), set once.
-    Vault,
-    /// The most guarantee the vault may assign, in USDC (the trust; 0 until set).
-    GuaranteeCap,
-    /// Guarantee the vault assigned so far, in USDC.
-    Guaranteed,
     Investor(Address),
-    /// (union, investor).
-    Principal(Address, Address),
-    /// USDC taken in for a union under one residency, less what was paid back or written off (R24).
-    UnionUsdc(Address, Tag),
-    /// USDC of a union's investors left here after a haircut (2 Nov): out of `Total`, kept for the loss
-    /// cover that comes with nUSD; no call moves it yet.
-    HaircutUsdc(Address),
     /// Senior USDC out a day (19 Nov); unset = `DEFAULT_DAILY_CAP`. Instance.
     DailyCap,
     /// USDC `redeem` paid out on a day (day index). Temporary.
     DayOut(u64),
+    /// The pool's index (ray); unset = `RAY`. Instance.
+    Index,
+    /// All shares, free and pending. Instance.
+    TotalShares,
+    Holding(Address),
+    /// The one loss cover waiting (instance).
+    PendingCover,
 }
 
 #[contractevent]
@@ -195,11 +202,6 @@ pub struct DailyCapSet {
 }
 
 #[contractevent]
-pub struct GuaranteeCapSet {
-    pub usdc: i128,
-}
-
-#[contractevent]
 pub struct InvestorSet {
     #[topic]
     pub investor: Address,
@@ -209,55 +211,64 @@ pub struct InvestorSet {
 }
 
 #[contractevent]
-pub struct VaultSet {
-    pub vault: Address,
-}
-
-#[contractevent]
 pub struct Deposited {
-    #[topic]
-    pub union: Address,
     #[topic]
     pub investor: Address,
     pub tag: Tag,
     pub usdc: i128,
-    pub nin: i128,
-    pub inr_per_usd: i128,
+    pub shares: i128,
+}
+
+#[contractevent]
+pub struct RedeemRequested {
+    #[topic]
+    pub investor: Address,
+    pub shares: i128,
 }
 
 #[contractevent]
 pub struct Redeemed {
     #[topic]
-    pub union: Address,
-    #[topic]
     pub investor: Address,
+    pub shares: i128,
     pub usdc: i128,
-    pub principal: i128,
-    pub interest: i128,
-    /// USDC of this exit's principal left here after a haircut.
-    pub haircut: i128,
 }
 
 #[contractevent]
-pub struct IncomePaid {
+pub struct FeePaid {
     #[topic]
     pub union: Address,
-    #[topic]
-    pub investor: Address,
     pub leader: Address,
     pub lp: Address,
     pub inr: i128,
     pub usdc: i128,
     pub cash_settled: i128,
+    pub index: i128,
 }
 
 #[contractevent]
-pub struct Guaranteed {
+pub struct CoverProposed {
+    #[topic]
+    pub union: Address,
+    pub to: Address,
+    pub usdc: i128,
+    pub eta: u64,
+}
+
+#[contractevent]
+pub struct CoverPaid {
+    #[topic]
+    pub union: Address,
+    pub to: Address,
+    pub usdc: i128,
+    pub index: i128,
+}
+
+#[contractevent]
+pub struct CoverCancelled {
     #[topic]
     pub union: Address,
     pub usdc: i128,
-    pub nin: i128,
-    pub inr_per_usd: i128,
 }
 
 fn get(env: &Env, k: &DataKey) -> Address {
@@ -268,13 +279,12 @@ fn i_get(env: &Env, k: &DataKey) -> i128 {
     env.storage().instance().get(k).unwrap_or(0)
 }
 
-fn p_get(env: &Env, k: &DataKey) -> i128 {
-    env.storage().persistent().get(k).unwrap_or(0)
+fn i_set(env: &Env, k: &DataKey, v: i128) {
+    env.storage().instance().set(k, &v);
 }
 
-fn p_set(env: &Env, k: &DataKey, v: i128) {
-    env.storage().persistent().set(k, &v);
-    bump(env, k);
+fn index(env: &Env) -> i128 {
+    env.storage().instance().get(&DataKey::Index).unwrap_or(RAY)
 }
 
 fn bump(env: &Env, k: &DataKey) {
@@ -305,6 +315,45 @@ fn require_not_paused(env: &Env) -> Result<(), Error> {
     Ok(())
 }
 
+fn load_investor(env: &Env, who: &Address) -> Option<Investor> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Investor(who.clone()))
+}
+
+fn load_holding(env: &Env, who: &Address) -> Holding {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Holding(who.clone()))
+        .unwrap_or_default()
+}
+
+fn save_holding(env: &Env, who: &Address, h: &Holding) {
+    let k = DataKey::Holding(who.clone());
+    if h.shares == 0 && h.pending == 0 {
+        env.storage().persistent().remove(&k);
+    } else {
+        env.storage().persistent().set(&k, h);
+        bump(env, &k);
+    }
+}
+
+fn fx(env: &Env) -> FxClient<'_> {
+    FxClient::new(env, &get(env, &DataKey::FxPool))
+}
+
+fn usdc_token(env: &Env) -> TokenClient<'_> {
+    TokenClient::new(env, &get(env, &DataKey::Usdc))
+}
+
+fn fresh_fix(env: &Env) -> Result<Fix, Error> {
+    let f = fx(env).rate().ok_or(Error::StaleRate)?;
+    if env.ledger().timestamp() > f.valid_until || f.inr_per_usd <= 0 {
+        return Err(Error::StaleRate);
+    }
+    Ok(f)
+}
+
 fn daily_cap(env: &Env) -> i128 {
     env.storage()
         .instance()
@@ -323,39 +372,6 @@ fn take_day_out(env: &Env, usdc: i128) -> Result<(), Error> {
     t.set(&k, &(used + usdc));
     t.extend_ttl(&k, 2 * 17_280, 2 * 17_280);
     Ok(())
-}
-
-fn fx(env: &Env) -> FxClient<'_> {
-    FxClient::new(env, &get(env, &DataKey::FxPool))
-}
-
-fn fresh_fix(env: &Env) -> Result<Fix, Error> {
-    let f = fx(env).rate().ok_or(Error::StaleRate)?;
-    if env.ledger().timestamp() > f.valid_until || f.inr_per_usd <= 0 {
-        return Err(Error::StaleRate);
-    }
-    Ok(f)
-}
-
-fn to_nin(usdc: i128, f: &Fix) -> Result<i128, Error> {
-    let nin = usdc.checked_mul(f.inr_per_usd).ok_or(Error::Overflow)? / RATE_ONE;
-    if nin <= 0 {
-        return Err(Error::AmountZero);
-    }
-    Ok(nin)
-}
-
-fn load_investor(env: &Env, who: &Address) -> Option<Investor> {
-    env.storage()
-        .persistent()
-        .get(&DataKey::Investor(who.clone()))
-}
-
-fn load_principal(env: &Env, k: &DataKey) -> Principal {
-    env.storage()
-        .persistent()
-        .get(k)
-        .unwrap_or(Principal { usdc: 0, nin: 0 })
 }
 
 #[contract]
@@ -381,7 +397,7 @@ impl SeniorContract {
         bump_instance(&env);
     }
 
-    // ---------- the trust (admin) ----------
+    // ---------- the trust ----------
 
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), Error> {
         require_admin(&env)?;
@@ -391,7 +407,7 @@ impl SeniorContract {
         Ok(())
     }
 
-    /// Stops deposits, exits, income payouts and the vault's guarantee.
+    /// Stops deposits, exits, fees and covers.
     pub fn set_paused(env: Env, paused: bool) -> Result<(), Error> {
         require_admin(&env)?;
         env.storage().instance().set(&DataKey::Paused, &paused);
@@ -400,43 +416,31 @@ impl SeniorContract {
         Ok(())
     }
 
-    /// The most senior USDC this contract takes in, in all (unaudited: 0 = no deposits until the trust sets it).
+    /// The most senior USDC in all (0 until the contract is audited).
     pub fn set_cap(env: Env, usdc: i128) -> Result<(), Error> {
         require_admin(&env)?;
         if usdc < 0 {
             return Err(Error::AmountZero);
         }
-        env.storage().instance().set(&DataKey::Cap, &usdc);
+        i_set(&env, &DataKey::Cap, usdc);
         CapSet { usdc }.publish(&env);
         bump_instance(&env);
         Ok(())
     }
 
-    /// The most guarantee the vault may assign, in USDC (0 = none until the trust sets it, after nUSD's audit).
-    /// The trust sets the senior USDC out a day (executive decision 19 Nov), evented.
+    /// Senior USDC out a day (executive decision 19 Nov), evented.
     pub fn set_daily_cap(env: Env, usdc: i128) -> Result<(), Error> {
         require_admin(&env)?;
         if usdc < 0 {
             return Err(Error::AmountZero);
         }
-        env.storage().instance().set(&DataKey::DailyCap, &usdc);
+        i_set(&env, &DataKey::DailyCap, usdc);
         DailyCapSet { usdc }.publish(&env);
         bump_instance(&env);
         Ok(())
     }
 
-    pub fn set_guarantee_cap(env: Env, usdc: i128) -> Result<(), Error> {
-        require_admin(&env)?;
-        if usdc < 0 {
-            return Err(Error::AmountZero);
-        }
-        env.storage().instance().set(&DataKey::GuaranteeCap, &usdc);
-        GuaranteeCapSet { usdc }.publish(&env);
-        bump_instance(&env);
-        Ok(())
-    }
-
-    /// The trust accepts or drops a senior investor (KYC off-chain); the residency is set once.
+    /// The trust accepts (or stops) an investor after KYC at the anchor; the residency tag is fixed once.
     pub fn set_investor(
         env: Env,
         investor: Address,
@@ -469,23 +473,10 @@ impl SeniorContract {
         Ok(())
     }
 
-    /// The vault (nUSD, later), set once.
-    pub fn set_vault(env: Env, vault: Address) -> Result<(), Error> {
-        require_admin(&env)?;
-        if env.storage().instance().has(&DataKey::Vault) {
-            return Err(Error::VaultAlreadySet);
-        }
-        env.storage().instance().set(&DataKey::Vault, &vault);
-        VaultSet { vault }.publish(&env);
-        bump_instance(&env);
-        Ok(())
-    }
-
     // ---------- investors ----------
 
-    /// An accepted investor puts `usdc` behind a union's vouchers: it stays here, and the same value in nIN
-    /// at the day's fix goes into the union's senior pool in their name. Returns the nIN.
-    pub fn deposit(env: Env, investor: Address, union: Address, usdc: i128) -> Result<i128, Error> {
+    /// USDC in; shares out at today's index. Returns the shares.
+    pub fn deposit(env: Env, investor: Address, usdc: i128) -> Result<i128, Error> {
         require_not_paused(&env)?;
         investor.require_auth();
         if usdc <= 0 {
@@ -500,118 +491,101 @@ impl SeniorContract {
         if total > i_get(&env, &DataKey::Cap) {
             return Err(Error::AboveCap);
         }
-        if !FundCoreClient::new(&env, &get(&env, &DataKey::FundCore)).union_exists(&union) {
-            return Err(Error::UnknownUnion);
+        let shares = to_shares(&env, usdc, index(&env)).ok_or(Error::Overflow)?;
+        if shares <= 0 {
+            return Err(Error::AmountZero);
         }
-        let f = fresh_fix(&env)?;
-        let nin = to_nin(usdc, &f)?;
-        TokenClient::new(&env, &get(&env, &DataKey::Usdc)).transfer(
-            &investor,
-            env.current_contract_address(),
-            &usdc,
+        usdc_token(&env).transfer(&investor, env.current_contract_address(), &usdc);
+        i_set(&env, &DataKey::Total, total);
+        i_set(
+            &env,
+            &DataKey::TotalShares,
+            i_get(&env, &DataKey::TotalShares) + shares,
         );
-        env.storage().instance().set(&DataKey::Total, &total);
-        let pk = DataKey::Principal(union.clone(), investor.clone());
-        let mut p = load_principal(&env, &pk);
-        p.usdc += usdc;
-        p.nin += nin;
-        env.storage().persistent().set(&pk, &p);
-        bump(&env, &pk);
-        let uk = DataKey::UnionUsdc(union.clone(), inv.tag);
-        p_set(&env, &uk, p_get(&env, &uk) + usdc);
-        fx(&env).mint_senior_nin(&union, &investor, &nin);
+        let mut h = load_holding(&env, &investor);
+        h.shares += shares;
+        save_holding(&env, &investor, &h);
         Deposited {
-            union,
             investor,
             tag: inv.tag,
             usdc,
-            nin,
-            inr_per_usd: f.inr_per_usd,
+            shares,
         }
         .publish(&env);
         bump_instance(&env);
-        Ok(nin)
+        Ok(shares)
     }
 
-    /// After fund_core's 14-day unbond: up to `max_shares` (0: all claimable). fund_core burns the principal
-    /// and keeps the interest owed to the investor; the USDC paid in for that principal comes back at par,
-    /// never more than recorded. Returns the USDC paid.
-    pub fn redeem(
-        env: Env,
-        investor: Address,
-        union: Address,
-        max_shares: i128,
-    ) -> Result<i128, Error> {
+    /// Ask `shares` out: they keep their share of fees and losses for 14 days, then `redeem` pays them.
+    pub fn request_redeem(env: Env, investor: Address, shares: i128) -> Result<(), Error> {
         require_not_paused(&env)?;
         investor.require_auth();
-        let (principal, interest, cost) = FundCoreClient::new(&env, &get(&env, &DataKey::FundCore))
-            .claim_senior(&union, &investor, &max_shares);
-        let pk = DataKey::Principal(union.clone(), investor.clone());
-        let mut p = load_principal(&env, &pk);
-        let (mut usdc, mut haircut) = (0, 0);
-        if p.nin > 0 {
-            let cost = core::cmp::min(cost, p.nin);
-            let off = p.usdc * cost / p.nin;
-            // A haircut (principal below cost) pays less; the rest stays here, counted apart.
-            usdc = core::cmp::min(p.usdc * core::cmp::min(principal, cost) / p.nin, off);
-            haircut = off - usdc;
-            p.usdc -= off;
-            p.nin -= cost;
-            if p.nin == 0 {
-                env.storage().persistent().remove(&pk);
-            } else {
-                env.storage().persistent().set(&pk, &p);
-                bump(&env, &pk);
-            }
+        let mut h = load_holding(&env, &investor);
+        if shares <= 0 {
+            return Err(Error::AmountZero);
         }
-        if haircut > 0 {
-            // Out of `Total` (it no longer counts against the cap) into the union's haircut figure: it stays in
-            // this contract, and no call moves it until the loss cover comes with nUSD.
-            let hk = DataKey::HaircutUsdc(union.clone());
-            p_set(&env, &hk, p_get(&env, &hk) + haircut);
+        if shares > h.shares {
+            return Err(Error::AboveShares);
         }
-        if usdc + haircut > 0 {
-            let tag = load_investor(&env, &investor).map_or(Tag::Offshore, |i| i.tag);
-            let uk = DataKey::UnionUsdc(union.clone(), tag);
-            p_set(&env, &uk, p_get(&env, &uk) - usdc - haircut);
-            let total = i_get(&env, &DataKey::Total) - usdc - haircut;
-            env.storage().instance().set(&DataKey::Total, &total);
+        h.shares -= shares;
+        h.pending += shares;
+        h.request_ts = env.ledger().timestamp();
+        save_holding(&env, &investor, &h);
+        RedeemRequested { investor, shares }.publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// After the 14 days: the pending shares at the index of now, in USDC, within today's cap. Returns the USDC.
+    pub fn redeem(env: Env, investor: Address) -> Result<i128, Error> {
+        require_not_paused(&env)?;
+        investor.require_auth();
+        let mut h = load_holding(&env, &investor);
+        if h.pending <= 0 {
+            return Err(Error::AmountZero);
         }
-        if usdc > 0 {
-            take_day_out(&env, usdc)?;
-            TokenClient::new(&env, &get(&env, &DataKey::Usdc)).transfer(
-                &env.current_contract_address(),
-                &investor,
-                &usdc,
-            );
+        if env.ledger().timestamp() < h.request_ts + UNBOND {
+            return Err(Error::NotReady);
+        }
+        let out = core::cmp::min(
+            to_underlying(&env, h.pending, index(&env)).ok_or(Error::Overflow)?,
+            i_get(&env, &DataKey::Total),
+        );
+        take_day_out(&env, out)?;
+        let shares = h.pending;
+        i_set(
+            &env,
+            &DataKey::TotalShares,
+            i_get(&env, &DataKey::TotalShares) - shares,
+        );
+        i_set(&env, &DataKey::Total, i_get(&env, &DataKey::Total) - out);
+        h.pending = 0;
+        save_holding(&env, &investor, &h);
+        if out > 0 {
+            usdc_token(&env).transfer(&env.current_contract_address(), &investor, &out);
         }
         Redeemed {
-            union,
             investor,
-            usdc,
-            principal,
-            interest,
-            haircut,
+            shares,
+            usdc: out,
         }
         .publish(&env);
         bump_instance(&env);
-        Ok(usdc)
+        Ok(out)
     }
 
-    /// An investor's owed interest (rupees, from their exit) paid in USDC by a member LP of the union: the LP
-    /// takes `inr` rupees at the office and pays `usdc` straight to the investor, at least the fix less the
-    /// LP fee. A leader of the union (who hands over the notes) and the LP sign. fund_core burns the nIN and
-    /// books the rupees off cash at hand. The LP's Nila account pays from its free USDC (`send_usdc`), so an
-    /// open lien does not stop it. No USDC of this contract moves. Returns what cash at hand covered.
-    #[allow(clippy::too_many_arguments)]
-    pub fn pay_income(
+    // ---------- the guarantee fee ----------
+
+    /// A leader of the union and an accepted member LP turn `inr` of the union's guarantee fee into USDC at the
+    /// office: the LP takes the rupees and pays `usdc_in` (at least the rate less its fee) into this contract;
+    /// the index rises for every share. Returns what cash at hand covered.
+    pub fn pay_fee(
         env: Env,
         union: Address,
-        investor: Address,
         leader: Address,
         lp: Address,
         inr: i128,
-        usdc: i128,
+        usdc_in: i128,
     ) -> Result<i128, Error> {
         require_not_paused(&env)?;
         leader.require_auth();
@@ -623,100 +597,168 @@ impl SeniorContract {
         if !fx.lp_member(&union, &lp).is_some_and(|m| m.accepted) || !fx.id_checked(&lp) {
             return Err(Error::NotLp);
         }
-        if inr <= 0 || usdc <= 0 {
+        if inr <= 0 || usdc_in <= 0 {
             return Err(Error::AmountZero);
+        }
+        let shares = i_get(&env, &DataKey::TotalShares);
+        if shares <= 0 {
+            return Err(Error::NoShares);
         }
         let f = fresh_fix(&env)?;
         let fair = inr.checked_mul(RATE_ONE).ok_or(Error::Overflow)? / f.inr_per_usd;
-        if usdc < fair * i128::from(10_000 - fx.lp_fee().min(10_000)) / 10_000 {
+        if usdc_in < fair * i128::from(10_000 - fx.lp_fee().min(10_000)) / 10_000 {
             return Err(Error::BelowFix);
         }
         let settled = FundCoreClient::new(&env, &get(&env, &DataKey::FundCore))
-            .take_senior_income(&union, &investor, &inr);
-        // The payment goes through the LP's own account code, so it is checked on the investor's balance, not
+            .take_guarantee_fee(&union, &inr);
+        // The payment goes through the LP's own account code, so it is checked on this contract's balance, not
         // trusted (re-review, 3 Nov): a fake account that pays nothing is refused.
-        let token = TokenClient::new(&env, &get(&env, &DataKey::Usdc));
-        let before = token.balance(&investor);
-        LpAccountClient::new(&env, &lp).send_usdc(&investor, &usdc);
-        if token.balance(&investor) - before < usdc {
+        let me = env.current_contract_address();
+        let token = usdc_token(&env);
+        let before = token.balance(&me);
+        LpAccountClient::new(&env, &lp).send_usdc(&me, &usdc_in);
+        if token.balance(&me) - before < usdc_in {
             return Err(Error::NotPaid);
         }
-        IncomePaid {
+        let idx = index_bump(&env, index(&env), shares, usdc_in).ok_or(Error::Overflow)?;
+        env.storage().instance().set(&DataKey::Index, &idx);
+        i_set(
+            &env,
+            &DataKey::Total,
+            i_get(&env, &DataKey::Total) + usdc_in,
+        );
+        FeePaid {
             union,
-            investor,
             leader,
             lp,
             inr,
-            usdc,
+            usdc: usdc_in,
             cash_settled: settled,
+            index: idx,
         }
         .publish(&env);
         bump_instance(&env);
         Ok(settled)
     }
 
-    /// The vault assigns guarantee to a union with USDC it holds itself: senior nIN at the fix in the vault's
-    /// name; no USDC moves here. Returns the nIN.
-    pub fn mint_guaranteed(env: Env, union: Address, usdc: i128) -> Result<i128, Error> {
-        require_not_paused(&env)?;
-        let vault: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Vault)
-            .ok_or(Error::NoVault)?;
-        vault.require_auth();
-        if usdc <= 0 {
-            return Err(Error::AmountZero);
+    // ---------- loss cover ----------
+
+    /// The trust proposes to cover a loss in `union` (a default beyond the junior pool, fund_core's
+    /// `LoanDefaulted.senior_applied`): `usdc` to `to` after 48 hours. One at a time.
+    pub fn propose_cover(env: Env, union: Address, to: Address, usdc: i128) -> Result<u64, Error> {
+        require_admin(&env)?;
+        if usdc <= 0 || usdc > i_get(&env, &DataKey::Total) {
+            return Err(Error::NoCover);
         }
-        let done = i_get(&env, &DataKey::Guaranteed)
-            .checked_add(usdc)
-            .ok_or(Error::Overflow)?;
-        if done > i_get(&env, &DataKey::GuaranteeCap) {
-            return Err(Error::AboveGuaranteeCap);
-        }
-        let f = fresh_fix(&env)?;
-        let nin = to_nin(usdc, &f)?;
-        env.storage().instance().set(&DataKey::Guaranteed, &done);
-        fx(&env).mint_senior_nin(&union, &vault, &nin);
-        Guaranteed {
+        let eta = env.ledger().timestamp() + COVER_DELAY;
+        env.storage().instance().set(
+            &DataKey::PendingCover,
+            &Cover {
+                union: union.clone(),
+                to: to.clone(),
+                usdc,
+                eta,
+            },
+        );
+        CoverProposed {
             union,
+            to,
             usdc,
-            nin,
-            inr_per_usd: f.inr_per_usd,
+            eta,
         }
         .publish(&env);
         bump_instance(&env);
-        Ok(nin)
+        Ok(eta)
+    }
+
+    /// After the 48 hours: the cover is paid and the index falls by it.
+    pub fn execute_cover(env: Env) -> Result<i128, Error> {
+        require_not_paused(&env)?;
+        require_admin(&env)?;
+        let c: Cover = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingCover)
+            .ok_or(Error::NoCover)?;
+        if env.ledger().timestamp() < c.eta {
+            return Err(Error::NotReady);
+        }
+        let total = i_get(&env, &DataKey::Total);
+        if c.usdc > total {
+            return Err(Error::NoCover);
+        }
+        let shares = i_get(&env, &DataKey::TotalShares);
+        let mut idx = index(&env);
+        if shares > 0 {
+            let under = to_underlying(&env, shares, idx).ok_or(Error::Overflow)?;
+            idx = haircut_index(&env, idx, under, c.usdc)
+                .ok_or(Error::Overflow)?
+                .1;
+            env.storage().instance().set(&DataKey::Index, &idx);
+        }
+        i_set(&env, &DataKey::Total, total - c.usdc);
+        env.storage().instance().remove(&DataKey::PendingCover);
+        usdc_token(&env).transfer(&env.current_contract_address(), &c.to, &c.usdc);
+        CoverPaid {
+            union: c.union,
+            to: c.to,
+            usdc: c.usdc,
+            index: idx,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(c.usdc)
+    }
+
+    pub fn cancel_cover(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        let c: Cover = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingCover)
+            .ok_or(Error::NoCover)?;
+        env.storage().instance().remove(&DataKey::PendingCover);
+        CoverCancelled {
+            union: c.union,
+            usdc: c.usdc,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(())
     }
 
     // ---------- views ----------
+
+    /// An investor's holding and the USDC its shares (free and pending) are worth now.
+    pub fn holding(env: Env, investor: Address) -> (Holding, i128) {
+        let h = load_holding(&env, &investor);
+        let value = to_underlying(&env, h.shares + h.pending, index(&env)).unwrap_or(0);
+        (h, value)
+    }
 
     pub fn investor(env: Env, investor: Address) -> Option<Investor> {
         load_investor(&env, &investor)
     }
 
-    pub fn principal(env: Env, union: Address, investor: Address) -> Principal {
-        load_principal(&env, &DataKey::Principal(union, investor))
-    }
-
-    pub fn union_usdc(env: Env, union: Address, tag: Tag) -> i128 {
-        p_get(&env, &DataKey::UnionUsdc(union, tag))
-    }
-
-    pub fn haircut_usdc(env: Env, union: Address) -> i128 {
-        p_get(&env, &DataKey::HaircutUsdc(union))
-    }
-
-    pub fn guarantee_cap(env: Env) -> i128 {
-        i_get(&env, &DataKey::GuaranteeCap)
-    }
-
-    pub fn guaranteed(env: Env) -> i128 {
-        i_get(&env, &DataKey::Guaranteed)
+    /// The pool's index (ray): USDC per share × 10^27.
+    pub fn index(env: Env) -> i128 {
+        index(&env)
     }
 
     pub fn total(env: Env) -> i128 {
         i_get(&env, &DataKey::Total)
+    }
+
+    pub fn total_shares(env: Env) -> i128 {
+        i_get(&env, &DataKey::TotalShares)
+    }
+
+    pub fn pending_cover(env: Env) -> Option<Cover> {
+        env.storage().instance().get(&DataKey::PendingCover)
+    }
+
+    pub fn cap(env: Env) -> i128 {
+        i_get(&env, &DataKey::Cap)
     }
 
     pub fn daily_cap(env: Env) -> i128 {
@@ -731,14 +773,6 @@ impl SeniorContract {
             .unwrap_or(0)
     }
 
-    pub fn cap(env: Env) -> i128 {
-        i_get(&env, &DataKey::Cap)
-    }
-
-    pub fn vault(env: Env) -> Option<Address> {
-        env.storage().instance().get(&DataKey::Vault)
-    }
-
     pub fn admin(env: Env) -> Address {
         get(&env, &DataKey::Admin)
     }
@@ -750,7 +784,7 @@ impl SeniorContract {
             .unwrap_or(false)
     }
 
-    // ---------- upgrade (admin, 48-hour timelock, nila_common::upgrade) ----------
+    // ---------- upgrade (48 h, the trust) ----------
 
     pub fn set_upgrade_delay(env: Env, delay_seconds: u64) -> Result<(), Error> {
         require_admin(&env)?;

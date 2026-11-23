@@ -13,9 +13,8 @@
 //! - nIN SAC admin (R8): member trustlines stay deauthorised and are authorised only inside
 //!   the call that moves her nIN (R10), and only for a title holder or leader of the union.
 //!
-//! - Senior route (executive decision 2 Nov): the `senior` contract holds all senior USDC and
-//!   calls `mint_senior_nin` to put the nIN at the attester's fix into fund_core's senior pool.
-//!   fx_pool holds no senior USDC.
+//! - Senior (executive decision 23 Nov): a guarantee pool only. The `senior` contract holds all senior USDC
+//!   and never lends it; fx_pool mints no nIN for it (`mint_senior_nin` removed) and holds no senior USDC.
 //!
 //! - LP offers (C5b, Nov 7, `lp.rs`): Bring and Collect through member LPs the anchor accepted
 //!   (R18–R23); `quote` gives the SEP-38 price (C9).
@@ -217,7 +216,7 @@ pub enum DataKey {
     /// An LP's accepted offer not scanned yet (union, LP): one at a time (31 Oct).
     Busy(Address, Address),
     /// The senior contract (executive decision 2 Nov): it holds all senior USDC and is the one caller of
-    /// `mint_senior_nin`. Instance, set once.
+    /// nothing now (23 Nov: senior is a guarantee pool, fx_pool mints nothing for it). Instance, set once.
     Senior,
     /// When the attester last set the fix (2 Nov): at most one fix per 12 hours. Instance.
     AttesterFixAt,
@@ -338,15 +337,6 @@ pub struct SeniorSet {
 }
 
 /// Senior nIN minted for the senior contract (2 Nov): into the union's senior pool in `investor`'s name.
-#[contractevent]
-pub struct SeniorNinMinted {
-    #[topic]
-    pub union: Address,
-    #[topic]
-    pub investor: Address,
-    pub nin: i128,
-}
-
 #[contractevent]
 pub struct RateSet {
     pub inr_per_usd: i128,
@@ -1027,39 +1017,6 @@ impl FxPoolContract {
         }
         env.storage().instance().set(&DataKey::Senior, &senior);
         SeniorSet { senior }.publish(&env);
-        bump_instance(&env);
-        Ok(())
-    }
-
-    /// The senior contract only (2 Nov): `nin` minted into the union's senior pool in `investor`'s name, for
-    /// USDC the senior contract took in (or, for the vault, holds) at the fix. fx_pool holds no senior USDC.
-    pub fn mint_senior_nin(
-        env: Env,
-        union: Address,
-        investor: Address,
-        nin: i128,
-    ) -> Result<(), Error> {
-        require_not_paused(&env)?;
-        let senior: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Senior)
-            .ok_or(Error::Unauthorized)?;
-        senior.require_auth();
-        if nin <= 0 {
-            return Err(Error::AmountZero);
-        }
-        let me = env.current_contract_address();
-        StellarAssetClient::new(&env, &nin_addr(&env)).mint(&me, &nin);
-        let core = core_addr(&env)?;
-        authorize_pull(&env, &core, nin);
-        FundCoreClient::new(&env, &core).deposit_senior(&union, &investor, &nin);
-        SeniorNinMinted {
-            union,
-            investor,
-            nin,
-        }
-        .publish(&env);
         bump_instance(&env);
         Ok(())
     }

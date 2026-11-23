@@ -88,18 +88,6 @@ pub enum Error {
 // already taken out of the pool at an exit and not yet paid in USDC by an LP (the senior contract's `pay_income`).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SeniorPosition {
-    pub shares: i128,
-    pub value: i128,
-    pub pending_shares: i128,
-    pub claimable_shares: i128,
-    pub request_ts: u64,
-    pub cost: i128,
-    pub owed: i128,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     pub admin: Address,
     pub roles: Address,

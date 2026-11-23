@@ -115,9 +115,6 @@ pub trait FxPoolTrait {
 #[contractclient(name = "FundCoreClient")]
 pub trait FundCoreTrait {
     fn deposit_junior(union: Address, member: Address, amount: i128);
-    // mint_senior_nin (for the senior contract, 2 Nov): a senior investor's USDC, as nIN, into the
-    // union's senior pool (R46).
-    fn deposit_senior(union: Address, investor: Address, amount: i128);
     fn repay_loan(union: Address, token_id: BytesN<32>, amount: i128) -> bool;
     fn credit_recovery(union: Address, token_id: BytesN<32>, amount: i128);
     fn deposit_union_treasury(union: Address, amount: i128);
@@ -142,11 +139,11 @@ pub trait FundCoreTrait {
         postpaid: i128,
         to_union: i128,
     ) -> (i128, i128, i128);
-    // The senior contract only (`redeem`, executive decision 2 Nov): a senior exit; (principal, interest, cost) in nIN.
-    fn claim_senior(union: Address, investor: Address, max_shares: i128) -> (i128, i128, i128);
-    // The senior contract only (`pay_income`, 2 Nov): owed senior interest an LP paid in USDC; burned and
-    // booked off cash at hand. Returns what cash at hand covered.
-    fn take_senior_income(union: Address, investor: Address, amount: i128) -> i128;
+    // The senior contract only (its `pay_fee`, 23 Nov: senior is a guarantee pool): the union's guarantee fee an
+    // LP paid in USDC; burned and booked off cash at hand. Returns what cash at hand covered.
+    fn take_guarantee_fee(union: Address, amount: i128) -> i128;
+    // (fee waiting in nIN, fee share in bp).
+    fn guarantee_fee(union: Address) -> (i128, u32);
     // Whether fund_core knows the union (2 Nov).
     fn union_exists(union: Address) -> bool;
 }
