@@ -13,12 +13,15 @@
 //! - nIN SAC admin (R8): member trustlines stay deauthorised and are authorised only inside
 //!   the call that moves her nIN (R10), and only for a title holder or leader of the union.
 //!
-//! - Senior route (executive decision 2 Nov): the `senior` contract holds all senior USDC and
-//!   calls `mint_senior_nin` to put the nIN at the attester's fix into fund_core's senior pool.
-//!   fx_pool holds no senior USDC.
+//! - Senior (executive decision 23 Nov): a guarantee pool only. The `senior` contract holds all senior USDC
+//!   and never lends it; fx_pool mints no nIN for it (`mint_senior_nin` removed) and holds no senior USDC.
 //!
 //! - LP offers (C5b, Nov 7, `lp.rs`): Bring and Collect through member LPs the anchor accepted
-//!   (R18–R23); `quote` gives the SEP-38 price (C9). Reflector is later (R77).
+//!   (R18–R23); `quote` gives the SEP-38 price (C9).
+//!
+//! - Rate (SCF #45 T2 rows 8–9, 23 Nov): the trust's override while valid, else Reflector's INR/USD (forex
+//!   oracle, `set_reflector`) while at most `REFLECTOR_MAX_AGE` old, else the attester's FBIL fix while valid
+//!   (R77); none of them → `StaleOracle`. `rate()` gives the one in force, `fix()` the stored fix.
 
 use nila_common::{bump_instance, upgrade, FundCoreClient, LandTitleClient, Role, RolesClient};
 use soroban_sdk::{
@@ -28,7 +31,7 @@ use soroban_sdk::{
     vec, Address, Bytes, BytesN, Env, IntoVal, Symbol, Vec,
 };
 
-contractmeta!(key = "binver", val = "0.3.0");
+contractmeta!(key = "binver", val = "0.4.0");
 
 // Demo builds only (feature `demo-upgrade-delay`): the upgrade timelock is 60 seconds, so a demo deployment can be
 // upgraded in place and keep its state. Never for mainnet: the wasm carries this marker, which deploys refuse.
@@ -67,6 +70,8 @@ pub const RATE_MIN_GAP: u64 = 12 * 3_600;
 const NIN_UNIT: i128 = 10_000_000;
 /// The attester's fix is valid at most 2 days (R77).
 pub const MAX_RATE_AGE: u64 = 2 * DAY;
+/// A Reflector price older than this is stale (the forex oracle updates every 5 minutes).
+pub const REFLECTOR_MAX_AGE: u64 = 15 * 60;
 /// Default band for the attester's fix: at most 5% from the last one (R77); beyond, the trust
 /// overrides. Open and adjustable (executive decision, 12 Oct): `set_rate_band`.
 pub const DEFAULT_RATE_BAND_BP: u32 = 500;
@@ -133,6 +138,7 @@ pub enum Error {
     SeniorAlreadySet = 37,
     /// The LP's account `pay` did not bring fx_pool the USDC asked (review 5 Nov).
     NotPaid = 38,
+    // 39 (SeniorFeeFirst) removed 23 Nov: senior's fee rides on the Collect instead.
 }
 
 /// INR per USD, 7 decimals (nIN per USDC), set by the attester from the FBIL fix (R77).
@@ -211,10 +217,52 @@ pub enum DataKey {
     /// An LP's accepted offer not scanned yet (union, LP): one at a time (31 Oct).
     Busy(Address, Address),
     /// The senior contract (executive decision 2 Nov): it holds all senior USDC and is the one caller of
-    /// `mint_senior_nin`. Instance, set once.
+    /// nothing now (23 Nov: senior is a guarantee pool, fx_pool mints nothing for it). Instance, set once.
     Senior,
     /// When the attester last set the fix (2 Nov): at most one fix per 12 hours. Instance.
     AttesterFixAt,
+    /// Reflector's forex oracle and its price decimals (23 Nov). Instance; none = the fixes only.
+    Reflector,
+    /// Senior's part of an accepted Collect (offer id): (rupees of the union's guarantee fee, USDC the LP pays for
+    /// them), executive decision 23 Nov.
+    OfferSenior(u64),
+    /// The union's guarantee fee held by accepted Collects, not yet confirmed (rupees).
+    FeeHeld(Address),
+}
+
+/// Reflector's forex oracle (SEP-40): its asset and price types, as its contract defines them.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReflectorAsset {
+    Stellar(Address),
+    Other(Symbol),
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReflectorPrice {
+    pub price: i128,
+    pub timestamp: u64,
+}
+
+/// What fx_pool calls on the senior contract (23 Nov): whether it has investors, and the fee a Collect brought it.
+#[soroban_sdk::contractclient(name = "SeniorViewClient")]
+pub trait SeniorView {
+    fn total_shares(env: Env) -> i128;
+    fn fee_in(env: Env, union: Address, inr: i128, usdc: i128);
+}
+
+#[soroban_sdk::contractclient(name = "ReflectorClient")]
+pub trait ReflectorOracle {
+    fn lastprice(env: Env, asset: ReflectorAsset) -> Option<ReflectorPrice>;
+    fn decimals(env: Env) -> u32;
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReflectorCfg {
+    pub oracle: Address,
+    pub decimals: u32,
 }
 
 /// One open batch of counted rupees at the union office, kept in the union's one list
@@ -303,15 +351,6 @@ pub struct SeniorSet {
 
 /// Senior nIN minted for the senior contract (2 Nov): into the union's senior pool in `investor`'s name.
 #[contractevent]
-pub struct SeniorNinMinted {
-    #[topic]
-    pub union: Address,
-    #[topic]
-    pub investor: Address,
-    pub nin: i128,
-}
-
-#[contractevent]
 pub struct RateSet {
     pub inr_per_usd: i128,
     pub valid_until: u64,
@@ -321,6 +360,21 @@ pub struct RateSet {
 #[contractevent]
 pub struct RateBandSet {
     pub band_bp: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReflectorSet {
+    pub oracle: Option<Address>,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SeniorCover {
+    #[topic]
+    pub union: Address,
+    pub usdc: i128,
+    pub nin: i128,
 }
 
 /// A leader's own swap (22 Oct): USDC → nIN in her wallet (`to_nin`), or back.
@@ -544,6 +598,47 @@ fn settle(env: &Env, union: &Address, amount: i128) -> i128 {
     took
 }
 
+/// Reflector's INR/USD as a fix, if set, readable and fresh. Reflector prices INR in USD (USD per INR,
+/// `decimals`); the fix is INR per USD, 7 decimals.
+fn reflector_rate(env: &Env) -> Option<RateFix> {
+    let cfg: ReflectorCfg = env.storage().instance().get(&DataKey::Reflector)?;
+    let asset = ReflectorAsset::Other(Symbol::new(env, "INR"));
+    let p = ReflectorClient::new(env, &cfg.oracle)
+        .try_lastprice(&asset)
+        .ok()?
+        .ok()??;
+    let now = env.ledger().timestamp();
+    if p.price <= 0 || p.timestamp > now || now - p.timestamp > REFLECTOR_MAX_AGE {
+        return None;
+    }
+    let inr_per_usd = 10i128
+        .checked_pow(cfg.decimals)?
+        .checked_mul(RATE_ONE)?
+        .checked_div(p.price)?;
+    (inr_per_usd > 0).then(|| RateFix {
+        inr_per_usd,
+        valid_until: p.timestamp + REFLECTOR_MAX_AGE,
+        set_by: cfg.oracle,
+    })
+}
+
+/// The rate in force: the trust's override while valid, else Reflector while fresh, else the attester's
+/// fix while valid (T2 rows 8–9).
+pub(crate) fn current_rate(env: &Env) -> Result<RateFix, Error> {
+    let now = env.ledger().timestamp();
+    let fix: Option<RateFix> = env.storage().instance().get(&DataKey::Rate);
+    let valid = fix.filter(|f| now <= f.valid_until);
+    if let Some(f) = &valid {
+        if f.set_by == get::<Address>(env, &DataKey::Admin) {
+            return Ok(f.clone());
+        }
+    }
+    if let Some(r) = reflector_rate(env) {
+        return Ok(r);
+    }
+    valid.ok_or(Error::StaleOracle)
+}
+
 /// Her own swap: not paused, a leader or title holder of the union (self mode, executive decision 4 Nov), her
 /// identity checked, a fresh rate.
 fn leader_swap_checks(
@@ -567,15 +662,7 @@ fn leader_swap_checks(
     if amount <= 0 {
         return Err(Error::AmountZero);
     }
-    let rate: RateFix = env
-        .storage()
-        .instance()
-        .get(&DataKey::Rate)
-        .ok_or(Error::StaleOracle)?;
-    if env.ledger().timestamp() > rate.valid_until {
-        return Err(Error::StaleOracle);
-    }
-    Ok(rate)
+    current_rate(env)
 }
 
 fn add_leader_swap(env: &Env, union: &Address, who: &Address, usdc: i128) {
@@ -822,8 +909,8 @@ impl FxPoolContract {
 
     // ---------- senior route (R24, R46, R77) ----------
 
-    /// The attester posts the day's INR/USD fix (FBIL), valid at most 2 days (R77). Reflector
-    /// replaces it later; this stays as the evented override.
+    /// The attester posts the day's INR/USD fix (FBIL), valid at most 2 days (R77): the rate when
+    /// Reflector is unset or stale (23 Nov).
     pub fn set_rate(
         env: Env,
         attester: Address,
@@ -893,7 +980,32 @@ impl FxPoolContract {
         Ok(())
     }
 
-    /// The trust sets the first fix, or one beyond the attester's band (evented, R77).
+    /// The trust sets (or clears) Reflector's forex oracle (T2 rows 8–9, evented); its decimals are read once.
+    pub fn set_reflector(env: Env, oracle: Option<Address>) -> Result<(), Error> {
+        require_admin(&env)?;
+        match &oracle {
+            Some(o) => {
+                let decimals = ReflectorClient::new(&env, o).decimals();
+                if decimals > 18 {
+                    return Err(Error::BadRate);
+                }
+                env.storage().instance().set(
+                    &DataKey::Reflector,
+                    &ReflectorCfg {
+                        oracle: o.clone(),
+                        decimals,
+                    },
+                );
+            }
+            None => env.storage().instance().remove(&DataKey::Reflector),
+        }
+        ReflectorSet { oracle }.publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// The trust sets the first fix, or one beyond the attester's band (evented, R77): it wins over Reflector
+    /// while valid.
     pub fn override_rate(env: Env, inr_per_usd: i128, valid_until: u64) -> Result<(), Error> {
         require_admin(&env)?;
         let now = env.ledger().timestamp();
@@ -931,14 +1043,10 @@ impl FxPoolContract {
         Ok(())
     }
 
-    /// The senior contract only (2 Nov): `nin` minted into the union's senior pool in `investor`'s name, for
-    /// USDC the senior contract took in (or, for the vault, holds) at the fix. fx_pool holds no senior USDC.
-    pub fn mint_senior_nin(
-        env: Env,
-        union: Address,
-        investor: Address,
-        nin: i128,
-    ) -> Result<(), Error> {
+    /// The senior contract only (executive decision 23 Nov): its USDC cover of a union's voucher loss. The USDC
+    /// becomes the union's treasury USDC here; the same value in nIN at the rate in force goes into fund_core's
+    /// junior pool, which lent the voucher, never more than fund_core has booked. Returns the nIN.
+    pub fn cover_from_senior(env: Env, union: Address, usdc: i128) -> Result<i128, Error> {
         require_not_paused(&env)?;
         let senior: Address = env
             .storage()
@@ -946,22 +1054,34 @@ impl FxPoolContract {
             .get(&DataKey::Senior)
             .ok_or(Error::Unauthorized)?;
         senior.require_auth();
+        if usdc <= 0 {
+            return Err(Error::AmountZero);
+        }
+        let rate = current_rate(&env)?;
+        let core = core_addr(&env)?;
+        let fc = FundCoreClient::new(&env, &core);
+        let nin = core::cmp::min(
+            usdc.checked_mul(rate.inr_per_usd)
+                .map(|v| v / RATE_ONE)
+                .ok_or(Error::CapExceeded)?,
+            fc.voucher_loss(&union),
+        );
         if nin <= 0 {
             return Err(Error::AmountZero);
         }
         let me = env.current_contract_address();
+        let usdc_addr: Address = get(&env, &DataKey::Usdc);
+        TokenClient::new(&env, &usdc_addr).transfer(&senior, &me, &usdc);
+        let k = DataKey::TreasuryUsdc(union.clone());
+        let held: i128 = env.storage().persistent().get(&k).unwrap_or(0);
+        env.storage().persistent().set(&k, &(held + usdc));
+        bump(&env, &k);
         StellarAssetClient::new(&env, &nin_addr(&env)).mint(&me, &nin);
-        let core = core_addr(&env)?;
         authorize_pull(&env, &core, nin);
-        FundCoreClient::new(&env, &core).deposit_senior(&union, &investor, &nin);
-        SeniorNinMinted {
-            union,
-            investor,
-            nin,
-        }
-        .publish(&env);
+        fc.cover_voucher_loss(&union, &nin);
+        SeniorCover { union, usdc, nin }.publish(&env);
         bump_instance(&env);
-        Ok(())
+        Ok(nin)
     }
 
     /// A leader adds USDC to her union's treasury (executive decision 22 Oct): the USDC stays in
@@ -979,14 +1099,7 @@ impl FxPoolContract {
         if usdc <= 0 {
             return Err(Error::AmountZero);
         }
-        let rate: RateFix = env
-            .storage()
-            .instance()
-            .get(&DataKey::Rate)
-            .ok_or(Error::StaleOracle)?;
-        if env.ledger().timestamp() > rate.valid_until {
-            return Err(Error::StaleOracle);
-        }
+        let rate = current_rate(&env)?;
         let nin = usdc
             .checked_mul(rate.inr_per_usd)
             .map(|v| v / RATE_ONE)
@@ -1122,7 +1235,17 @@ impl FxPoolContract {
     }
 
     pub fn rate(env: Env) -> Option<RateFix> {
+        current_rate(&env).ok()
+    }
+
+    /// The stored fix (the attester's or the trust's), whether or not it is the rate in force.
+    pub fn fix(env: Env) -> Option<RateFix> {
         env.storage().instance().get(&DataKey::Rate)
+    }
+
+    /// Reflector's forex oracle, if set.
+    pub fn reflector(env: Env) -> Option<ReflectorCfg> {
+        env.storage().instance().get(&DataKey::Reflector)
     }
 
     // ---------- calls from fund_core ----------

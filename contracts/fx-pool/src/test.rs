@@ -6,8 +6,9 @@ extern crate std;
 
 use super::*;
 use soroban_sdk::{
+    contract, contractimpl,
     testutils::{Address as _, Ledger},
-    Address, Env,
+    Address, Env, Symbol,
 };
 
 const NIN: i128 = 10_000_000;
@@ -241,4 +242,84 @@ fn storage_layout_is_frozen() {
         hex, "f825389a33a6862da2638e13bd7727809b234b08d39de8267e97b564b5ace2a5",
         "fx_pool storage layout changed"
     );
+}
+
+/// A stand-in for Reflector's forex oracle: one INR price (USD per INR, 14 decimals) and its time.
+#[contract]
+struct MockReflector;
+
+#[contractimpl]
+impl MockReflector {
+    pub fn put(env: Env, price: i128, timestamp: u64) {
+        env.storage()
+            .instance()
+            .set(&0u32, &ReflectorPrice { price, timestamp });
+    }
+    pub fn lastprice(env: Env, asset: ReflectorAsset) -> Option<ReflectorPrice> {
+        if asset != ReflectorAsset::Other(Symbol::new(&env, "INR")) {
+            return None;
+        }
+        env.storage().instance().get(&0u32)
+    }
+    pub fn decimals(_env: Env) -> u32 {
+        14
+    }
+}
+
+/// The rate in force (T2 rows 8–9): the trust's override while valid, else Reflector while at most 15
+/// minutes old, else the attester's fix while valid.
+#[test]
+fn reflector_prices_with_a_staleness_guard_and_the_trust_overrides() {
+    let (env, f, admin) = setup();
+    let t0 = env.ledger().timestamp();
+    let oracle = env.register(MockReflector, ());
+    let m = MockReflectorClient::new(&env, &oracle);
+    // 92.80 INR per USD = 0.010775862068965 USD per INR at 14 decimals.
+    m.put(&1_077_586_206_896, &t0);
+    // The attester's fix (written as the attester would): ₹93, valid a day.
+    let attester = Address::generate(&env);
+    let fix = RateFix {
+        inr_per_usd: 93 * NIN,
+        valid_until: t0 + 86_400,
+        set_by: attester.clone(),
+    };
+    env.as_contract(&f.address, || {
+        env.storage().instance().set(&DataKey::Rate, &fix)
+    });
+    assert_eq!(f.rate(), Some(fix.clone()));
+    // Reflector set: it is the rate, valid 15 minutes from its price's time.
+    f.set_reflector(&Some(oracle.clone()));
+    assert_eq!(f.reflector().unwrap().decimals, 14);
+    let r = f.rate().unwrap();
+    assert_eq!(
+        (r.inr_per_usd, r.valid_until, r.set_by.clone()),
+        (928_000_000, t0 + 900, oracle.clone())
+    );
+    assert_eq!(f.fix(), Some(fix.clone()));
+    // Stale (over 15 minutes): the attester's fix again; a new price: Reflector again.
+    env.ledger().set_timestamp(t0 + 901);
+    assert_eq!(f.rate(), Some(fix.clone()));
+    m.put(&1_075_268_817_204, &(t0 + 900)); // 93.00
+    assert_eq!(f.rate().unwrap().inr_per_usd, 930_000_000);
+    // A zero or future price is not used.
+    m.put(&0, &(t0 + 900));
+    assert_eq!(f.rate(), Some(fix.clone()));
+    m.put(&1_075_268_817_204, &(t0 + 2_000));
+    assert_eq!(f.rate(), Some(fix.clone()));
+    m.put(&1_075_268_817_204, &(t0 + 900));
+    // The trust's override wins while valid.
+    f.override_rate(&(95 * NIN), &(t0 + 3_600));
+    assert_eq!(f.rate().unwrap().set_by, admin);
+    env.ledger().set_timestamp(t0 + 3_601);
+    // Override run out, Reflector stale, the attester's fix replaced by the override: nothing in force.
+    assert_eq!(f.rate(), None);
+    m.put(&1_075_268_817_204, &(t0 + 3_600));
+    assert_eq!(f.rate().unwrap().set_by, oracle);
+    // Cleared: the fixes only.
+    f.set_reflector(&None);
+    assert_eq!(f.reflector(), None);
+    assert_eq!(f.rate(), None);
+    // Only the trust sets it.
+    env.set_auths(&[]);
+    assert!(f.try_set_reflector(&Some(oracle)).is_err());
 }

@@ -84,11 +84,11 @@ Revoke keeps the union's `Leader`, `UnionRole` and `UnionSettings` entries; whil
 | `Vouchers(union, token_id)` | persistent | `VoucherBook{hours, per_hour, value, repaid, interest_accrued, interest_paid, last_accrual_ts, reserve, fee_due}` (26 Oct: the voucher's value is senior's loan from the draw, with interest; `reserve` is the money for her unclaimed work: at a claim the prepay leaves it to the owner and the postpaid part into `Dues` (1 Nov); `fee_due` is 5% of handed-back hours, the union treasury's) |
 | `OwnerBalance(union, owner)` | persistent | i128 owner's settled postpaid parts, ready to `collect` (credited again since 1 Nov, owner split) |
 | `ShareCash(union, week)` | persistent | i128 cash parts of the union's undrawn food tokens whose window closes that week (31 Oct; read by `cash_room`) |
-| `Dues(union, token_id)` | persistent | `Dues{owners: Vec<OwnerDue{owner, amount}>, credit, union_due}` (1 Nov, owner split): owners' postpaid parts still owed on a voucher, oldest claim first (max 8 owners), her repayment of the voucher's value not yet paid on, and (2 Nov) the union's parts of the price, into its treasury after the owners, back to senior at a default |
+| `Dues(union, token_id)` | persistent | `Dues{owners: Vec<OwnerDue{owner, amount}>, credit, union_due}` (1 Nov, owner split): owners' postpaid parts still owed on a voucher, oldest claim first (max 8 owners), her repayment of the voucher's value not yet paid on, and (2 Nov) the union's parts of the price, into its treasury after the owners, back to the junior pool at a default (23 Nov) |
 | `CropCalendar` | instance | Address of the crop_calendar contract (25 Oct) |
-| `SeniorOwed(union, investor)` | persistent | i128 senior interest taken out of the pool at an exit, owed until an LP pays it in USDC (`take_senior_income`, 2 Nov); the nIN stays in fund_core, outside senior cash |
-| `SeniorIncome(union)` | persistent | i128 voucher interest senior earned in the union and has not yet taken out (2 Nov) |
-| `SeniorOwedTotal(union)` | persistent | i128 all `SeniorOwed` of the union: nIN in fund_core outside every pool (counted in the conservation check) |
+| `GuaranteeFee(union)` | persistent | i128 the guarantee fee the union's vouchers paid and senior has not yet taken (23 Nov): nIN in fund_core outside every pool until a Collect takes it first for the senior contract (`fee_collected`, from fx_pool's confirm); counted in the conservation check and `cash_room` |
+| `VoucherLoss(union)` | persistent | i128 voucher value lost at defaults, not yet covered by senior (23 Nov: junior carries a default's cash part, senior its voucher part); `cover_voucher_loss` (from fx_pool, senior's USDC as nIN) refills junior cash |
+| `GuaranteeFeeBp` | instance | u32 the fee: this share of every voucher's interest, in bp (unset = 10,000, all of it: senior earns the voucher interest; `set_guarantee_fee` can lower it) |
 | `ExpiredCash(union)` | persistent | i128 expired cash the treasury paid for (`cover_expired_escrow`) and still in the drawer; a cash payout above the open batches takes it and its nIN goes back to the treasury (review 5 Nov) |
 
 ## crop_calendar (25 Oct)
@@ -127,7 +127,7 @@ Revoke keeps the union's `Leader`, `UnionRole` and `UnionSettings` entries; whil
 | `CashAtHand(union)` | persistent | i128 |
 | `Rate` | instance | `RateFix{inr_per_usd, valid_until, set_by}` (R77) |
 | `AttesterFixAt` | instance | u64 when the attester last set the fix: at most one per 12 hours (2 Nov) |
-| `Senior` | instance | Address of the senior contract, the one caller of `mint_senior_nin` (2 Nov, set once) |
+| `Senior` | instance | Address of the senior contract (2 Nov, set once); unused since 23 Nov (`mint_senior_nin` removed) |
 | `Anchor` | instance | Address (the trust's anchor account) |
 | `LpOf(union, lp)` | persistent | `LpMember{accepted, kyc_ref}`: a member LP the anchor accepted (R20) |
 | `LpFeeBp`, `NextOffer` | instance | u32, u64 |
@@ -137,27 +137,32 @@ Revoke keeps the union's `Leader`, `UnionRole` and `UnionSettings` entries; whil
 | `RateBandBp` | instance | u32 how far the attester's fix may move (default 500 = 5%) |
 | `SwapKey` | instance | BytesN<32> the anchor's ed25519 swap key; `accept` needs its signature (C9b) |
 | `LeaderSwapUsdc(union)` | persistent | i128 USDC behind the union's swapped nIN (`swap_usdc_to_nin` less `swap_nin_to_usdc`) |
+| `OfferSenior(id)` | persistent | (i128, i128) senior's part of an accepted Collect: rupees of the union's guarantee fee and the USDC the LP pays for them (23 Nov, senior first); removed at the confirm or close |
+| `FeeHeld(union)` | persistent | i128 the union's guarantee fee held by accepted Collects, not yet confirmed |
 | `SwapUsdc(union, account)` | persistent | i128 USDC that account swapped in and has not swapped back; caps its `swap_nin_to_usdc` (review 5 Nov) |
 
-## senior (executive decision 2 Nov): all senior USDC
+## senior (executive decision 23 Nov): a guarantee pool only
 
 | Key | Tier | Value |
 |---|---|---|
 | `Admin`, `Usdc`, `FundCore`, `FxPool`, `Roles` | instance | Address |
-| `Paused` | instance | bool (stops deposit, redeem, pay_income, mint_guaranteed) |
+| `Paused` | instance | bool (stops deposit, request_redeem, redeem, execute_cover; a fee from fx_pool still comes in) |
 | `Cap` | instance | i128 the most senior USDC held in all (0 until the trust sets it: no deposits) |
-| `Total` | instance | i128 senior USDC held for investors' principal: deposits less what `redeem` paid out or wrote off (a haircut) |
-| `Vault` | instance | Address of the nUSD vault (later), set once |
-| `GuaranteeCap` | instance | i128 the most guarantee the vault may assign, in USDC (0 until the trust sets it) |
-| `Guaranteed` | instance | i128 guarantee the vault assigned so far, in USDC; never lowered, so `GuaranteeCap` limits all ever assigned |
+| `Total` | instance | i128 USDC the pool holds for its investors: deposits and fees, less covers and exits |
 | `Investor(investor)` | persistent | `Investor{accepted, kyc_ref, tag}`: accepted by the trust; `tag` (Offshore 0, Domestic 1) set once |
-| `Principal(union, investor)` | persistent | `Principal{usdc, nin}` paid in for the union's senior shares still held |
-| `UnionUsdc(union, Tag)` | persistent | i128 USDC taken in for the union under one residency, less what was paid back or written off (R24) |
-| `HaircutUsdc(union)` | persistent | i128 USDC of the union's investors left here after a haircut: out of `Total`, kept for the loss cover that comes with nUSD; no call moves it yet |
+| `DailyCap` | instance | i128 senior USDC out a day (19 Nov; unset = 2,500 USDC) |
+| `DayOut(day)` | **temporary** | i128 USDC `redeem` paid out that day |
+| `Index` | instance | i128 the pool's index in ray (unset = 1 ray): value = shares × index |
+| `TotalShares` | instance | i128 all shares, free and pending |
+| `Holding(investor)` | persistent | `Holding{shares, pending, request_ts}`: free shares and those asked out, since when (14 days) |
+| `PendingCover` | instance | `Cover{union, usdc, eta}`: the one cover of a union's voucher loss waiting (48 hours), at most `usdc` |
 
-No call moves the contract's USDC except `redeem` (to the investor, at par). There is no admin withdrawal. A
-48-hour upgrade (the trust, `nila_common::upgrade`) can change anything, so `UpgradeProposed` on this contract is
-watched. Error codes start at 101, apart from fund_core's and fx_pool's.
+USDC leaves only by `execute_cover` (48 hours after the trust proposed it: fund_core's `voucher_loss` for the union at the
+rate in force, to the union's treasury USDC in fx_pool, which pays the same value in nIN into the junior pool; the
+index falls) and `redeem` (14 days
+after the request, at the index of then, within the daily cap). There is no admin withdrawal. A 48-hour upgrade
+(the trust, `nila_common::upgrade`) can change anything, so `UpgradeProposed` on this contract is watched. Error
+codes start at 101, apart from fund_core's and fx_pool's.
 
 ## Layout changes before the freeze
 
@@ -214,6 +219,12 @@ These are not upgrade-compatible with earlier testnet deployments, which were al
   `senior` contract, which holds all senior USDC. fx_pool lost `SeniorInvestor`, `SeniorUsdc` and `Tag`, and with
   them the dead `Escrow`/`EscrowsOf` (pre-24 Oct migration), `Scan`, `VoucherFloor` and `LpUsdc`; it gained `Senior`
   and `AttesterFixAt`. fund_core gained `Config.senior`, `SeniorOwed` and `SeniorIncome`. Fresh deploy only.
+- **Senior a guarantee pool only (executive decision 23 Nov, in-place upgrade):** vouchers are lent from junior
+  money; fund_core's senior pool is no longer used. fund_core lost `SeniorOwed`, `SeniorIncome` and
+  `SeniorOwedTotal` and gained `GuaranteeFee(union)` and `GuaranteeFeeBp`; the senior contract lost `Vault`,
+  `GuaranteeCap`, `Guaranteed`, `Principal`, `UnionUsdc` and `HaircutUsdc` and gained `Index`, `TotalShares`,
+  `Holding`, `PendingCover` (and `DailyCap`, `DayOut`, 19 Nov). In place is safe on mainnet: the senior contract is
+  at cap 0 with nothing deposited, so none of the removed keys holds a value. Both frozen-layout hashes re-pinned.
 - **Union parts (executive decision 2 Nov, fresh mainnet deploy):** `Dues` gained `union_due` (a layout change, fine
   on a fresh deploy only) and machinery gained `UnionParts(union)`. `pay_voucher` takes `to_union` too; machinery
   takes the union's parts out of the price before the owner's prepay and postpaid part.

@@ -88,7 +88,7 @@ pub struct LoanDrawn {
     pub borrower: Address,
     pub cash: i128,
     pub hours: u32,
-    // The voucher's value lent by senior with it (26 Oct): owed with the cash.
+    // The voucher's value lent with it (26 Oct; from junior money since 23 Nov): owed with the cash.
     pub voucher: i128,
     pub rate_bp: u32,
     // How much of the union's cash at hand in fx_pool the draw settled (D9).
@@ -105,7 +105,8 @@ pub struct LoanRepaid {
     pub principal_paid: i128,
     // To the union treasury: the 5% fee of handed-back voucher hours (26 Oct).
     pub fee_paid: i128,
-    // To senior: the voucher's value (its interest is in interest_paid).
+    // The voucher's value repaid, to the junior pool that lent it since 23 Nov (its interest is in interest_paid;
+    // the name stays for readers of the event).
     pub senior_paid: i128,
     pub closed: bool,
 }
@@ -127,13 +128,14 @@ pub struct LoanDefaulted {
     pub token_id: BytesN<32>,
     pub member_applied: i128,
     pub junior_applied: i128,
+    // Since 23 Nov: the voucher value lost, booked for the senior contract to cover (`VoucherLoss`).
     pub senior_applied: i128,
     // Interest accrued and unpaid at the default, written off with the principal.
     pub interest_written_off: i128,
     // Owners' pending parts paid at the default (D17), and any left unpaid for lack of cash.
     pub dues_paid: i128,
     pub dues_unpaid: i128,
-    // Senior voucher prepay her investment covered, and the senior loss on the rest.
+    // The voucher value her investment covered, and the rest (since 23 Nov senior's, as senior_applied).
     pub senior_prepay_covered: i128,
     pub senior_prepay_lost: i128,
 }
@@ -230,28 +232,7 @@ pub struct UnionDueSettled {
 
 // A senior exit through fx_pool (executive decision 2 Nov): `principal` burned (fx_pool pays the USDC
 // at par), `interest` owed to the investor until an LP pays it in USDC.
-#[contractevent]
-pub struct SeniorRedeemed {
-    #[topic]
-    pub union: Address,
-    #[topic]
-    pub investor: Address,
-    pub shares: i128,
-    pub principal: i128,
-    pub interest: i128,
-}
-
 // Senior income owed paid out (2 Nov): the nIN burned; an LP took the rupees and paid the USDC.
-#[contractevent]
-pub struct SeniorIncomeTaken {
-    #[topic]
-    pub union: Address,
-    #[topic]
-    pub investor: Address,
-    pub amount: i128,
-    pub cash_settled: i128,
-}
-
 // An owner collected her balance.
 #[contractevent]
 pub struct OwnerCollected {
@@ -273,4 +254,31 @@ pub struct VoucherReturned {
     pub units: u32,
     pub value: i128,
     pub fee: i128,
+}
+
+// The trust set the guarantee fee (23 Nov): this share of every voucher's interest, in bp, goes to senior.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GuaranteeFeeSet {
+    pub bp: u32,
+}
+
+// An LP turned `amount` of the union's guarantee fee into USDC for the senior contract (23 Nov).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GuaranteeFeeTaken {
+    #[topic]
+    pub union: Address,
+    pub amount: i128,
+    pub cash_settled: i128,
+}
+
+// Senior's USDC cover of a voucher loss reached the junior pool as nIN (23 Nov); `left` is still uncovered.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoucherLossCovered {
+    #[topic]
+    pub union: Address,
+    pub amount: i128,
+    pub left: i128,
 }

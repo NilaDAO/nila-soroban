@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Senior investors' USDC: deposits at the fix, exits at par, interest paid in USDC by a union's LP (2 Nov)."
+description = "Senior: a guarantee pool only (23 Nov). USDC stays here, grows by the vouchers' guarantee fee, pays only loss cover."
 
 [lib]
 crate-type = ["lib", "cdylib"]
@@ -13,6 +13,7 @@ doctest = false
 [dependencies]
 soroban-sdk = { workspace = true }
 nila-common = { workspace = true }
+nila-math = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

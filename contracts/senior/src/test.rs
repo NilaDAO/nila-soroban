@@ -1,77 +1,239 @@
+#![cfg(test)]
+//! The guarantee pool (executive decision 23 Nov): deposits, the fee raising the index, a loss cover lowering
+//! it, exits after 14 days within the daily cap. fx_pool, fund_core, roles and the LP's account are stand-ins
+//! here; the fee runs end to end against the real contracts in `fund-core/src/test.rs`.
+
 extern crate std;
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, Env};
+use soroban_sdk::{
+    contract, contractimpl,
+    testutils::{Address as _, Ledger},
+    token::StellarAssetClient,
+    Env,
+};
 
-fn setup() -> (Env, SeniorContractClient<'static>, Address) {
+const ONE: i128 = 10_000_000;
+const T0: u64 = 1_700_000_000;
+
+#[contract]
+struct MockFx;
+#[contractimpl]
+impl MockFx {
+    pub fn rate(env: Env) -> Option<Fix> {
+        Some(Fix {
+            inr_per_usd: 90 * ONE,
+            valid_until: env.ledger().timestamp() + 600,
+            set_by: env.current_contract_address(),
+        })
+    }
+    /// A Collect's confirm: the LP's USDC for senior's part has arrived (the test sends it), then fee_in.
+    pub fn collect_fee(env: Env, union: Address, inr: i128, usdc: i128) {
+        let senior: Address = env.storage().instance().get(&1u32).unwrap();
+        SeniorContractClient::new(&env, &senior).fee_in(&union, &inr, &usdc);
+    }
+    /// fx_pool pulls the cover's USDC from senior (it then pays nIN into fund_core; not modelled here).
+    pub fn cover_from_senior(env: Env, _union: Address, usdc: i128) -> i128 {
+        let t: Address = env.storage().instance().get(&0u32).unwrap();
+        let senior: Address = env.storage().instance().get(&1u32).unwrap();
+        TokenClient::new(&env, &t).transfer(&senior, env.current_contract_address(), &usdc);
+        usdc * 90
+    }
+    pub fn wire(env: Env, usdc: Address, senior: Address) {
+        env.storage().instance().set(&0u32, &usdc);
+        env.storage().instance().set(&1u32, &senior);
+    }
+}
+
+/// fund_core: a voucher loss of ₹9,990 (111 USDC at ₹90) booked.
+#[contract]
+struct MockCore;
+#[contractimpl]
+impl MockCore {
+    pub fn voucher_loss(_env: Env, _union: Address) -> i128 {
+        9_990 * ONE
+    }
+}
+
+struct S {
+    env: Env,
+    s: SeniorContractClient<'static>,
+    usdc: Address,
+    fx: Address,
+}
+
+fn setup() -> S {
     let env = Env::default();
     env.mock_all_auths();
+    env.ledger().set_timestamp(T0);
     let admin = Address::generate(&env);
-    let a = || Address::generate(&env);
-    let id = env.register(SeniorContract, (admin.clone(), a(), a(), a(), a()));
-    (env.clone(), SeniorContractClient::new(&env, &id), admin)
+    let usdc = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let fx = env.register(MockFx, ());
+    let core = env.register(MockCore, ());
+    let roles = Address::generate(&env);
+    let id = env.register(
+        SeniorContract,
+        (admin, usdc.clone(), core, fx.clone(), roles),
+    );
+    MockFxClient::new(&env, &fx).wire(&usdc, &id);
+    S {
+        env: env.clone(),
+        s: SeniorContractClient::new(&env, &id),
+        usdc,
+        fx,
+    }
+}
+
+impl S {
+    fn investor(&self, usdc: i128) -> Address {
+        let who = Address::generate(&self.env);
+        self.s.set_investor(
+            &who,
+            &true,
+            &BytesN::from_array(&self.env, &[2; 32]),
+            &Tag::Offshore,
+        );
+        StellarAssetClient::new(&self.env, &self.usdc).mint(&who, &usdc);
+        who
+    }
+    fn bal(&self, who: &Address) -> i128 {
+        TokenClient::new(&self.env, &self.usdc).balance(who)
+    }
 }
 
 #[test]
 fn deposits_wait_for_the_cap_and_residency_is_set_once() {
-    let (env, s, _) = setup();
-    let inv = Address::generate(&env);
-    let union = Address::generate(&env);
-    let kyc = BytesN::from_array(&env, &[1; 32]);
-    // Not accepted.
+    let t = setup();
+    let s = &t.s;
+    let a = t.investor(1_000 * ONE);
+    let kyc = BytesN::from_array(&t.env, &[2; 32]);
+    assert_eq!(s.try_deposit(&a, &(10 * ONE)), Err(Ok(Error::AboveCap)));
     assert_eq!(
-        s.try_deposit(&inv, &union, &10),
-        Err(Ok(Error::NotAccepted))
-    );
-    s.set_investor(&inv, &true, &kyc, &Tag::Domestic);
-    // Unaudited: no deposits until the trust sets a cap.
-    assert_eq!(s.cap(), 0);
-    assert_eq!(s.try_deposit(&inv, &union, &10), Err(Ok(Error::AboveCap)));
-    assert_eq!(
-        s.try_set_investor(&inv, &true, &kyc, &Tag::Offshore),
+        s.try_set_investor(&a, &true, &kyc, &Tag::Domestic),
         Err(Ok(Error::TagFixed))
     );
-    s.set_investor(&inv, &false, &kyc, &Tag::Domestic);
-    assert!(!s.investor(&inv).unwrap().accepted);
-    // Paused stops deposits, exits and payouts.
+    let b = Address::generate(&t.env);
+    assert_eq!(s.try_deposit(&b, &ONE), Err(Ok(Error::NotAccepted)));
+    s.set_cap(&(1_000 * ONE));
+    assert_eq!(s.deposit(&a, &(400 * ONE)), 400 * ONE);
+    assert_eq!(s.total(), 400 * ONE);
+    assert_eq!(t.bal(&s.address), 400 * ONE);
     s.set_paused(&true);
-    assert_eq!(s.try_deposit(&inv, &union, &10), Err(Ok(Error::Paused)));
-    assert_eq!(s.try_redeem(&inv, &union, &0), Err(Ok(Error::Paused)));
+    assert_eq!(s.try_deposit(&a, &ONE), Err(Ok(Error::Paused)));
+}
+
+/// The fee raises the index for every share; a later deposit buys fewer shares; a cover lowers it.
+#[test]
+fn the_fee_raises_the_index_and_a_cover_lowers_it() {
+    let t = setup();
+    let s = &t.s;
+    s.set_cap(&(10_000 * ONE));
+    let a = t.investor(1_000 * ONE);
+    s.deposit(&a, &(1_000 * ONE));
+    let union = Address::generate(&t.env);
+    // Only fx_pool brings a fee (at a Collect's confirm): 10 USDC for ₹900.
+    t.env.set_auths(&[]);
+    assert!(s.try_fee_in(&union, &(900 * ONE), &(10 * ONE)).is_err());
+    t.env.mock_all_auths();
+    StellarAssetClient::new(&t.env, &t.usdc).mint(&s.address, &(10 * ONE));
+    MockFxClient::new(&t.env, &t.fx).collect_fee(&union, &(900 * ONE), &(10 * ONE));
+    assert_eq!(s.total(), 1_010 * ONE);
+    // Shares are valued rounded down, a stroop at most, in the pool's favour.
+    assert!(1_010 * ONE - s.holding(&a).1 <= 1);
+    assert_eq!(t.bal(&s.address), 1_010 * ONE);
+    // A new investor buys at the new index: her 101 USDC is worth 101 USDC, not more.
+    let b = t.investor(101 * ONE);
+    s.deposit(&b, &(101 * ONE));
+    assert!(101 * ONE - s.holding(&b).1 <= 2);
+    // A cover of the union's booked voucher loss (₹9,990 = 111 USDC at ₹90): proposed with a ceiling, refused
+    // before 48 hours, then paid to the union through fx_pool; every share falls pro rata.
     assert_eq!(
-        s.try_pay_income(&union, &inv, &inv, &inv, &1, &1),
-        Err(Ok(Error::Paused))
+        s.try_propose_cover(&union, &(2_000 * ONE)),
+        Err(Ok(Error::NoCover))
     );
-    assert_eq!(s.try_mint_guaranteed(&union, &1), Err(Ok(Error::Paused)));
-    // The vault is set once.
-    s.set_paused(&false);
-    assert_eq!(s.try_mint_guaranteed(&union, &1), Err(Ok(Error::NoVault)));
-    s.set_vault(&inv);
-    assert_eq!(s.try_set_vault(&union), Err(Ok(Error::VaultAlreadySet)));
-    assert_eq!(s.vault(), Some(inv));
-    // The vault's guarantee waits for its own cap (0 until the trust sets it, after nUSD's audit).
-    assert_eq!(s.guarantee_cap(), 0);
+    s.propose_cover(&union, &(500 * ONE));
+    assert_eq!(s.try_execute_cover(), Err(Ok(Error::NotReady)));
+    t.env.ledger().set_timestamp(T0 + COVER_DELAY);
+    assert_eq!(s.execute_cover(), 111 * ONE);
+    assert_eq!(t.bal(&t.fx), 111 * ONE);
+    assert_eq!(s.total(), 1_000 * ONE);
+    // 111 of 1,111 USDC paid out: every share keeps 1,000 / 1,111 of its value.
+    assert!((s.holding(&a).1 - 1_010 * ONE * 1_000 / 1_111).abs() <= 3);
+    assert!((s.holding(&b).1 - 101 * ONE * 1_000 / 1_111).abs() <= 3);
+    assert_eq!(s.pending_cover(), None);
+    // Cancel works the same way, and nothing moves.
+    s.propose_cover(&union, &ONE);
+    s.cancel_cover();
+    assert_eq!(s.total(), 1_000 * ONE);
+}
+
+/// An exit waits 14 days, is paid at the index of then (a cover during the wait counts) and within the daily cap.
+#[test]
+fn exits_wait_14_days_and_stay_within_the_daily_cap() {
+    let t = setup();
+    let s = &t.s;
+    s.set_cap(&(10_000 * ONE));
+    s.set_daily_cap(&(500 * ONE));
+    let a = t.investor(1_000 * ONE);
+    let shares = s.deposit(&a, &(1_000 * ONE));
     assert_eq!(
-        s.try_mint_guaranteed(&union, &1),
-        Err(Ok(Error::AboveGuaranteeCap))
+        s.try_request_redeem(&a, &(shares + 1)),
+        Err(Ok(Error::AboveShares))
     );
+    s.request_redeem(&a, &(shares / 2));
+    assert_eq!(s.try_redeem(&a), Err(Ok(Error::NotReady)));
+    // A cover in the meantime hits the pending shares too.
+    s.propose_cover(&a, &(100 * ONE));
+    t.env.ledger().set_timestamp(T0 + COVER_DELAY);
+    s.execute_cover();
+    t.env.ledger().set_timestamp(T0 + UNBOND);
+    assert_eq!(s.redeem(&a), 450 * ONE);
+    assert_eq!(t.bal(&a), 450 * ONE);
+    assert_eq!(s.paid_today(), 450 * ONE);
+    // The rest the same day passes the cap: it waits for the next day.
+    s.request_redeem(&a, &s.holding(&a).0.shares);
+    t.env.ledger().set_timestamp(T0 + 2 * UNBOND);
+    assert_eq!(s.redeem(&a), 450 * ONE);
+    assert_eq!(s.total(), 0);
+    assert_eq!(s.total_shares(), 0);
+    assert_eq!(s.holding(&a).0, Holding::default());
+    assert_eq!(s.daily_cap(), 500 * ONE);
+    assert_eq!(s.try_set_daily_cap(&-1), Err(Ok(Error::AmountZero)));
 }
 
 #[test]
-fn only_the_trust_sets_cap_investors_vault_and_upgrades() {
-    let env = Env::default();
-    let admin = Address::generate(&env);
-    let a = || Address::generate(&env);
-    let id = env.register(SeniorContract, (admin.clone(), a(), a(), a(), a()));
-    let s = SeniorContractClient::new(&env, &id);
-    let kyc = BytesN::from_array(&env, &[1; 32]);
-    let x = Address::generate(&env);
+fn the_daily_cap_counts_per_utc_day() {
+    let t = setup();
+    let s = &t.s;
+    s.set_cap(&(10_000 * ONE));
+    s.set_daily_cap(&(100 * ONE));
+    let a = t.investor(300 * ONE);
+    let sh = s.deposit(&a, &(300 * ONE));
+    s.request_redeem(&a, &(sh / 3 * 2));
+    t.env.ledger().set_timestamp(T0 + UNBOND);
+    assert_eq!(s.try_redeem(&a), Err(Ok(Error::AboveDailyCap)));
+    assert_eq!(s.daily_cap(), 100 * ONE);
+}
+
+#[test]
+fn only_the_trust_sets_caps_investors_covers_and_upgrades() {
+    let t = setup();
+    let s = &t.s;
+    let kyc = BytesN::from_array(&t.env, &[1; 32]);
+    let x = Address::generate(&t.env);
+    t.env.set_auths(&[]);
     assert!(s.try_set_cap(&1).is_err());
+    assert!(s.try_set_daily_cap(&1).is_err());
     assert!(s.try_set_investor(&x, &true, &kyc, &Tag::Offshore).is_err());
-    assert!(s.try_set_vault(&x).is_err());
-    assert!(s.try_set_guarantee_cap(&1).is_err());
     assert!(s.try_set_paused(&true).is_err());
+    assert!(s.try_propose_cover(&x, &1).is_err());
+    assert!(s.try_cancel_cover().is_err());
     assert!(s.try_upgrade(&kyc).is_err());
     assert_eq!(s.upgrade_delay(), UPGRADE_DELAY);
+    assert_eq!(s.daily_cap(), DEFAULT_DAILY_CAP);
+    assert_eq!(s.index(), nila_math::RAY);
 }
 
 #[test]
@@ -93,14 +255,13 @@ fn storage_layout_is_frozen() {
         DataKey::Paused,
         DataKey::Cap,
         DataKey::Total,
-        DataKey::Vault,
         DataKey::Investor(a.clone()),
-        DataKey::Principal(a.clone(), a.clone()),
-        DataKey::UnionUsdc(a.clone(), Tag::Offshore),
-        DataKey::UnionUsdc(a.clone(), Tag::Domestic),
-        DataKey::GuaranteeCap,
-        DataKey::Guaranteed,
-        DataKey::HaircutUsdc(a.clone()),
+        DataKey::DailyCap,
+        DataKey::DayOut(1),
+        DataKey::Index,
+        DataKey::TotalShares,
+        DataKey::Holding(a.clone()),
+        DataKey::PendingCover,
     ] {
         v.push_back(k.into_val(&env));
     }
@@ -112,7 +273,22 @@ fn storage_layout_is_frozen() {
         }
         .into_val(&env),
     );
-    v.push_back(Principal { usdc: 1, nin: 2 }.into_val(&env));
+    v.push_back(
+        Holding {
+            shares: 1,
+            pending: 2,
+            request_ts: 3,
+        }
+        .into_val(&env),
+    );
+    v.push_back(
+        Cover {
+            union: a.clone(),
+            usdc: 4,
+            eta: 5,
+        }
+        .into_val(&env),
+    );
     let got: BytesN<32> = env.crypto().sha256(&v.to_xdr(&env)).into();
     let hex: std::string::String = got
         .to_array()
@@ -120,7 +296,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "65a7ee6422aae72c00f3fcfef450a8a79e64112fda9e9a64a129896954e6e42e",
+        hex, "f78414754a91f0c0796d3b0bc7ad6fa66be93c348a1546018cd70ed00b90f3d9",
         "senior storage layout changed"
     );
 }

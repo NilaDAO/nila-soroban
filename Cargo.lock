@@ -1216,6 +1216,7 @@ name = "nila-senior"
 version = "0.1.0"
 dependencies = [
  "nila-common",
+ "nila-math",
  "soroban-sdk",
 ]
 
