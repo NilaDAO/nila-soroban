@@ -355,6 +355,15 @@ pub struct ReflectorSet {
     pub oracle: Option<Address>,
 }
 
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SeniorCover {
+    #[topic]
+    pub union: Address,
+    pub usdc: i128,
+    pub nin: i128,
+}
+
 /// A leader's own swap (22 Oct): USDC → nIN in her wallet (`to_nin`), or back.
 #[contractevent]
 pub struct LeaderSwap {
@@ -1019,6 +1028,47 @@ impl FxPoolContract {
         SeniorSet { senior }.publish(&env);
         bump_instance(&env);
         Ok(())
+    }
+
+    /// The senior contract only (executive decision 23 Nov): its USDC cover of a union's voucher loss. The USDC
+    /// becomes the union's treasury USDC here; the same value in nIN at the rate in force goes into fund_core's
+    /// junior pool, which lent the voucher, never more than fund_core has booked. Returns the nIN.
+    pub fn cover_from_senior(env: Env, union: Address, usdc: i128) -> Result<i128, Error> {
+        require_not_paused(&env)?;
+        let senior: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Senior)
+            .ok_or(Error::Unauthorized)?;
+        senior.require_auth();
+        if usdc <= 0 {
+            return Err(Error::AmountZero);
+        }
+        let rate = current_rate(&env)?;
+        let core = core_addr(&env)?;
+        let fc = FundCoreClient::new(&env, &core);
+        let nin = core::cmp::min(
+            usdc.checked_mul(rate.inr_per_usd)
+                .map(|v| v / RATE_ONE)
+                .ok_or(Error::CapExceeded)?,
+            fc.voucher_loss(&union),
+        );
+        if nin <= 0 {
+            return Err(Error::AmountZero);
+        }
+        let me = env.current_contract_address();
+        let usdc_addr: Address = get(&env, &DataKey::Usdc);
+        TokenClient::new(&env, &usdc_addr).transfer(&senior, &me, &usdc);
+        let k = DataKey::TreasuryUsdc(union.clone());
+        let held: i128 = env.storage().persistent().get(&k).unwrap_or(0);
+        env.storage().persistent().set(&k, &(held + usdc));
+        bump(&env, &k);
+        StellarAssetClient::new(&env, &nin_addr(&env)).mint(&me, &nin);
+        authorize_pull(&env, &core, nin);
+        fc.cover_voucher_loss(&union, &nin);
+        SeniorCover { union, usdc, nin }.publish(&env);
+        bump_instance(&env);
+        Ok(nin)
     }
 
     /// A leader adds USDC to her union's treasury (executive decision 22 Oct): the USDC stays in

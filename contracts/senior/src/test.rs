@@ -39,9 +39,20 @@ impl MockFx {
     pub fn lp_fee(_env: Env) -> u32 {
         100
     }
+    /// fx_pool pulls the cover's USDC from senior (it then pays nIN into fund_core; not modelled here).
+    pub fn cover_from_senior(env: Env, _union: Address, usdc: i128) -> i128 {
+        let t: Address = env.storage().instance().get(&0u32).unwrap();
+        let senior: Address = env.storage().instance().get(&1u32).unwrap();
+        TokenClient::new(&env, &t).transfer(&senior, env.current_contract_address(), &usdc);
+        usdc * 90
+    }
+    pub fn wire(env: Env, usdc: Address, senior: Address) {
+        env.storage().instance().set(&0u32, &usdc);
+        env.storage().instance().set(&1u32, &senior);
+    }
 }
 
-/// fund_core's guarantee fee: 1,800 rupees waiting.
+/// fund_core: 1,800 rupees of guarantee fee waiting; a voucher loss of ₹9,990 (111 USDC at ₹90) booked.
 #[contract]
 struct MockCore;
 #[contractimpl]
@@ -49,6 +60,9 @@ impl MockCore {
     pub fn take_guarantee_fee(_env: Env, _union: Address, amount: i128) -> i128 {
         assert!(amount <= 1_800 * ONE);
         amount
+    }
+    pub fn voucher_loss(_env: Env, _union: Address) -> i128 {
+        9_990 * ONE
     }
 }
 
@@ -80,6 +94,7 @@ struct S {
     s: SeniorContractClient<'static>,
     usdc: Address,
     lp: Address,
+    fx: Address,
 }
 
 fn setup() -> S {
@@ -95,12 +110,17 @@ fn setup() -> S {
     let roles = env.register(MockRoles, ());
     let lp = env.register(MockLp, ());
     MockLpClient::new(&env, &lp).init(&usdc);
-    let id = env.register(SeniorContract, (admin, usdc.clone(), core, fx, roles));
+    let id = env.register(
+        SeniorContract,
+        (admin, usdc.clone(), core, fx.clone(), roles),
+    );
+    MockFxClient::new(&env, &fx).wire(&usdc, &id);
     S {
         env: env.clone(),
         s: SeniorContractClient::new(&env, &id),
         usdc,
         lp,
+        fx,
     }
 }
 
@@ -176,24 +196,24 @@ fn the_fee_raises_the_index_and_a_cover_lowers_it() {
     let b = t.investor(101 * ONE);
     s.deposit(&b, &(101 * ONE));
     assert!(101 * ONE - s.holding(&b).1 <= 2);
-    // A cover: proposed, refused before 48 hours, then paid; every share falls pro rata.
-    let to = Address::generate(&t.env);
+    // A cover of the union's booked voucher loss (₹9,990 = 111 USDC at ₹90): proposed with a ceiling, refused
+    // before 48 hours, then paid to the union through fx_pool; every share falls pro rata.
     assert_eq!(
-        s.try_propose_cover(&union, &to, &(2_000 * ONE)),
+        s.try_propose_cover(&union, &(2_000 * ONE)),
         Err(Ok(Error::NoCover))
     );
-    s.propose_cover(&union, &to, &(111 * ONE));
+    s.propose_cover(&union, &(500 * ONE));
     assert_eq!(s.try_execute_cover(), Err(Ok(Error::NotReady)));
     t.env.ledger().set_timestamp(T0 + COVER_DELAY);
     assert_eq!(s.execute_cover(), 111 * ONE);
-    assert_eq!(t.bal(&to), 111 * ONE);
+    assert_eq!(t.bal(&t.fx), 111 * ONE);
     assert_eq!(s.total(), 1_000 * ONE);
     // 111 of 1,111 USDC paid out: every share keeps 1,000 / 1,111 of its value.
     assert!((s.holding(&a).1 - 1_010 * ONE * 1_000 / 1_111).abs() <= 3);
     assert!((s.holding(&b).1 - 101 * ONE * 1_000 / 1_111).abs() <= 3);
     assert_eq!(s.pending_cover(), None);
     // Cancel works the same way, and nothing moves.
-    s.propose_cover(&union, &to, &ONE);
+    s.propose_cover(&union, &ONE);
     s.cancel_cover();
     assert_eq!(s.total(), 1_000 * ONE);
 }
@@ -214,7 +234,7 @@ fn exits_wait_14_days_and_stay_within_the_daily_cap() {
     s.request_redeem(&a, &(shares / 2));
     assert_eq!(s.try_redeem(&a), Err(Ok(Error::NotReady)));
     // A cover in the meantime hits the pending shares too.
-    s.propose_cover(&a, &Address::generate(&t.env), &(100 * ONE));
+    s.propose_cover(&a, &(100 * ONE));
     t.env.ledger().set_timestamp(T0 + COVER_DELAY);
     s.execute_cover();
     t.env.ledger().set_timestamp(T0 + UNBOND);
@@ -257,7 +277,7 @@ fn only_the_trust_sets_caps_investors_covers_and_upgrades() {
     assert!(s.try_set_daily_cap(&1).is_err());
     assert!(s.try_set_investor(&x, &true, &kyc, &Tag::Offshore).is_err());
     assert!(s.try_set_paused(&true).is_err());
-    assert!(s.try_propose_cover(&x, &x, &1).is_err());
+    assert!(s.try_propose_cover(&x, &1).is_err());
     assert!(s.try_cancel_cover().is_err());
     assert!(s.try_upgrade(&kyc).is_err());
     assert_eq!(s.upgrade_delay(), UPGRADE_DELAY);
@@ -313,7 +333,6 @@ fn storage_layout_is_frozen() {
     v.push_back(
         Cover {
             union: a.clone(),
-            to: a.clone(),
             usdc: 4,
             eta: 5,
         }
@@ -326,7 +345,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "91deb223a1a9e9f72189efa0ca7686a39cb1be8b7097d524c9ee71b7de8c716e",
+        hex, "f78414754a91f0c0796d3b0bc7ad6fa66be93c348a1546018cd70ed00b90f3d9",
         "senior storage layout changed"
     );
 }

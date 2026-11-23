@@ -144,6 +144,10 @@ pub trait FundCoreTrait {
     fn take_guarantee_fee(union: Address, amount: i128) -> i128;
     // (fee waiting in nIN, fee share in bp).
     fn guarantee_fee(union: Address) -> (i128, u32);
+    // fx_pool only (23 Nov): senior's cover of a voucher loss, as nIN, into the junior pool. Returns what was covered.
+    fn cover_voucher_loss(union: Address, amount: i128) -> i128;
+    // Voucher value lost at defaults and not yet covered by senior.
+    fn voucher_loss(union: Address) -> i128;
     // Whether fund_core knows the union (2 Nov).
     fn union_exists(union: Address) -> bool;
 }

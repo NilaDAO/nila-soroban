@@ -10,6 +10,9 @@
 //!   an investor who exits (`request_redeem`, 14 days, then `redeem`: shares × index at that moment, within the
 //!   daily cap). There is no other way out and no admin withdrawal; but a 48-hour upgrade (trust,
 //!   `nila_common::upgrade`) can change anything, so every `UpgradeProposed` here is watched.
+//! - A default's cash part is junior's loss, its voucher part senior's (23 Nov): fund_core books the voucher value
+//!   lost (`voucher_loss`); the cover sends that much USDC to the union through fx_pool (`cover_from_senior`), which
+//!   pays the same value in nIN back into the junior pool that lent the voucher.
 //! - The machine prepay and the cash of a crop agreement come from junior money (members, sold agreements, and
 //!   during the development period Nila itself as a junior investor), never from here.
 //! - Unaudited: deposits stop at the trust's cap (0 until set).
@@ -18,8 +21,11 @@
 use nila_common::{bump_instance, upgrade, FundCoreClient, RolesClient, TTL_BUMP, TTL_THRESHOLD};
 use nila_math::{haircut_index, index_bump, to_shares, to_underlying, RAY};
 use soroban_sdk::{
+    auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
     contract, contractclient, contracterror, contractevent, contractimpl, contractmeta,
-    contracttype, token::TokenClient, Address, BytesN, Env,
+    contracttype,
+    token::TokenClient,
+    vec, Address, BytesN, Env, IntoVal, Symbol,
 };
 
 contractmeta!(key = "binver", val = "0.3.0");
@@ -115,12 +121,11 @@ pub struct Holding {
     pub request_ts: u64,
 }
 
-/// A loss cover the trust proposed: `usdc` to `to` (an LP who brings the rupees, or the union) for `union`.
+/// A loss cover the trust proposed for `union`: at most `usdc`, paid at `eta` or later.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Cover {
     pub union: Address,
-    pub to: Address,
     pub usdc: i128,
     pub eta: u64,
 }
@@ -147,6 +152,7 @@ pub trait FxTrait {
     fn lp_member(union: Address, lp: Address) -> Option<LpOf>;
     fn id_checked(account: Address) -> bool;
     fn lp_fee() -> u32;
+    fn cover_from_senior(union: Address, usdc: i128) -> i128;
 }
 
 #[contractclient(name = "LpAccountClient")]
@@ -250,7 +256,6 @@ pub struct FeePaid {
 pub struct CoverProposed {
     #[topic]
     pub union: Address,
-    pub to: Address,
     pub usdc: i128,
     pub eta: u64,
 }
@@ -259,8 +264,8 @@ pub struct CoverProposed {
 pub struct CoverPaid {
     #[topic]
     pub union: Address,
-    pub to: Address,
     pub usdc: i128,
+    pub nin: i128,
     pub index: i128,
 }
 
@@ -643,9 +648,9 @@ impl SeniorContract {
 
     // ---------- loss cover ----------
 
-    /// The trust proposes to cover a loss in `union` (a default beyond the junior pool, fund_core's
-    /// `LoanDefaulted.senior_applied`): `usdc` to `to` after 48 hours. One at a time.
-    pub fn propose_cover(env: Env, union: Address, to: Address, usdc: i128) -> Result<u64, Error> {
+    /// The trust proposes to cover the union's voucher loss (fund_core's `voucher_loss`, reported at a default as
+    /// `LoanDefaulted.senior_applied`): at most `usdc`, after 48 hours. One at a time.
+    pub fn propose_cover(env: Env, union: Address, usdc: i128) -> Result<u64, Error> {
         require_admin(&env)?;
         if usdc <= 0 || usdc > i_get(&env, &DataKey::Total) {
             return Err(Error::NoCover);
@@ -655,23 +660,18 @@ impl SeniorContract {
             &DataKey::PendingCover,
             &Cover {
                 union: union.clone(),
-                to: to.clone(),
                 usdc,
                 eta,
             },
         );
-        CoverProposed {
-            union,
-            to,
-            usdc,
-            eta,
-        }
-        .publish(&env);
+        CoverProposed { union, usdc, eta }.publish(&env);
         bump_instance(&env);
         Ok(eta)
     }
 
-    /// After the 48 hours: the cover is paid and the index falls by it.
+    /// After the 48 hours: the USDC for the union's voucher loss at the rate in force (at most what was proposed and
+    /// what the pool holds) goes to the union through fx_pool, which pays it as nIN into the junior pool; the index
+    /// falls by it. Returns the USDC paid.
     pub fn execute_cover(env: Env) -> Result<i128, Error> {
         require_not_paused(&env)?;
         require_admin(&env)?;
@@ -684,30 +684,54 @@ impl SeniorContract {
             return Err(Error::NotReady);
         }
         let total = i_get(&env, &DataKey::Total);
-        if c.usdc > total {
+        let loss = FundCoreClient::new(&env, &get(&env, &DataKey::FundCore)).voucher_loss(&c.union);
+        let f = fresh_fix(&env)?;
+        // The USDC that buys the booked loss at the rate, rounded up.
+        let need = loss
+            .checked_mul(RATE_ONE)
+            .ok_or(Error::Overflow)?
+            .checked_add(f.inr_per_usd - 1)
+            .ok_or(Error::Overflow)?
+            / f.inr_per_usd;
+        let usdc = core::cmp::min(core::cmp::min(need, c.usdc), total);
+        if usdc <= 0 {
             return Err(Error::NoCover);
         }
         let shares = i_get(&env, &DataKey::TotalShares);
         let mut idx = index(&env);
         if shares > 0 {
             let under = to_underlying(&env, shares, idx).ok_or(Error::Overflow)?;
-            idx = haircut_index(&env, idx, under, c.usdc)
+            idx = haircut_index(&env, idx, under, usdc)
                 .ok_or(Error::Overflow)?
                 .1;
             env.storage().instance().set(&DataKey::Index, &idx);
         }
-        i_set(&env, &DataKey::Total, total - c.usdc);
+        i_set(&env, &DataKey::Total, total - usdc);
         env.storage().instance().remove(&DataKey::PendingCover);
-        usdc_token(&env).transfer(&env.current_contract_address(), &c.to, &c.usdc);
+        // fx_pool pulls exactly this USDC from here.
+        let fx_id = get(&env, &DataKey::FxPool);
+        let me = env.current_contract_address();
+        env.authorize_as_current_contract(vec![
+            &env,
+            InvokerContractAuthEntry::Contract(SubContractInvocation {
+                context: ContractContext {
+                    contract: get(&env, &DataKey::Usdc),
+                    fn_name: Symbol::new(&env, "transfer"),
+                    args: (me, fx_id.clone(), usdc).into_val(&env),
+                },
+                sub_invocations: vec![&env],
+            }),
+        ]);
+        let nin = FxClient::new(&env, &fx_id).cover_from_senior(&c.union, &usdc);
         CoverPaid {
             union: c.union,
-            to: c.to,
-            usdc: c.usdc,
+            usdc,
+            nin,
             index: idx,
         }
         .publish(&env);
         bump_instance(&env);
-        Ok(c.usdc)
+        Ok(usdc)
     }
 
     pub fn cancel_cover(env: Env) -> Result<(), Error> {

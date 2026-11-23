@@ -1350,6 +1350,7 @@ fn storage_layout_is_frozen() {
         DataKey::Dues(a.clone(), h.clone()),
         DataKey::GuaranteeFee(a.clone()),
         DataKey::GuaranteeFeeBp,
+        DataKey::VoucherLoss(a.clone()),
         DataKey::ExpiredCash(a.clone()),
     ] {
         v.push_back(k.into_val(&env));
@@ -1484,7 +1485,7 @@ fn storage_layout_is_frozen() {
         .map(|b| std::format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hex, "939ff71f231a80d71624e1ab09d02583b3c03e76934e06db7ef8843bac3514d7",
+        hex, "e1b0f0b2704806158c325c0de6b5003205b80b1374e488c264c97e2320a919e5",
         "fund_core storage layout changed"
     );
 }
@@ -3749,5 +3750,67 @@ fn the_guarantee_fee_reaches_senior_in_usdc_through_an_lp() {
         TokenClient::new(&fx.env, &fx.usdc).balance(&s.address),
         1_000 * NIN + usdc
     );
+    v.assert_conserved();
+}
+
+/// Executive decision 23 Nov: at a default junior carries the cash part, senior the voucher part. fund_core books
+/// the voucher value lost (her investment covered part of it); the trust proposes senior's cover, 48 hours later
+/// the USDC goes to the union through fx_pool and the same value in nIN refills the junior pool that lent it.
+#[test]
+fn a_default_books_the_voucher_loss_and_senior_covers_it_in_usdc() {
+    let v = vsetup();
+    let (fx, c, mc, s) = (&v.fx, v.fx.core(), v.mach(), v.fx.senior());
+    let inv = Address::generate(&fx.env);
+    StellarAssetClient::new(&fx.env, &fx.usdc).mint(&inv, &(1_000 * NIN));
+    s.set_investor(
+        &inv,
+        &true,
+        &loan_id(&fx.env, 0x71),
+        &nila_senior::Tag::Offshore,
+    );
+    s.deposit(&inv, &(1_000 * NIN));
+    let id = loan_id(&fx.env, 1);
+    c.attest_food_token(
+        &fx.attester,
+        &fx.union,
+        &id,
+        &fx.borrower,
+        &(300 * NIN),
+        &400,
+    );
+    let jm0 = c.get_junior_market(&fx.union);
+    c.draw_loan(&fx.union, &fx.borrower, &id, &(300 * NIN), &400);
+    mc.claim(&v.owner, &v.machine, &fx.union, &id, &200, &200);
+    c.report_maturity(&fx.oracle, &fx.union, &id, &T0);
+    fx.at(T0 + 111 * 86_400 + 1);
+    let index0 = c.get_junior_market(&fx.union).index;
+    c.mark_default(&fx.union, &id);
+    // Her 2 unused hours' reserve takes ₹2,900 off the ₹5,800; her ₹2,000 invested covers the voucher next; ₹900 is
+    // senior's. Her cash part (₹300) is junior's: the pool's value falls by that, not by the voucher loss.
+    assert_eq!(c.voucher_loss(&fx.union), 2 * HOUR - 2_000 * NIN);
+    let jm1 = c.get_junior_market(&fx.union);
+    assert!(jm1.index < index0);
+    v.assert_conserved();
+    // The trust proposes the cover; 48 hours on it is paid at the rate in force (₹50 here).
+    let treasury_usdc = fx.fx().treasury_usdc(&fx.union);
+    s.propose_cover(&fx.union, &(100 * NIN));
+    fx.at(T0 + 113 * 86_400 + 2);
+    fx.fx().override_rate(&(50 * NIN), &(T0 + 114 * 86_400));
+    let paid = s.execute_cover();
+    assert_eq!(paid, 18 * NIN); // ₹900 at ₹50
+    assert_eq!(c.voucher_loss(&fx.union), 0);
+    assert_eq!(fx.fx().treasury_usdc(&fx.union), treasury_usdc + 18 * NIN);
+    assert_eq!(c.get_junior_market(&fx.union).cash, jm1.cash + 900 * NIN);
+    assert_eq!(s.total(), 1_000 * NIN - 18 * NIN);
+    assert_eq!(
+        c.get_junior_market(&fx.union).total_borrows,
+        jm0.total_borrows
+    );
+    // Nothing left to cover: a second cover finds no loss.
+    s.propose_cover(&fx.union, &(100 * NIN));
+    fx.at(T0 + 116 * 86_400);
+    fx.fx()
+        .override_rate(&(50 * NIN), &(T0 + 116 * 86_400 + 3_600));
+    assert!(s.try_execute_cover().is_err());
     v.assert_conserved();
 }

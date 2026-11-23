@@ -87,7 +87,8 @@ Revoke keeps the union's `Leader`, `UnionRole` and `UnionSettings` entries; whil
 | `Dues(union, token_id)` | persistent | `Dues{owners: Vec<OwnerDue{owner, amount}>, credit, union_due}` (1 Nov, owner split): owners' postpaid parts still owed on a voucher, oldest claim first (max 8 owners), her repayment of the voucher's value not yet paid on, and (2 Nov) the union's parts of the price, into its treasury after the owners, back to the junior pool at a default (23 Nov) |
 | `CropCalendar` | instance | Address of the crop_calendar contract (25 Oct) |
 | `GuaranteeFee(union)` | persistent | i128 the guarantee fee the union's vouchers paid and senior has not yet taken (23 Nov): nIN in fund_core outside every pool until an LP turns it into USDC for the senior contract (`take_guarantee_fee`); counted in the conservation check and `cash_room` |
-| `GuaranteeFeeBp` | instance | u32 the fee: this share of every voucher's interest, in bp (0 until the trust sets it, `set_guarantee_fee`) |
+| `VoucherLoss(union)` | persistent | i128 voucher value lost at defaults, not yet covered by senior (23 Nov: junior carries a default's cash part, senior its voucher part); `cover_voucher_loss` (from fx_pool, senior's USDC as nIN) refills junior cash |
+| `GuaranteeFeeBp` | instance | u32 the fee: this share of every voucher's interest, in bp (unset = 10,000, all of it: senior earns the voucher interest; `set_guarantee_fee` can lower it) |
 | `ExpiredCash(union)` | persistent | i128 expired cash the treasury paid for (`cover_expired_escrow`) and still in the drawer; a cash payout above the open batches takes it and its nIN goes back to the treasury (review 5 Nov) |
 
 ## crop_calendar (25 Oct)
@@ -152,9 +153,11 @@ Revoke keeps the union's `Leader`, `UnionRole` and `UnionSettings` entries; whil
 | `Index` | instance | i128 the pool's index in ray (unset = 1 ray): value = shares × index |
 | `TotalShares` | instance | i128 all shares, free and pending |
 | `Holding(investor)` | persistent | `Holding{shares, pending, request_ts}`: free shares and those asked out, since when (14 days) |
-| `PendingCover` | instance | `Cover{union, to, usdc, eta}`: the one loss cover waiting (48 hours) |
+| `PendingCover` | instance | `Cover{union, usdc, eta}`: the one cover of a union's voucher loss waiting (48 hours), at most `usdc` |
 
-USDC leaves only by `execute_cover` (48 hours after the trust proposed it; the index falls) and `redeem` (14 days
+USDC leaves only by `execute_cover` (48 hours after the trust proposed it: fund_core's `voucher_loss` for the union at the
+rate in force, to the union's treasury USDC in fx_pool, which pays the same value in nIN into the junior pool; the
+index falls) and `redeem` (14 days
 after the request, at the index of then, within the daily cap). There is no admin withdrawal. A 48-hour upgrade
 (the trust, `nila_common::upgrade`) can change anything, so `UpgradeProposed` on this contract is watched. Error
 codes start at 101, apart from fund_core's and fx_pool's.

@@ -128,14 +128,14 @@ pub struct LoanDefaulted {
     pub token_id: BytesN<32>,
     pub member_applied: i128,
     pub junior_applied: i128,
-    // Since 23 Nov: the loss beyond what the junior pool holds, which the senior guarantee covers.
+    // Since 23 Nov: the voucher value lost, booked for the senior contract to cover (`VoucherLoss`).
     pub senior_applied: i128,
     // Interest accrued and unpaid at the default, written off with the principal.
     pub interest_written_off: i128,
     // Owners' pending parts paid at the default (D17), and any left unpaid for lack of cash.
     pub dues_paid: i128,
     pub dues_unpaid: i128,
-    // The voucher value her investment covered, and the rest (since 23 Nov a junior loss, inside junior_applied).
+    // The voucher value her investment covered, and the rest (since 23 Nov senior's, as senior_applied).
     pub senior_prepay_covered: i128,
     pub senior_prepay_lost: i128,
 }
@@ -271,4 +271,14 @@ pub struct GuaranteeFeeTaken {
     pub union: Address,
     pub amount: i128,
     pub cash_settled: i128,
+}
+
+// Senior's USDC cover of a voucher loss reached the junior pool as nIN (23 Nov); `left` is still uncovered.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoucherLossCovered {
+    #[topic]
+    pub union: Address,
+    pub amount: i128,
+    pub left: i128,
 }

@@ -108,6 +108,10 @@ pub enum DataKey {
     // senior is a guarantee pool only): nIN held in fund_core outside every pool until an LP turns it into
     // USDC for the senior contract (`take_guarantee_fee`). Replaces the senior lending pool's income.
     GuaranteeFee(Address),
+    // Voucher value lost at defaults and not yet covered by senior (executive decision 23 Nov: junior carries a
+    // default's cash part, senior its voucher part). The junior pool lent it and keeps its value; senior's cover
+    // (`cover_voucher_loss`, through fx_pool) brings the cash back.
+    VoucherLoss(Address),
     // The guarantee fee: this share of every voucher's interest, in bp (instance; unset = `GUARANTEE_FEE_BP`, all).
     GuaranteeFeeBp,
     // Expired cash the treasury paid for and still in the union's drawer (review 5 Nov): a payout
@@ -1400,6 +1404,36 @@ impl FundCore {
         Ok(settled)
     }
 
+    // fx_pool only (`cover_from_senior`): the senior contract's USDC cover of a voucher loss, as nIN at the day's
+    // rate, into the junior pool's cash (23 Nov). Never more than is booked. Returns what was covered.
+    pub fn cover_voucher_loss(env: Env, union: Address, amount: i128) -> Result<i128, Error> {
+        require_not_paused(&env)?;
+        let fx = require_fx_pool(&env)?;
+        require_positive(amount)?;
+        let k = DataKey::VoucherLoss(union.clone());
+        if amount > p_i128(&env, &k) {
+            return Err(Error::AboveOwed);
+        }
+        nin(&env).transfer(&fx, env.current_contract_address(), &amount);
+        p_add(&env, &k, -amount)?;
+        let mut jm = load_market(&env, true, &union);
+        jm.cash += amount;
+        save_market(&env, true, &union, &jm);
+        VoucherLossCovered {
+            union,
+            amount,
+            left: p_i128(&env, &k),
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(amount)
+    }
+
+    // Voucher value lost at defaults and not yet covered by senior (23 Nov).
+    pub fn voucher_loss(env: Env, union: Address) -> i128 {
+        p_i128(&env, &DataKey::VoucherLoss(union))
+    }
+
     // ---------- loans ----------
 
     // Food token fact (F2): the attester copies a Polygon FoodToken from the crop plan with
@@ -2155,10 +2189,9 @@ impl FundCore {
         jm.cash -= m_vi;
         voucher_interest(&env, &union, &mut jm, m_vi)?;
 
-        // 2. Unpaid principal and voucher value: the junior pool (index haircut). Beyond what it holds is the
-        //    loss the guarantee is for (`senior_applied`: the senior contract covers it in USDC, 23 Nov). Unpaid
-        //    interest beyond her investment was never booked and is written off.
-        let rest = loss - m_p + v_rest - m_s;
+        // 2. Unpaid principal: the junior pool (index haircut). Unpaid interest beyond her investment was never
+        //    booked and is written off.
+        let rest = loss - m_p;
         let (junior_applied, idx) = haircut_index(
             &env,
             jm.index,
@@ -2168,8 +2201,17 @@ impl FundCore {
         .ok_or(Error::Overflow)?;
         jm.index = idx;
         save_market(&env, true, &union, &jm);
-        let senior_applied = rest - junior_applied;
+        // 3. Unpaid voucher value: senior's (23 Nov). The junior pool keeps its value; the loss is booked for the
+        //    senior contract to cover in USDC (`senior_applied`; its cover refills the pool's cash).
         let senior_prepay_lost = v_rest - m_s;
+        if senior_prepay_lost > 0 {
+            p_add(
+                &env,
+                &DataKey::VoucherLoss(union.clone()),
+                senior_prepay_lost,
+            )?;
+        }
+        let senior_applied = senior_prepay_lost;
         if let Some(b) = book.as_mut() {
             b.repaid = b.value;
             b.interest_paid = b.interest_accrued;
