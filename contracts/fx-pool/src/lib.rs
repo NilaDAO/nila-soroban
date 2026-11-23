@@ -72,9 +72,13 @@ const NIN_UNIT: i128 = 10_000_000;
 pub const MAX_RATE_AGE: u64 = 2 * DAY;
 /// A Reflector price older than this is stale (the forex oracle updates every 5 minutes).
 pub const REFLECTOR_MAX_AGE: u64 = 15 * 60;
-/// Default band for the attester's fix: at most 5% from the last one (R77); beyond, the trust
-/// overrides. Open and adjustable (executive decision, 12 Oct): `set_rate_band`.
-pub const DEFAULT_RATE_BAND_BP: u32 = 500;
+/// The circuit breaker (23 Nov): Reflector's latest price against the average of its last 12 (an hour at 5 minutes),
+/// at most 3% apart.
+pub const REFLECTOR_RECORDS: u32 = 12;
+pub const REFLECTOR_BAND_BP: i128 = 300;
+/// Default band for the attester's fix: at most 3% from Reflector's latest price, or from the last fix when Reflector
+/// is unset (executive decision 23 Nov; was 5% from the last fix, R77). Adjustable: `set_rate_band`.
+pub const DEFAULT_RATE_BAND_BP: u32 = 300;
 /// The LP's fee: 1% (R21).
 pub const DEFAULT_LP_FEE_BP: u32 = 100;
 /// Upgrade timelock at deploy: 48 hours (R75, C15); short builds rehearse it in seconds.
@@ -139,6 +143,9 @@ pub enum Error {
     /// The LP's account `pay` did not bring fx_pool the USDC asked (review 5 Nov).
     NotPaid = 38,
     // 39 (SeniorFeeFirst) removed 23 Nov: senior's fee rides on the Collect instead.
+    /// Reflector's latest INR price is more than 3% from its own last hour's average: no rate until it settles
+    /// (executive decision 23 Nov, a circuit breaker).
+    SuspiciousRate = 40,
 }
 
 /// INR per USD, 7 decimals (nIN per USDC), set by the attester from the FBIL fix (R77).
@@ -254,7 +261,8 @@ pub trait SeniorView {
 
 #[soroban_sdk::contractclient(name = "ReflectorClient")]
 pub trait ReflectorOracle {
-    fn lastprice(env: Env, asset: ReflectorAsset) -> Option<ReflectorPrice>;
+    /// The last `records` prices, newest first (Reflector v7).
+    fn prices(env: Env, asset: ReflectorAsset, records: u32) -> Option<Vec<ReflectorPrice>>;
     fn decimals(env: Env) -> u32;
 }
 
@@ -598,45 +606,67 @@ fn settle(env: &Env, union: &Address, amount: i128) -> i128 {
     took
 }
 
-/// Reflector's INR/USD as a fix, if set, readable and fresh. Reflector prices INR in USD (USD per INR,
-/// `decimals`); the fix is INR per USD, 7 decimals.
-fn reflector_rate(env: &Env) -> Option<RateFix> {
+/// Reflector's last hour of INR prices (newest first), if set and readable.
+fn reflector_prices(env: &Env) -> Option<(ReflectorCfg, Vec<ReflectorPrice>)> {
     let cfg: ReflectorCfg = env.storage().instance().get(&DataKey::Reflector)?;
     let asset = ReflectorAsset::Other(Symbol::new(env, "INR"));
-    let p = ReflectorClient::new(env, &cfg.oracle)
-        .try_lastprice(&asset)
+    let ps = ReflectorClient::new(env, &cfg.oracle)
+        .try_prices(&asset, &REFLECTOR_RECORDS)
         .ok()?
         .ok()??;
-    let now = env.ledger().timestamp();
-    if p.price <= 0 || p.timestamp > now || now - p.timestamp > REFLECTOR_MAX_AGE {
-        return None;
-    }
-    let inr_per_usd = 10i128
+    (!ps.is_empty()).then_some((cfg, ps))
+}
+
+/// Reflector prices INR in USD (USD per INR, `decimals`); a fix is INR per USD, 7 decimals.
+fn to_fix_rate(cfg: &ReflectorCfg, price: i128) -> Option<i128> {
+    10i128
         .checked_pow(cfg.decimals)?
         .checked_mul(RATE_ONE)?
-        .checked_div(p.price)?;
-    (inr_per_usd > 0).then(|| RateFix {
+        .checked_div(price)
+        .filter(|r| *r > 0)
+}
+
+/// Reflector's INR/USD as a fix: none when unset, unreadable or stale (then the attester's fix stands in);
+/// `SuspiciousRate` when its latest price is more than 3% from its last hour's average (then no rate at all).
+fn reflector_rate(env: &Env) -> Result<Option<RateFix>, Error> {
+    let Some((cfg, ps)) = reflector_prices(env) else {
+        return Ok(None);
+    };
+    let p = ps.get(0).ok_or(Error::StaleOracle)?;
+    let now = env.ledger().timestamp();
+    if p.price <= 0 || p.timestamp > now || now - p.timestamp > REFLECTOR_MAX_AGE {
+        return Ok(None);
+    }
+    let (mut sum, mut n) = (0i128, 0i128);
+    for q in ps.iter() {
+        if q.price > 0 {
+            sum += q.price;
+            n += 1;
+        }
+    }
+    let avg = sum / n;
+    if (p.price - avg).abs() * 10_000 > avg * REFLECTOR_BAND_BP {
+        return Err(Error::SuspiciousRate);
+    }
+    Ok(to_fix_rate(&cfg, p.price).map(|inr_per_usd| RateFix {
         inr_per_usd,
         valid_until: p.timestamp + REFLECTOR_MAX_AGE,
         set_by: cfg.oracle,
-    })
+    }))
 }
 
-/// The rate in force: the trust's override while valid, else Reflector while fresh, else the attester's
-/// fix while valid (T2 rows 8–9).
+/// The rate in force (T2 rows 8–9; 23 Nov: no trust override): Reflector while fresh and within its circuit breaker,
+/// else the attester's fix while valid.
 pub(crate) fn current_rate(env: &Env) -> Result<RateFix, Error> {
-    let now = env.ledger().timestamp();
-    let fix: Option<RateFix> = env.storage().instance().get(&DataKey::Rate);
-    let valid = fix.filter(|f| now <= f.valid_until);
-    if let Some(f) = &valid {
-        if f.set_by == get::<Address>(env, &DataKey::Admin) {
-            return Ok(f.clone());
-        }
-    }
-    if let Some(r) = reflector_rate(env) {
+    if let Some(r) = reflector_rate(env)? {
         return Ok(r);
     }
-    valid.ok_or(Error::StaleOracle)
+    let now = env.ledger().timestamp();
+    env.storage()
+        .instance()
+        .get::<_, RateFix>(&DataKey::Rate)
+        .filter(|f| now <= f.valid_until)
+        .ok_or(Error::StaleOracle)
 }
 
 /// Her own swap: not paused, a leader or title holder of the union (self mode, executive decision 4 Nov), her
@@ -924,8 +954,7 @@ impl FxPoolContract {
             return Err(Error::Unauthorized);
         }
         let now = env.ledger().timestamp();
-        // At most one attester fix per 12 hours (executive decision 2 Nov, review H4); the trust's
-        // `override_rate` is not limited.
+        // At most one attester fix per 12 hours (executive decision 2 Nov, review H4).
         let at: Option<u64> = env.storage().instance().get(&DataKey::AttesterFixAt);
         if at.is_some_and(|t| now < t + RATE_MIN_GAP) {
             return Err(Error::RateTooSoon);
@@ -933,21 +962,25 @@ impl FxPoolContract {
         if inr_per_usd <= 0 || valid_until <= now || valid_until > now + MAX_RATE_AGE {
             return Err(Error::BadRate);
         }
-        // The attester only follows the market: within the band of the last fix (default 5%).
-        // The first fix, or a bigger move, is the trust's (`override_rate`).
-        let last: RateFix = env
-            .storage()
-            .instance()
-            .get(&DataKey::Rate)
-            .ok_or(Error::BadRate)?;
-        let band_bp: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::RateBandBp)
-            .unwrap_or(DEFAULT_RATE_BAND_BP);
-        let band = last.inr_per_usd * i128::from(band_bp) / 10_000;
-        if (inr_per_usd - last.inr_per_usd).abs() > band {
-            return Err(Error::BadRate);
+        // The attester follows the market (23 Nov): within the band (default 3%) of Reflector's latest price, or of
+        // the last fix while Reflector is unset; the very first fix has nothing to follow.
+        let reference = match reflector_prices(&env) {
+            Some((cfg, ps)) => ps.get(0).and_then(|p| to_fix_rate(&cfg, p.price)),
+            None => env
+                .storage()
+                .instance()
+                .get::<_, RateFix>(&DataKey::Rate)
+                .map(|f| f.inr_per_usd),
+        };
+        if let Some(last) = reference {
+            let band_bp: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::RateBandBp)
+                .unwrap_or(DEFAULT_RATE_BAND_BP);
+            if (inr_per_usd - last).abs() > last * i128::from(band_bp) / 10_000 {
+                return Err(Error::BadRate);
+            }
         }
         env.storage().instance().set(
             &DataKey::Rate,
@@ -1000,33 +1033,6 @@ impl FxPoolContract {
             None => env.storage().instance().remove(&DataKey::Reflector),
         }
         ReflectorSet { oracle }.publish(&env);
-        bump_instance(&env);
-        Ok(())
-    }
-
-    /// The trust sets the first fix, or one beyond the attester's band (evented, R77): it wins over Reflector
-    /// while valid.
-    pub fn override_rate(env: Env, inr_per_usd: i128, valid_until: u64) -> Result<(), Error> {
-        require_admin(&env)?;
-        let now = env.ledger().timestamp();
-        if inr_per_usd <= 0 || valid_until <= now || valid_until > now + MAX_RATE_AGE {
-            return Err(Error::BadRate);
-        }
-        let admin: Address = get(&env, &DataKey::Admin);
-        env.storage().instance().set(
-            &DataKey::Rate,
-            &RateFix {
-                inr_per_usd,
-                valid_until,
-                set_by: admin.clone(),
-            },
-        );
-        RateSet {
-            inr_per_usd,
-            valid_until,
-            set_by: admin,
-        }
-        .publish(&env);
         bump_instance(&env);
         Ok(())
     }
@@ -1414,3 +1420,34 @@ pub use lp::{LpMember, LpPosition, LpQuote, Offer, OfferKind, OfferState, Quote,
 
 #[cfg(test)]
 mod test;
+
+#[cfg(any(test, feature = "test-rate", feature = "demo-upgrade-delay"))]
+#[contractimpl]
+impl FxPoolContract {
+    /// Test and demo builds only (23 Nov: the trust's override is removed from mainnet): set the stored fix as if
+    /// the attester had, so a test or demo deployment has a rate without Reflector.
+    pub fn override_rate(env: Env, inr_per_usd: i128, valid_until: u64) -> Result<(), Error> {
+        require_admin(&env)?;
+        let now = env.ledger().timestamp();
+        if inr_per_usd <= 0 || valid_until <= now || valid_until > now + MAX_RATE_AGE {
+            return Err(Error::BadRate);
+        }
+        let admin: Address = get(&env, &DataKey::Admin);
+        env.storage().instance().set(
+            &DataKey::Rate,
+            &RateFix {
+                inr_per_usd,
+                valid_until,
+                set_by: admin.clone(),
+            },
+        );
+        RateSet {
+            inr_per_usd,
+            valid_until,
+            set_by: admin,
+        }
+        .publish(&env);
+        bump_instance(&env);
+        Ok(())
+    }
+}

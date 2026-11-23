@@ -24,7 +24,7 @@ failure handled by the trust (`roles.revoke_union`), not a contract one. This is
 
 | Key | Holds | State on mainnet (19 Nov) | If stolen |
 |---|---|---|---|
-| **Trust admin** `GC2V…5U3E` | Admin of all eight contracts: upgrade, pause, caps, roles, rate override | Native **3-of-5** (5 signers weight 1, thresholds 3/3/3; Carst's Ledger is one of the five) | §3.1 |
+| **Trust admin** `GC2V…5U3E` | Admin of all eight contracts: upgrade, pause, caps, roles, the Reflector oracle (no rate override since 23 Nov) | Native **3-of-5** (5 signers weight 1, thresholds 3/3/3; Carst's Ledger is one of the five) | §3.1 |
 | **Union account** (Mother Theresa `GCDS…EXW`) | Leaders, union settings, machine prices | Native **2-of-3** (3 leaders weight 1, thresholds 2, master 0) | §3.2 |
 | **Leader** (one G key each, Privy) | Draws and desk work for members in a session, cash scans, offers, one half of a recovery | Single key per leader | §3.3 |
 | **Member** (Privy Ed25519, or a P-256 device key on a keypad phone) | Her account: debt, investment, value out | Single key; recoverable only by §3.4 | §3.4 |
@@ -96,8 +96,9 @@ Each: what an attacker gains, what stops or limits it in code, what is **not** c
 - **Compromise — titles and food tokens:** it can attest a title or a crop allowance that is not real. A draw still
   needs the member's signature and a leader, and lending stays within the union's cash; `enforce_token_amount` is
   off (the allowance is a recommendation, 10 Oct).
-- **Compromise — rate:** a fix at most every 12 hours, within the band of the last fix (5 %), valid at most 2 days
-  (`fx_pool.set_rate`). Over a day it can move the rate by about 10 %. The trust overrides (`override_rate`).
+- **Compromise — rate:** a fix at most every 12 hours, within 3 % of Reflector's latest price (or of the last fix
+  while Reflector is unset), valid at most 2 days (`fx_pool.set_rate`). Once Reflector is set the fix is only the
+  fallback while Reflector is stale. There is no trust override on mainnet builds (23 Nov).
 - **Alerts:** A12 (rate fix more than 2 % from the reference), A13 (rate older than 36 h), A14 (attester XLM low).
 
 ### 3.6 Satellite-oracle failure or compromise (end of season)
@@ -114,7 +115,10 @@ Each: what an attacker gains, what stops or limits it in code, what is **not** c
 - **Today:** the node's beat posts Chainlink USD/INR (read on Polygon) as the attester's fix every 12 h; the fix
   is valid 2 days. A stale or missing fix makes rate-priced calls refuse (USDC into the treasury, swaps, LP accept,
   senior mint) rather than use an old rate. Read 19 Nov: 93.448 INR/USD, valid to 21 Nov.
-- **After T2-B:** Reflector SEP-40 price with a staleness guard; the trust's override still wins (plan 051 B).
+- **After T2-B (23 Nov):** Reflector's forex price (SEP-40, `prices`, the last hour) is the rate while at most
+  15 minutes old; the attester's fix stands in while it is stale. **Circuit breaker:** a latest price more than 3 %
+  from Reflector's own last-hour average stops every rate-priced call (`SuspiciousRate`) until it settles; no
+  fallback and no override then. Not covered by the breaker: a feed that is consistently wrong (no second source).
 - **Alerts:** A13, A12.
 
 ### 3.8 Anchor settlement failure (LP offers, SEP-24)

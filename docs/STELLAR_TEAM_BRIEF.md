@@ -182,7 +182,7 @@ Aligned to TAD §7 and the tranche table (§9). Honest scope for this tree:
 | Item | TAD home | Status |
 | --- | --- | --- |
 | Full `fx_pool` (mint/redeem, ±2% band, daily USDC-out cap enforcement, cash-scan DISBURSE/INVEST/REPAY, redeem-order and cash-offer books) | §5.2, §7.1 FX table | Built: cash scan and cash-out (C3), senior route (C5a), LP Bring/Collect offers with the daily cap (C5b), `quote` (C9); attester fix with a 5% band instead of ±2% |
-| Reflector INR/USD (SEP-40), staleness guard, signed-fix override | §4.3, Tranche 2-B | Not integrated |
+| Reflector INR/USD (SEP-40), staleness guard, circuit breaker (±3 % of its last hour), attester's fix as fallback; no trust override (23 Nov) | §4.3, Tranche 2-B | Built (fx_pool, lane B) |
 | CCTP EVM → native Circle USDC | §5.6, Tranche 2-A | Not started |
 | Anchor Platform (SEP-1/10/12/24/38), membership at SEP-10 | §5.4, Tranche 1-A | Not this repo: nila-anchor (Nov 7) |
 | Privy + sponsored reserves | §5.3, Tranche 1-B/C | Not this repo |

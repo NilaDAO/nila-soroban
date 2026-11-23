@@ -22,3 +22,5 @@ soroban-sdk = { workspace = true, features = ["testutils"] }
 demo-upgrade-delay = []
 # One day = ten seconds, so a testnet rehearsal reaches escrow and cash-out expiry. Never for mainnet.
 testnet-short-windows = []
+# Tests (fund_core's) only: `override_rate`, a fix set without the attester. Never for mainnet (demo builds have it too).
+test-rate = []

@@ -19,7 +19,7 @@ nila-common = { workspace = true }
 soroban-sdk = { workspace = true, features = ["testutils"] }
 nila-roles = { path = "../roles" }
 nila-land-title = { path = "../land-title" }
-nila-fx-pool = { path = "../fx-pool" }
+nila-fx-pool = { path = "../fx-pool", features = ["test-rate"] }
 nila-machinery = { path = "../machinery" }
 nila-crop-calendar = { path = "../crop-calendar" }
 nila-senior = { path = "../senior" }
