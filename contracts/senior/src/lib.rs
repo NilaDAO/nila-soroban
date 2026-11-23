@@ -42,6 +42,12 @@ contractmeta!(
     val = "Nila senior: a guarantee pool only; USDC grows by the vouchers' guarantee fee, pays only loss cover"
 );
 
+#[cfg(feature = "testnet-short-windows")]
+contractmeta!(
+    key = "windows",
+    val = "testnet-short: one day is one second"
+);
+
 #[cfg(not(feature = "demo-upgrade-delay"))]
 pub const UPGRADE_DELAY: u64 = upgrade::DEFAULT_DELAY;
 #[cfg(feature = "demo-upgrade-delay")]
@@ -51,7 +57,11 @@ pub const UPGRADE_DELAY: u64 = 60;
 pub const RATE_ONE: i128 = 10_000_000;
 /// Senior USDC out a day (UTC) at launch: 2,500 USDC (executive decision 19 Nov); `set_daily_cap` changes it.
 pub const DEFAULT_DAILY_CAP: i128 = 2_500 * 10_000_000;
+#[cfg(not(feature = "testnet-short-windows"))]
 const DAY: u64 = 86_400;
+/// One day is one second, so a rehearsal reaches the exit's 14 days and a cover's 48 hours. Never for mainnet.
+#[cfg(feature = "testnet-short-windows")]
+const DAY: u64 = 1;
 /// An exit waits 14 days, so no investor leaves just ahead of a loss it knows of.
 pub const UNBOND: u64 = 14 * DAY;
 /// A loss cover waits 48 hours after the trust proposes it, so it can be seen and stopped.
