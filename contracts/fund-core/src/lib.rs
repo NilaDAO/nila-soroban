@@ -1246,7 +1246,9 @@ impl FundCore {
 
     // ---------- junior (members of the union) ----------
 
-    // Cash-scan INVEST: fx_pool pays the nIN in for her (R13, R25).
+    // Cash-scan INVEST: fx_pool pays the nIN in for her (R13, R25). A title holder of the union, or a leader of it
+    // without a title (executive decision 23 Nov: during the development period Nila funds the vouchers as junior
+    // through a leader).
     pub fn deposit_junior(
         env: Env,
         union: Address,
@@ -1254,7 +1256,9 @@ impl FundCore {
         amount: i128,
     ) -> Result<(), Error> {
         require_not_paused(&env)?;
-        if !holds_title(&env, &union, &member) {
+        if !holds_title(&env, &union, &member)
+            && !RolesClient::new(&env, &cfg(&env).roles).is_leader(&union, &member)
+        {
             return Err(Error::NftRequired);
         }
         let shares = deposit(&env, true, &union, &member, amount)?;

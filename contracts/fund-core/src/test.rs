@@ -2785,6 +2785,10 @@ fn a_title_in_any_union_makes_her_junior_never_senior() {
             .unwrap_err(),
         Ok(Error::NftRequired)
     );
+    // A leader of the union invests without a title (23 Nov: Nila funds vouchers as junior through a leader).
+    StellarAssetClient::new(&fx.env, &fx.nin).mint(&fx.fx_id, &NIN);
+    fx.core().deposit_junior(&fx.union, &fx.leader, &NIN);
+    assert!(fx.core().position(&fx.union, &fx.leader).invested > 0);
     f.override_rate(&(95 * NIN), &(T0 + 86_400));
     // The attester's band is adjustable by the trust.
     f.set_rate_band(&1_000);
