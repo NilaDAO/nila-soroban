@@ -21,3 +21,5 @@ soroban-sdk = { workspace = true, features = ["testutils"] }
 [features]
 # Demo builds only: a 60-second upgrade timelock (in-place upgrades keep the demo state). Never for mainnet.
 demo-upgrade-delay = []
+# One day = one second, so a rehearsal reaches exits and covers. Never for mainnet.
+testnet-short-windows = []
