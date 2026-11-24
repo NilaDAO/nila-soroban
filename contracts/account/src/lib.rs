@@ -207,6 +207,14 @@ pub struct SessionStarted {
     pub until: u64,
 }
 
+/// A session opened by a leader with the member's SMS code (`start_session_by_sms`): which leader.
+#[contractevent]
+pub struct SessionBySms {
+    #[topic]
+    pub leader: Address,
+    pub until: u64,
+}
+
 #[contractevent]
 pub struct SessionUsed {
     pub leader: Address,
@@ -473,6 +481,31 @@ impl AccountContract {
         let until = now + len;
         env.storage().instance().set(&DataKey::Session, &until);
         SessionStarted { until }.publish(&env);
+        bump_instance(&env);
+        Ok(until)
+    }
+
+    /// Leader OTP (executive decision 24 Nov): the same session, opened without the member's phone
+    /// signing. One leader of the union and the union's SMS key together; the node signs with the SMS
+    /// key only after the code it sent to the member's number comes back from the leader. Same
+    /// session as `start_session` (the union's length, its contract list, never this account or the
+    /// USDC); never while frozen. The help QR (`start_session`) stays the path without the node.
+    pub fn start_session_by_sms(env: Env, leader: Address) -> Result<u64, Error> {
+        if frozen(&env) {
+            return Err(Error::Frozen);
+        }
+        let union = union_of(&env)?;
+        let st = settings(&env)?;
+        let sms = st.sms_key.ok_or(Error::NoSmsKey)?;
+        leader.require_auth();
+        sms.require_auth();
+        if !is_leader(&env, &union, &leader) {
+            return Err(Error::NotLeaders);
+        }
+        let until = env.ledger().timestamp() + st.session_len;
+        env.storage().instance().set(&DataKey::Session, &until);
+        SessionStarted { until }.publish(&env);
+        SessionBySms { leader, until }.publish(&env);
         bump_instance(&env);
         Ok(until)
     }
