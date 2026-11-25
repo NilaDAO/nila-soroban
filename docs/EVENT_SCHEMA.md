@@ -142,18 +142,18 @@ Source: `contracts/senior/`.
 
 | Event (`name`) | Topics after the name | Data fields | Meaning |
 |---|---|---|---|
-| `admin_set` | — | `admin`: Address |  [src](../contracts/senior/src/lib.rs#L167) |
-| `cap_set` | — | `usdc`: i128 |  [src](../contracts/senior/src/lib.rs#L177) |
-| `cover_cancelled` | `union`: Address | `usdc`: i128 |  [src](../contracts/senior/src/lib.rs#L246) |
-| `cover_paid` | `union`: Address | `usdc`: i128<br>`nin`: i128<br>`index`: i128 |  [src](../contracts/senior/src/lib.rs#L237) |
-| `cover_proposed` | `union`: Address | `usdc`: i128<br>`eta`: u64 |  [src](../contracts/senior/src/lib.rs#L229) |
-| `daily_cap_set` | — | `usdc`: i128 |  [src](../contracts/senior/src/lib.rs#L182) |
-| `deposited` | `investor`: Address | `tag`: Tag<br>`usdc`: i128<br>`shares`: i128 |  [src](../contracts/senior/src/lib.rs#L196) |
-| `fee_paid` | `union`: Address | `inr`: i128<br>`usdc`: i128<br>`index`: i128 |  [src](../contracts/senior/src/lib.rs#L220) |
-| `investor_set` | `investor`: Address | `accepted`: bool<br>`kyc_ref`: BytesN<32><br>`tag`: Tag |  [src](../contracts/senior/src/lib.rs#L187) |
-| `paused_set` | — | `paused`: bool |  [src](../contracts/senior/src/lib.rs#L172) |
-| `redeem_requested` | `investor`: Address | `shares`: i128 |  [src](../contracts/senior/src/lib.rs#L205) |
-| `redeemed` | `investor`: Address | `shares`: i128<br>`usdc`: i128 |  [src](../contracts/senior/src/lib.rs#L212) |
+| `admin_set` | — | `admin`: Address |  [src](../contracts/senior/src/lib.rs#L177) |
+| `cap_set` | — | `usdc`: i128 |  [src](../contracts/senior/src/lib.rs#L187) |
+| `cover_cancelled` | `union`: Address | `usdc`: i128 |  [src](../contracts/senior/src/lib.rs#L256) |
+| `cover_paid` | `union`: Address | `usdc`: i128<br>`nin`: i128<br>`index`: i128 |  [src](../contracts/senior/src/lib.rs#L247) |
+| `cover_proposed` | `union`: Address | `usdc`: i128<br>`eta`: u64 |  [src](../contracts/senior/src/lib.rs#L239) |
+| `daily_cap_set` | — | `usdc`: i128 |  [src](../contracts/senior/src/lib.rs#L192) |
+| `deposited` | `investor`: Address | `tag`: Tag<br>`usdc`: i128<br>`shares`: i128 |  [src](../contracts/senior/src/lib.rs#L206) |
+| `fee_paid` | `union`: Address | `inr`: i128<br>`usdc`: i128<br>`index`: i128 |  [src](../contracts/senior/src/lib.rs#L230) |
+| `investor_set` | `investor`: Address | `accepted`: bool<br>`kyc_ref`: BytesN<32><br>`tag`: Tag |  [src](../contracts/senior/src/lib.rs#L197) |
+| `paused_set` | — | `paused`: bool |  [src](../contracts/senior/src/lib.rs#L182) |
+| `redeem_requested` | `investor`: Address | `shares`: i128 |  [src](../contracts/senior/src/lib.rs#L215) |
+| `redeemed` | `investor`: Address | `shares`: i128<br>`usdc`: i128 |  [src](../contracts/senior/src/lib.rs#L222) |
 
 ## account_deployer
 
