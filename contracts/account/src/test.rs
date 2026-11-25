@@ -4,7 +4,7 @@ use super::*;
 use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature as EcSig, SigningKey};
 use soroban_sdk::{
     auth::ContractContext, symbol_short, testutils::Address as _, testutils::Ledger, vec, Address,
-    BytesN, Env, IntoVal,
+    BytesN, Env, IntoVal, Symbol,
 };
 
 /// fx_pool as the account sees it: only its address matters (it locks, unlocks and takes).
@@ -893,4 +893,58 @@ fn a_move_waits_and_a_recovery_cancels_it() {
     finish(&t);
     assert_eq!(t.c.union(), Some(other));
     assert_eq!(t.c.pending_move(), None);
+}
+
+/// Leader OTP (24 Nov): a leader and the union's SMS key together open the same session as the
+/// member's QR; both must sign, the leader must be the union's, never while frozen.
+#[test]
+fn a_leader_with_the_sms_key_opens_the_same_session() {
+    use soroban_sdk::testutils::AuthorizedFunction;
+    let t = setup();
+    let ctx = call_on(&t.env, &t.fund_core);
+    let lead = Signature::Leader(t.leaders[0].clone());
+    // No SMS key named: refused.
+    assert_eq!(
+        t.c.try_start_session_by_sms(&t.leaders[0]),
+        Err(Ok(Error::NoSmsKey))
+    );
+    let sms = sms_on(&t);
+    // Not a leader of the union.
+    assert_eq!(
+        t.c.try_start_session_by_sms(&Address::generate(&t.env)),
+        Err(Ok(Error::NotLeaders))
+    );
+    let until = t.c.start_session_by_sms(&t.leaders[0]);
+    // Both signed: the leader and the SMS key (the node's, after the code matched).
+    let auths = t.env.auths();
+    assert_eq!(auths.len(), 2);
+    assert_eq!(auths[0].0, t.leaders[0]);
+    assert_eq!(auths[1].0, sms);
+    for (_, inv) in auths.iter() {
+        assert_eq!(
+            inv.function,
+            AuthorizedFunction::Contract((
+                t.acct.clone(),
+                Symbol::new(&t.env, "start_session_by_sms"),
+                (t.leaders[0].clone(),).into_val(&t.env),
+            ))
+        );
+    }
+    // The union's session length, and the leader signs as in a QR session, inside its list only.
+    assert_eq!(until, 1_800_000_300);
+    assert_eq!(t.c.session(), Some(until));
+    assert_eq!(check(&t, [1; 32], lead.clone(), &ctx), Ok(()));
+    assert_eq!(
+        check(&t, [1; 32], lead.clone(), &call_on(&t.env, &t.acct)),
+        Err(Ok(Error::OutsideSession))
+    );
+    t.env.ledger().set_timestamp(1_800_000_301);
+    assert_eq!(check(&t, [1; 32], lead, &ctx), Err(Ok(Error::NoSession)));
+    // A pending recovery freezes it: no session by SMS either.
+    let new = signer_of(&t.env, &SigningKey::from_slice(&[11u8; 32]).unwrap());
+    t.c.recover_by_sms(&new, &t.leaders[0]);
+    assert_eq!(
+        t.c.try_start_session_by_sms(&t.leaders[1]),
+        Err(Ok(Error::Frozen))
+    );
 }
