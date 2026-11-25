@@ -1,7 +1,7 @@
 # Threat model — Nila on Stellar mainnet
 
 SCF #45 Tranche 2, deliverable D (row 22). Covers the contracts at tag `mainnet-2026-11-06` and the keys and services
-around them. **State as read on mainnet, 19 Nov 2026** (Horizon and contract reads; how to repeat them: §6). Alert
+around them; §3.11 and the lane-B notes (25 Nov) cover `main` as it goes to mainnet with the lane-B upgrade. **State as read on mainnet, 19 Nov 2026** (Horizon and contract reads; how to repeat them: §6). Alert
 rules for every risk below: [`ALERTS.md`](ALERTS.md). Events: [`EVENT_SCHEMA.md`](EVENT_SCHEMA.md), kept by the
 indexer at [indexer.nila.land](https://indexer.nila.land/coverage).
 
@@ -155,24 +155,58 @@ Each: what an attacker gains, what stops or limits it in code, what is **not** c
 - **Indexer down:** events older than 7 days are lost to it; the gap is recorded and shown (`/coverage`). A24.
 - **Node down:** no attester, oracle, rate or top-ups; members' and leaders' own calls go to the chain directly.
 
+### 3.11 The guarantee pool (`senior`, lane B)
+
+What it is: [`SENIOR_GUARANTEE_POOL.md`](SENIOR_GUARANTEE_POOL.md). Senior's USDC never lends; it leaves the pool only
+by a loss cover or an investor's exit.
+
+- **Draining by covers.** *Gain:* with 3 of the 5 trust keys, USDC out of the pool to a union. *Limits:* a cover pays
+  at most the voucher loss fund_core booked for that union (`voucher_loss`, written only by a real default after
+  `maturityTs` + 21 days), at most the ceiling proposed and at most what the pool holds (`NoCover` otherwise); it waits
+  **48 h** after `propose_cover`, visible to all, and `cancel_cover` stops it; the USDC goes to the union's treasury
+  through fx_pool, never to an address of the trust's choosing. *Not covered:* the quorum acting together with a union
+  and the attester to make loans that are meant to default: the voucher loss would then be real on the books. The
+  limits are the attested acres (vouchers per acre), the 21-day wait and the alerts; the cap (0 until the audit) bounds
+  what there is to take.
+- **Running ahead of a loss.** An investor who sees a cover coming cannot leave first: `request_redeem` starts **14
+  days**, longer than the cover's 48 h, and the waiting shares are paid at the index of the day they are withdrawn, so
+  they carry every loss covered meanwhile. Exits are also held to the daily cap (**2,500 USDC**, `set_daily_cap`).
+- **Rate.** The fee and a cover convert rupees and USDC at fx_pool's rate: Reflector with its ±3 % breaker (§3.7). A
+  wrong rate moves value between senior and junior; a stopped rate stops the Collect that carries the fee and the cover.
+- **The fee.** Senior earns the voucher interest (`guarantee_fee`, 100 %); the trust can lower it
+  (`set_guarantee_fee`, an event). It is paid only out of an LP's Collect; with no Collect it waits in fund_core, owed.
+- **Who invests.** Only addresses the trust accepted after KYC (`set_investor`, 3-of-5) can deposit, up to the cap.
+- **More loss than the pool.** The rest stays booked as owed by senior (`voucher_loss`); junior does not carry it.
+- **Not covered:** no alert compares senior's USDC balance with its books yet (the rehearsal checks it; an A23-style
+  rule for `senior` is to add). No audit.
+- **Alerts:** A26 (cover proposed, paid or cancelled: page), A27 (voucher loss waiting), A20 (USDC out in a day,
+  covers and exits), A22 (cap, daily cap or fee share changed), A21 (pause).
+
 ## 4. Cap and timelock schedule
 
 | Control | Now (19 Nov) | Next step | Who |
 |---|---|---|---|
 | Upgrade delay | 48 h, all eight contracts | stays | — |
-| `max_scan` (leader swaps, USDC into treasury) | 10,000 nIN | ≥ the machine deposit, ₹4.4 lakh (N5, before the CCTP run) | trust 3-of-5 |
-| Daily cap, senior USDC out | none | `senior.daily_cap`, 2,500 USDC, admin `set_daily_cap`; before `senior.cap` rises (decided 19 Nov; lane B) | contracts developer; trust |
-| Daily cap, LP offers (`fx_pool.daily_cap`) | 2,500 USDC stored, not enforced since 30 Oct | enforced again on LP confirms (decided 19 Nov; lane B) | contracts developer; trust |
+| `max_scan` (leader swaps, USDC into treasury) | 10,000 nIN | ₹5 lakh (decided 23 Nov), by the trust's `call` after the lane-B upgrade | trust 3-of-5 |
+| Daily cap, senior USDC out | none | `senior.daily_cap`, 2,500 USDC, admin `set_daily_cap`: **built** (lane B), live after the upgrade | trust |
+| Daily cap, LP offers (`fx_pool.daily_cap`) | 2,500 USDC stored, not enforced since 30 Oct | enforced again on LP confirms: **built** (lane B), live after the upgrade | trust |
 | `senior.cap` | 0 | after the audit | trust |
-| `senior.guarantee_cap` | 0 | after nUSD audit | trust |
+| Loss cover (`senior.propose_cover` → `execute_cover`) | — (lane B) | 48 h delay, ≤ booked voucher loss and ≤ the pool (§3.11) | trust 3-of-5 |
 | Rate band (attester) | 5 % | stays | trust |
 | nIN issuer | **unlocked** (Ledger) | lock (master weight 0) after counsel X14 | issuer Ledger |
 
 ## 5. Open items
 
-1. Lock the nIN issuer (X14). 2. The daily caps: senior's own with `set_daily_cap`, fx_pool's enforced again for LPs (§3.8). 3. External audit of `fund_core` and `fx_pool` before any cap rises. 4. Dispute path
-(Q5). 5. Reflector (T2-B). 6. One union is checked by the state rules (A17, A23); a second union is added to the
-indexer's `INDEXER_UNIONS` when it is admitted.
+1. Lock the nIN issuer (X14).
+2. The daily caps: built in lane B (§3.8), live after the upgrade.
+3. External audit of `fund_core`, `fx_pool` and `senior` before any cap rises.
+4. Dispute path: built in lane B (union 2-of-3 on-chain).
+5. Reflector: built in lane B, live after the upgrade and `set_reflector`.
+6. One union is checked by the state rules (A17, A23); a second union is added to the indexer's `INDEXER_UNIONS` when
+   it is admitted.
+7. An alert that `senior`'s USDC equals its books (§3.11).
+8. **Leader OTP** (nila-soroban #29, not on mainnet): the union's SMS key would also open members' sessions
+   (`start_session_by_sms`), so §3.4 must cover it before it ships; who holds that key decides how much it protects.
 
 ## 6. How to check this file
 
