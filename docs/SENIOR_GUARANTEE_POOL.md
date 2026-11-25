@@ -1,7 +1,8 @@
 # Senior capital: the guarantee pool, end to end
 
 SCF #45 Tranche 2, deliverable A (row 2): the senior-capital entry path. Executive decisions of 23 Nov 2026;
-contracts `senior`, `fund_core` and `fx_pool` on branch `t2/contracts/lane-b`, live after the lane-B upgrade.
+contracts `senior`, `fund_core` and `fx_pool` on `main` (`01f6f00`), live after the lane-B upgrade.
+Approved as the row 2 deliverable (executive decision, 25 Nov 2026).
 
 **In one line:** senior investors put in USDC; it stays in the `senior` contract and stands behind the machine
 vouchers of the unions; it earns their interest and covers a service provider's loss when a farmer cannot pay.
